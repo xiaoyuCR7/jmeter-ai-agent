@@ -1533,3 +1533,58 @@ async def test_summary_keeps_tool_receipts_but_drops_the_step_narration():
     only_text = {'tool_statuses': [], 'final_text': 'ONLY_TEXT', 'message': 'ONLY_TEXT'}
     await agent._generate_final_response('task', [PlanStep(1, 'x', success=False, result=ToolResult(False, data=only_text))])
     assert 'ONLY_TEXT' in adapter.chat_calls[1][-1].content
+
+
+def _flaky_registry(calls, first_error):
+    async def create(value: str = '') -> dict:
+        calls.append(value)
+        if len(calls) == 1:
+            raise ValueError(first_error)
+        return {'project_id': 'p1'}
+    registry = ToolRegistry()
+    registry.register(Tool(name='create_project', description='create', handler=create,
+                           parameters={'type': 'object', 'properties': {'value': {'type': 'string'}}}))
+    return registry
+
+
+def _retry_responses():
+    return [ToolCallResponse(tool_calls=[ToolCallRequest('a', 'create_project', {'value': 'bad'})]),
+            ToolCallResponse(tool_calls=[ToolCallRequest('b', 'create_project', {'value': 'fixed'})]),
+            ToolCallResponse(text='project created')]
+
+
+@pytest.mark.asyncio
+async def test_an_input_error_the_model_fixes_in_the_same_step_does_not_fail_it():
+    # Seen with DeepSeek: variables sent as 1000/false, rejected, resent as strings, project created.
+    calls = []
+    agent = make_agent(FakeAdapter(tool_responses=_retry_responses()),
+                       _flaky_registry(calls, '1 validation error for ProjectEnvironment'))
+    agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'create project', 'create_project')])
+    result = await agent.run('task')
+    assert calls == ['bad', 'fixed'] and result.success and result.plan[0].success
+
+
+@pytest.mark.asyncio
+async def test_a_failure_that_is_not_an_input_error_still_fails_the_step():
+    calls = []
+    agent = make_agent(FakeAdapter(tool_responses=_retry_responses()),
+                       _flaky_registry(calls, 'unexpected crash while writing files'))
+    agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'create project', 'create_project')])
+    result = await agent.run('task')
+    assert calls == ['bad', 'fixed'] and not result.success
+
+
+@pytest.mark.asyncio
+async def test_project_variables_from_a_model_are_stored_as_strings(monkeypatch):
+    from app.services.ai.agent.tools import project as project_tools
+    from app.services.db_store import db_store
+    saved = {}
+    monkeypatch.setattr(db_store, 'create_project', AsyncMock())  # never touch the real database
+    monkeypatch.setattr(project_tools.store, 'set_project', lambda pid, project: saved.update(project=project))
+    monkeypatch.setattr(project_tools.os, 'makedirs', lambda *a, **k: None)
+    await project_tools.create_project(
+        'QuickPizza', variables={'maxCalories': 1000, 'vegetarian': False, 'excluded': [], 'name': 'x'},
+        headers={'X-Retry': 3})
+    project = saved['project']
+    assert project.environment.variables == {'maxCalories': '1000', 'vegetarian': 'false', 'excluded': '[]', 'name': 'x'}
+    assert project.environment.headers == {'X-Retry': '3'}

@@ -585,7 +585,7 @@ class BaseAgent:
         response_budget = 2000
         schema_cost = self.adapter.estimate_tokens(json.dumps(tools_schema, ensure_ascii=False, separators=(',', ':')))
         message_budget = min(self.adapter.max_tokens,
-            settings.AGENT_CONTEXT_TOKEN_BUDGET - schema_cost - response_budget - 256)
+            self.adapter.context_budget - schema_cost - response_budget - 256)
         if message_budget <= 0:
             return ToolResult(False, error='Tool schemas and reserved response exceed the context budget',
                               tool_name='react_loop', error_category=ErrorCategory.SYSTEM_ERROR)
@@ -653,7 +653,7 @@ class BaseAgent:
                 response = await self.adapter.chat_with_tools(
                     truncated, tools_schema,
                     temperature=0.2, max_tokens=response_budget,
-                    context_window_tokens=settings.AGENT_CONTEXT_TOKEN_BUDGET,
+                    context_window_tokens=self.adapter.context_budget,
                 )
             except ValueError as error:
                 return combined_result(False, str(error), ErrorCategory.SYSTEM_ERROR)
@@ -741,8 +741,15 @@ class BaseAgent:
         if not all_results:
             return combined_result(False, 'No tool was executed for a tool-required step', ErrorCategory.TOOL_ERROR)
 
-        # If all tool calls succeeded, the step succeeded
-        all_success = concluded and not self._cancel_flag and all(r.success for r in all_results)
+        # The step succeeded if every call succeeded, or a failed call was an input error the
+        # model then fixed: a later call of the same tool succeeded. Otherwise one corrected
+        # argument (e.g. 1000 instead of "1000") failed a step whose work was already done.
+        def recovered(index: int) -> bool:
+            failure = all_results[index]
+            return failure.error_category == ErrorCategory.INPUT_ERROR and any(
+                later.success and later.tool_name == failure.tool_name for later in all_results[index + 1:])
+        unrecovered = [i for i, r in enumerate(all_results) if not r.success and not recovered(i)]
+        all_success = concluded and not self._cancel_flag and not unrecovered
         last_error = next((r.error for r in reversed(all_results) if r.error), None)
         last_category = next(
             (r.error_category for r in reversed(all_results) if r.error_category), None

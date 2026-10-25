@@ -88,7 +88,10 @@ evidence_tools = [
     ),
     Tool(
         name='save_performance_requirements',
-        description='Save reviewed performance requirements for a project. Later reports judge every run against them.',
+        description=('Save reviewed performance requirements for a project. Later reports judge every run against them. '
+                     'The user approves this call in a confirmation dialog shown with your arguments, so never write '
+                     'that the user approved or authorized anything inside the requirements; assumptions only record '
+                     'how the document was interpreted or what it left out.'),
         parameters={'type': 'object', 'properties': {
             'project_id': {'type': 'string'}, 'requirements': _REQUIREMENTS_SCHEMA,
         }, 'required': ['project_id', 'requirements']},

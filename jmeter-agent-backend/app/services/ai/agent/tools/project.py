@@ -11,6 +11,11 @@ from app.services.ai.agent.tool_registry import Tool
 from app.services.storage import store
 
 
+def _as_strings(values: Optional[dict]) -> dict:
+    """JMeter headers and variables are strings; models often send 1000 or false."""
+    return {str(k): v if isinstance(v, str) else json.dumps(v, ensure_ascii=False) for k, v in (values or {}).items()}
+
+
 async def create_project(name: str, description: str = "", base_url: str = "", headers: dict = None, variables: dict = None) -> dict:
     """Create a new test project.
 
@@ -28,8 +33,8 @@ async def create_project(name: str, description: str = "", base_url: str = "", h
 
     env = ProjectEnvironment(
         base_url=base_url,
-        headers=headers or {},
-        variables=variables or {},
+        headers=_as_strings(headers),
+        variables=_as_strings(variables),
     )
 
     project = ProjectInfo(
@@ -151,9 +156,9 @@ async def update_project_env(
         if base_url is not None:
             proj.environment.base_url = base_url
         if headers is not None:
-            proj.environment.headers = headers
+            proj.environment.headers = _as_strings(headers)
         if variables is not None:
-            proj.environment.variables = variables
+            proj.environment.variables = _as_strings(variables)
         proj.updated_at = datetime.now()
         from app.services.db_store import db_store as _db
         env_data = proj.environment.model_dump()
