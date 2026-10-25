@@ -3,6 +3,8 @@ import xml.etree.ElementTree as ET
 from xml.dom import minidom
 from typing import Any, Dict
 
+from app.services.jmeter.jmx_parser import ROOT_ATTRS_KEY, SOURCE_KEY
+
 THREAD_GROUP_CLASSES = {"ThreadGroup", "SetupThreadGroup", "PostThreadGroup"}
 HTTP_SAMPLER_CLASSES = {"HTTPSamplerProxy", "HTTPSampler"}
 
@@ -20,12 +22,23 @@ LISTENER_TYPE_LABELS = {
 }
 
 
+# Properties the parser turns into simpler editing fields, and the fields each one comes from.
+DERIVED_PROPS = {
+    "ThreadGroup.main_controller": ("loops",),
+    "HTTPsampler.Arguments": ("__body_data", "__http_params", "HTTPSampler.postBodyRaw"),
+}
+DERIVED_FIELDS = {"loops", "__body_data", "__http_params"}
+_MISSING = object()
+
+
 def build_jmx(tree: Dict[str, Any]) -> str:
     """将 JSON 树构建为 JMX XML 字符串"""
     root = ET.Element("jmeterTestPlan")
     root.set("version", "1.2")
     root.set("properties", "5.0")
     root.set("jmeter", "5.6.3")
+    for key, value in (tree.get("properties", {}).get(ROOT_ATTRS_KEY) or {}).items():
+        root.set(key, value)
 
     hash_tree = ET.SubElement(root, "hashTree")
     _build_node(hash_tree, tree)
@@ -45,29 +58,23 @@ def _build_node(parent_hash_tree: ET.Element, node: Dict[str, Any]) -> None:
     testname = node.get("testname", "")
     enabled = "true" if node.get("enabled", True) else "false"
 
+    properties = dict(node.get("properties", {}))
+    source = properties.pop(SOURCE_KEY, None)
+    if not (isinstance(source, dict) and isinstance(source.get("props"), list)
+            and isinstance(source.get("snapshot"), dict)):
+        source = None
+    listener_type = properties.pop("_listener_type", None) if testclass == "ResultCollector" else None
+
     elem = ET.SubElement(parent_hash_tree, testclass)
-    elem.set("guiclass", _get_guiclass(testclass, node))
+    elem.set("guiclass", listener_type or (source and source.get("guiclass")) or _get_guiclass(testclass, node))
     elem.set("testclass", testclass)
     elem.set("testname", testname)
     elem.set("enabled", enabled)
 
-    properties = dict(node.get("properties", {}))
-
-    if testclass in THREAD_GROUP_CLASSES:
-        _build_thread_group_properties(elem, properties)
-
-    if testclass in HTTP_SAMPLER_CLASSES:
-        _build_http_sampler_properties(elem, properties)
-
-    if testclass == "ResultCollector":
-        listener_type = properties.pop("_listener_type", None)
-        if listener_type:
-            elem.set("guiclass", listener_type)
-
-    for prop_name, prop_value in properties.items():
-        if prop_name.startswith("__"):
-            continue
-        _build_property(elem, prop_name, prop_value)
+    if source:
+        _build_from_source(elem, testclass, properties, source)
+    else:
+        _build_fresh(elem, testclass, properties)
 
     children = node.get("children", [])
     if children:
@@ -76,6 +83,59 @@ def _build_node(parent_hash_tree: ET.Element, node: Dict[str, Any]) -> None:
             _build_node(child_hash_tree, child)
     else:
         ET.SubElement(parent_hash_tree, "hashTree")
+
+
+def _build_fresh(elem: ET.Element, testclass: str, properties: Dict[str, Any]) -> None:
+    if testclass in THREAD_GROUP_CLASSES:
+        _build_thread_group_properties(elem, properties)
+
+    if testclass in HTTP_SAMPLER_CLASSES:
+        _build_http_sampler_properties(elem, properties)
+
+    for prop_name, prop_value in properties.items():
+        if prop_name.startswith("__"):
+            continue
+        _build_property(elem, prop_name, prop_value)
+
+
+def _build_from_source(elem: ET.Element, testclass: str, properties: Dict[str, Any], source: Dict[str, Any]) -> None:
+    """Write each property back from the original XML unless it was edited, so
+    attributes and types the JSON form cannot express (guiclass, intProp, objProp...) survive."""
+    snapshot = source["snapshot"]
+
+    def unchanged(key: str) -> bool:
+        return properties.get(key, _MISSING) == snapshot.get(key, _MISSING)
+
+    def rebuild_derived(name: str) -> None:
+        if name == "ThreadGroup.main_controller" and testclass in THREAD_GROUP_CLASSES:
+            _build_thread_group_properties(elem, dict(properties))
+        elif name == "HTTPsampler.Arguments" and testclass in HTTP_SAMPLER_CLASSES:
+            _build_http_sampler_properties(elem, dict(properties))
+
+    written = set()
+    for name, xml in source["props"]:
+        if name in DERIVED_PROPS:
+            written.add(name)
+            if all(unchanged(k) for k in DERIVED_PROPS[name]):
+                elem.append(ET.fromstring(xml))
+            else:
+                rebuild_derived(name)
+        elif not name or (name in properties and unchanged(name)):
+            elem.append(ET.fromstring(xml))
+            written.add(name)
+        elif name in properties:
+            _build_property(elem, name, properties[name])
+            written.add(name)
+        # A property the user deleted is simply not written.
+
+    for name, fields in DERIVED_PROPS.items():
+        if name not in written and not all(unchanged(k) for k in fields):
+            rebuild_derived(name)
+
+    for name, value in properties.items():
+        if name in written or name.startswith("__") or name in DERIVED_FIELDS:
+            continue
+        _build_property(elem, name, value)
 
 
 def _build_thread_group_properties(elem: ET.Element, properties: Dict[str, Any]) -> None:

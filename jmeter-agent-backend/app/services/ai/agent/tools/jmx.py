@@ -7,7 +7,7 @@ from typing import Optional
 from app.core.config import settings
 from app.services.ai.agent.tool_registry import Tool
 from app.services.jmeter.jmx_generator import JMXGenerator
-from app.services.jmeter.jmx_parser import parse_jmx
+from app.services.jmeter.jmx_parser import parse_jmx, strip_source
 from app.services.jmeter.jmx_builder import build_jmx
 from app.models.schemas import (
     APIEndpoint, TestConfig, ExtractionRule, VariableBinding, ExtractionType
@@ -134,7 +134,7 @@ async def parse_jmx_tree(jmx_path: str) -> dict:
         return {"error": f"JMX file not found: {jmx_path}"}
 
     try:
-        tree = parse_jmx(jmx_path)
+        tree = strip_source(parse_jmx(jmx_path))
         return {"tree": tree}
     except Exception as e:
         return {"error": str(e)}

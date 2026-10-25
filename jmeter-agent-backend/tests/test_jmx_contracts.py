@@ -233,3 +233,110 @@ def test_selfheal_reads_and_updates_dict_extractor_properties():
     assert agent._find_extractions(tree)[0]['expression'] == '$.token'
     agent._apply_fixes(tree, [ExtractionFix('$.token', '$.data.token', 'token', 1, 'json_path')])
     assert tree['properties']['JSONPostProcessor.jsonPathExprs'] == '$.data.token'
+
+
+EDITOR_FIXTURE = '''<?xml version="1.0" encoding="UTF-8"?>
+<jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.2">
+  <hashTree>
+    <TestPlan guiclass="TestPlanGui" testclass="TestPlan" testname="Plan" enabled="true">
+      <elementProp name="TestPlan.user_defined_variables" elementType="Arguments" guiclass="ArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
+        <collectionProp name="Arguments.arguments"/>
+      </elementProp>
+    </TestPlan>
+    <hashTree>
+      <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup" testname="Users" enabled="true">
+        <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
+        <elementProp name="ThreadGroup.main_controller" elementType="LoopController" guiclass="LoopControlPanel" testclass="LoopController" testname="Loop Controller" enabled="true">
+          <boolProp name="LoopController.continue_forever">false</boolProp>
+          <intProp name="LoopController.loops">-1</intProp>
+        </elementProp>
+        <stringProp name="ThreadGroup.num_threads">10</stringProp>
+      </ThreadGroup>
+      <hashTree>
+        <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy" testname="GET /items" enabled="true">
+          <elementProp name="HTTPsampler.Arguments" elementType="Arguments" guiclass="HTTPArgumentsPanel" testclass="Arguments" testname="User Defined Variables" enabled="true">
+            <collectionProp name="Arguments.arguments"/>
+          </elementProp>
+          <stringProp name="HTTPSampler.path">/items</stringProp>
+        </HTTPSamplerProxy>
+        <hashTree>
+          <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion" testname="200" enabled="true">
+            <collectionProp name="Asserion.test_strings">
+              <stringProp name="49586">200</stringProp>
+            </collectionProp>
+            <intProp name="Assertion.test_type">8</intProp>
+          </ResponseAssertion>
+          <hashTree/>
+        </hashTree>
+        <ResultCollector guiclass="SummaryReport" testclass="ResultCollector" testname="Summary" enabled="true">
+          <objProp>
+            <name>saveConfig</name>
+            <value class="SampleSaveConfiguration"><time>true</time></value>
+          </objProp>
+        </ResultCollector>
+        <hashTree/>
+      </hashTree>
+    </hashTree>
+  </hashTree>
+</jmeterTestPlan>
+'''
+
+
+def _canonical(xml):
+    def walk(e):
+        return (e.tag, sorted(e.attrib.items()), (e.text or '').strip(), [walk(c) for c in e])
+    return walk(ET.fromstring(xml.encode()))
+
+
+def test_editor_roundtrip_keeps_unedited_xml_unchanged():
+    import json
+    from app.services.jmeter.jmx_builder import build_jmx
+    # Through JSON, the way the editor sends the tree back.
+    tree = json.loads(json.dumps(parse_jmx(EDITOR_FIXTURE)))
+    assert _canonical(build_jmx(tree)) == _canonical(EDITOR_FIXTURE)
+
+
+def test_editor_roundtrip_rewrites_only_what_was_edited():
+    from app.services.jmeter.jmx_builder import build_jmx
+    tree = parse_jmx(EDITOR_FIXTURE)
+    group = tree['children'][0]
+    group['properties']['ThreadGroup.num_threads'] = '25'
+    group['properties']['loops'] = 3
+    sampler = group['children'][0]
+    sampler['properties']['__body_data'] = '{"a": 1}'
+    sampler['properties']['HTTPSampler.postBodyRaw'] = True
+    root = ET.fromstring(build_jmx(tree).encode())
+
+    tg = root.find('.//ThreadGroup')
+    assert tg.find('stringProp[@name="ThreadGroup.num_threads"]').text == '25'
+    assert tg.find('stringProp[@name="ThreadGroup.on_sample_error"]').text == 'continue'
+    assert tg.find('.//*[@name="LoopController.loops"]').text == '3'
+    body = root.find('.//HTTPSamplerProxy//elementProp[@elementType="HTTPArgument"]/stringProp[@name="Argument.value"]')
+    assert body.text == '{"a": 1}'
+    assert root.find('.//ResponseAssertion/intProp[@name="Assertion.test_type"]').text == '8'
+    collector = root.find('.//ResultCollector')
+    assert collector.get('guiclass') == 'SummaryReport'
+    assert collector.find('objProp/value/time').text == 'true'
+    assert root.get('jmeter') == '5.6.2'
+
+
+def test_editor_roundtrip_drops_deleted_property_and_adds_new_one():
+    from app.services.jmeter.jmx_builder import build_jmx
+    tree = parse_jmx(EDITOR_FIXTURE)
+    group = tree['children'][0]
+    del group['properties']['ThreadGroup.on_sample_error']
+    group['properties']['ThreadGroup.ramp_time'] = '30'
+    tg = ET.fromstring(build_jmx(tree).encode()).find('.//ThreadGroup')
+    assert tg.find('stringProp[@name="ThreadGroup.on_sample_error"]') is None
+    assert tg.find('stringProp[@name="ThreadGroup.ramp_time"]').text == '30'
+
+
+@pytest.mark.asyncio
+async def test_model_facing_tree_has_no_roundtrip_bookkeeping(tmp_path, monkeypatch):
+    from app.services.ai.agent.tools import jmx as jmx_tools
+    path = tmp_path / 'plan.jmx'
+    path.write_text(EDITOR_FIXTURE, encoding='utf-8')
+    monkeypatch.setattr('app.core.config.safe_path', lambda p: p)
+    result = await jmx_tools.parse_jmx_tree(str(path))
+    assert not any(key.startswith('__') and key not in ('__body_data', '__http_params')
+                   for node in walk(result['tree']) for key in node['properties'])

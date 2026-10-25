@@ -1,4 +1,5 @@
 """JMX XML 解析器：将 .jmx 文件解析为 JSON 树结构"""
+import copy
 import os
 import xml.etree.ElementTree as ET
 import uuid
@@ -41,7 +42,37 @@ def parse_jmx(source: str) -> Dict[str, Any]:
     if not children:
         raise ValueError("Invalid JMX file: empty test plan")
 
-    return children[0]
+    plan = children[0]
+    plan["properties"][ROOT_ATTRS_KEY] = dict(root.attrib)
+    return plan
+
+
+# Hidden keys (the builder skips "__" properties) that let build_jmx write
+# untouched properties back byte-for-byte instead of re-deriving them.
+SOURCE_KEY = "__source"
+ROOT_ATTRS_KEY = "__root_attrs"
+
+
+def strip_source(node: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop the round-trip bookkeeping, e.g. before showing a tree to a model."""
+    props = node.get("properties", {})
+    props.pop(SOURCE_KEY, None)
+    props.pop(ROOT_ATTRS_KEY, None)
+    for child in node.get("children", []):
+        strip_source(child)
+    return node
+
+
+def _raw_xml(elem: ET.Element) -> str:
+    clone = copy.deepcopy(elem)
+    clone.tail = None
+    for e in clone.iter():
+        # Drop indentation so the builder's pretty-printer can re-indent cleanly.
+        if len(e) and e.text is not None and not e.text.strip():
+            e.text = None
+        if e is not clone and e.tail is not None and not e.tail.strip():
+            e.tail = None
+    return ET.tostring(clone, encoding="unicode")
 
 
 def _parse_hash_tree(hash_tree: ET.Element) -> List[Dict[str, Any]]:
@@ -85,12 +116,19 @@ def _parse_element(elem: ET.Element) -> Dict[str, Any]:
         "children": [],
     }
 
+    raw = []
     for child in elem:
         prop_name, prop_value = _parse_property(child)
         if prop_name:
             node["properties"][prop_name] = prop_value
+        raw.append([prop_name, _raw_xml(child)])
 
     _post_process_node(node, elem)
+    node["properties"][SOURCE_KEY] = {
+        "guiclass": elem.get("guiclass", ""),
+        "props": raw,
+        "snapshot": copy.deepcopy(node["properties"]),
+    }
     return node
 
 
