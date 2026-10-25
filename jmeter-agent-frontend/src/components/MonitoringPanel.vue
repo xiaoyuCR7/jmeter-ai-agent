@@ -47,7 +47,7 @@
       </el-table-column>
       <el-table-column width="50">
         <template #default="{ $index }">
-          <el-button text type="danger" size="small" @click="draft.queries.splice($index, 1); testResults = []"><el-icon><Delete /></el-icon></el-button>
+          <el-button text type="danger" size="small" @click="draft.queries.splice($index, 1); probe = null"><el-icon><Delete /></el-icon></el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -55,8 +55,16 @@
       <el-icon><Plus /></el-icon> {{ L('自定义指标', 'Custom metric') }}
     </el-button>
 
+    <el-alert v-if="probe" class="probe" :closable="false" show-icon
+      :type="!probe.reachable ? 'error' : probeIssues ? 'warning' : 'success'"
+      :title="!probe.reachable ? L('连不上 Prometheus', 'Cannot reach Prometheus')
+        : L(`已连接 Prometheus ${probe.version || ''}`, `Connected to Prometheus ${probe.version || ''}`)"
+      :description="!probe.reachable ? `${probe.error}。${L('检查地址和端口，并确认本机能访问它。', 'Check the address and port, and that this machine can reach it.')}`
+        : probeIssues ? L(`${probeIssues} 个指标失败或最近 5 分钟没有数据：查询失败看 PromQL 语法；无数据一般是标签不对或没装对应的 exporter。`,
+          `${probeIssues} metrics failed or had no data in the last 5 minutes. A failure means bad PromQL; no data usually means wrong labels or a missing exporter.`) : ''" />
+
     <div class="actions">
-      <el-button :loading="testing" :disabled="!canSubmit" @click="test">{{ L('测试连接', 'Test connection') }}</el-button>
+      <el-button :loading="testing" :disabled="!canTest" @click="test">{{ L('测试连接', 'Test connection') }}</el-button>
       <el-button type="primary" :loading="saving" :disabled="!dirty || !canSubmit" @click="save">{{ L('保存', 'Save') }}</el-button>
       <el-button v-if="hasSaved" type="danger" text @click="remove">{{ L('停用监控', 'Disable monitoring') }}</el-button>
     </div>
@@ -67,7 +75,7 @@
 import { computed, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete, Plus } from '@element-plus/icons-vue'
-import { api, type MetricQuery, type MonitoringConfig } from '@/api'
+import { api, type MetricQuery, type MonitoringConfig, type MonitoringTestResult } from '@/api'
 import { useI18n } from '@/composables/useI18n'
 
 const props = defineProps<{ projectId: string }>()
@@ -83,9 +91,12 @@ const hasSaved = ref(false)
 const dirty = computed(() => JSON.stringify(draft.value) !== savedJson.value)
 const canSubmit = computed(() => /^https?:\/\/.+/.test(draft.value.prometheus_url.trim())
   && draft.value.queries.length > 0 && draft.value.queries.every(q => q.name.trim() && q.promql.trim()))
+const canTest = computed(() => /^https?:\/\/.+/.test(draft.value.prometheus_url.trim()))
 const testing = ref(false)
 const saving = ref(false)
-const testResults = ref<{ name: string; series: number; error: string | null }[]>([])
+const probe = ref<MonitoringTestResult | null>(null)
+const testResults = computed(() => probe.value?.queries || [])
+const probeIssues = computed(() => testResults.value.filter(r => r.error || !r.series).length)
 
 async function load() {
   const id = props.projectId
@@ -95,7 +106,7 @@ async function load() {
     draft.value = res.data ? { ...empty(), ...res.data } : empty()
     hasSaved.value = !!res.data
     savedJson.value = JSON.stringify(draft.value)
-    testResults.value = []
+    probe.value = null
   } catch {
     ElMessage.error(L('读取监控配置失败', 'Failed to load monitoring settings'))
   }
@@ -108,16 +119,13 @@ function addPreset(key: string) {
   const existing = new Set(draft.value.queries.map(q => q.promql))
   const added = (presets.value[key] || []).filter(q => !existing.has(q.promql))
   draft.value.queries.push(...added.map(q => ({ ...q })))
-  testResults.value = []
+  probe.value = null
 }
 
 async function test() {
   testing.value = true
   try {
-    testResults.value = (await api.testMonitoring(props.projectId, draft.value)).data
-    const failed = testResults.value.filter(r => r.error).length
-    if (failed) ElMessage.warning(L(`${failed} 个指标查询失败`, `${failed} queries failed`))
-    else ElMessage.success(L('连接正常', 'Connection OK'))
+    probe.value = (await api.testMonitoring(props.projectId, draft.value)).data
   } catch (e: any) {
     ElMessage.error(e.response?.data?.detail?.[0]?.msg || e.response?.data?.detail || L('测试失败', 'Test failed'))
   } finally {
@@ -160,5 +168,6 @@ async function remove() {
 .mono :deep(input) { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
 .num { width: 100%; }
 .add { margin-top: 8px; }
+.probe { margin-top: 16px; }
 .actions { margin-top: 16px; display: flex; gap: 8px; flex-wrap: wrap; }
 </style>

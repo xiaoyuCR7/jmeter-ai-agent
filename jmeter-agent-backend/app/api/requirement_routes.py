@@ -82,12 +82,17 @@ async def delete_monitoring(project_id: str):
 
 @router.post("/projects/{project_id}/monitoring/test")
 async def test_monitoring(project_id: str, body: server_metrics.MonitoringConfig):
-    """Run each query over the last five minutes so the user can check the config before saving."""
+    """Check the URL answers, then run each query over the last five minutes, before the user saves."""
     _require_project(project_id)
     from datetime import datetime, timedelta
-    end = datetime.now() - timedelta(seconds=60)
-    raw = await server_metrics.collect(body, end - timedelta(minutes=3), end)
-    return [{"name": m["name"], "series": len(m["series"]), "error": m.get("error")} for m in raw["metrics"]]
+    result = await server_metrics.probe(body.prometheus_url)
+    result["queries"] = []
+    if result["reachable"] and body.queries:
+        end = datetime.now() - timedelta(seconds=60)
+        raw = await server_metrics.collect(body, end - timedelta(minutes=3), end)
+        result["queries"] = [{"name": m["name"], "series": len(m["series"]), "error": m.get("error")}
+                             for m in raw["metrics"]]
+    return result
 
 
 @router.post("/executions/{execution_id}/server-metrics/refresh")

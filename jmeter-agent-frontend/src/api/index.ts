@@ -127,10 +127,18 @@ export interface ServerMetricRow {
   above_saturation_pct?: number | null
   corr_response_time?: number | null
   error?: string
+  no_data?: boolean
+}
+
+export interface MonitoringTestResult {
+  reachable: boolean
+  version: string | null
+  error: string | null
+  queries: { name: string; series: number; error: string | null }[]
 }
 
 export interface ServerMetricsEvidence {
-  status: 'ok' | 'not_configured' | 'error'
+  status: 'ok' | 'not_configured' | 'error' | 'no_data'
   error?: string
   collected_at?: string
   prometheus_url?: string
@@ -144,6 +152,7 @@ export interface HistoryComparison {
   execution_id?: string | null
   baseline_id?: number
   verdict: 'stable' | 'regression' | 'improvement' | 'mixed' | 'unknown'
+  threshold_pct?: number
   summary: string
   deltas: { metric: string; baseline: number; target: number; delta_pct: number | null; direction: string; is_regression: boolean }[]
   transactions: { label: string; metric: string; metric_title: string; baseline: number; target: number; delta_pct: number | null; is_regression: boolean }[]
@@ -266,7 +275,7 @@ export const api = {
     instance.put<MonitoringConfig>(`/projects/${encodeURIComponent(projectId)}/monitoring`, data),
   deleteMonitoring: (projectId: string) => instance.delete(`/projects/${encodeURIComponent(projectId)}/monitoring`),
   testMonitoring: (projectId: string, data: MonitoringConfig) =>
-    instance.post<{ name: string; series: number; error: string | null }[]>(`/projects/${encodeURIComponent(projectId)}/monitoring/test`, data),
+    instance.post<MonitoringTestResult>(`/projects/${encodeURIComponent(projectId)}/monitoring/test`, data),
   promoteBaseline: (executionId: string) => instance.post(`/executions/${encodeURIComponent(executionId)}/promote-baseline`),
   refreshServerMetrics: (executionId: string) =>
     instance.post<ExecutionEvidence>(`/executions/${encodeURIComponent(executionId)}/server-metrics/refresh`),

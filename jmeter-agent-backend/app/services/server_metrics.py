@@ -113,6 +113,13 @@ async def delete_config(project_id: str) -> bool:
 
 # ── Collection ───────────────────────────────────────────────
 
+def _describe(error: Exception) -> str:
+    """One readable line; httpx status errors otherwise append a documentation link."""
+    if isinstance(error, httpx.HTTPStatusError):
+        return f'HTTP {error.response.status_code} {error.response.reason_phrase} from {error.request.url}'[:300]
+    return f'{type(error).__name__}: {error}'[:300]
+
+
 def _series_label(labels: dict) -> str:
     shown = {k: v for k, v in labels.items() if k != '__name__'}
     return ','.join(f'{k}={v}' for k, v in sorted(shown.items())) or 'all'
@@ -155,10 +162,24 @@ async def collect(config: MonitoringConfig, start: datetime, end: datetime, *, t
                                                      window_start, window_end, step)
             except Exception as error:
                 entry['series'] = []
-                entry['error'] = f'{type(error).__name__}: {error}'[:300]
+                entry['error'] = _describe(error)
             metrics.append(entry)
     return {'collected_at': datetime.now().isoformat(timespec='seconds'), 'prometheus_url': config.prometheus_url,
             'test_start': start.timestamp(), 'test_end': end.timestamp(), 'step': step, 'metrics': metrics}
+
+
+async def probe(prometheus_url: str, *, transport=None) -> dict:
+    """Check that the URL answers like Prometheus, separately from whether each query matches anything."""
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0), transport=transport, follow_redirects=False) as client:
+            response = await client.get(f'{prometheus_url}/api/v1/status/buildinfo')
+            response.raise_for_status()
+            body = response.json()
+        if body.get('status') != 'success':
+            raise ValueError('response is not from the Prometheus HTTP API')
+        return {'reachable': True, 'version': body.get('data', {}).get('version'), 'error': None}
+    except Exception as error:
+        return {'reachable': False, 'version': None, 'error': _describe(error)}
 
 
 def load_cached(report_dir: Optional[str]) -> Optional[dict]:
@@ -223,6 +244,10 @@ def analyze(raw: dict, summary: DetailedTestSummary) -> dict:
         if metric.get('error'):
             rows.append({'name': metric['name'], 'unit': metric.get('unit', ''), 'error': metric['error']})
             continue
+        if not any(test_start <= t <= test_end for series in metric.get('series', []) for t, _ in series['points']):
+            # The query ran but matched nothing in the window: wrong labels, exporter missing, or past retention.
+            rows.append({'name': metric['name'], 'unit': metric.get('unit', ''), 'no_data': True})
+            continue
         for series in metric.get('series', []):
             inside = [(t, v) for t, v in series['points'] if test_start <= t <= test_end]
             if not inside:
@@ -278,9 +303,11 @@ async def evidence_for(execution, summary: DetailedTestSummary) -> dict:
         except OSError as error:
             logger.warning('Could not cache server metrics: %s', error)
     result = analyze(raw, summary)
-    if all(row.get('error') for row in result['metrics']) and result['metrics']:
+    if result['metrics'] and all(row.get('error') for row in result['metrics']):
         result['status'] = 'error'
         result['error'] = result['metrics'][0]['error']
+    elif not any('avg' in row for row in result['metrics']):
+        result['status'] = 'no_data'
     return result
 
 
@@ -290,10 +317,16 @@ def format_for_prompt(evidence: Optional[dict]) -> str:
                 '并建议需要采集的服务端指标（CPU、内存、GC、连接池、慢查询等）。')
     if evidence.get('status') == 'error':
         return f"## 服务端指标\n采集失败：{evidence.get('error')}。不要编造服务端数据。"
-    lines = ['## 服务端指标（Prometheus，压测时间窗内，确定性计算）']
+    if evidence.get('status') == 'no_data':
+        return ('## 服务端指标\nPrometheus 可访问，但压测时间窗内所有查询都没有数据。'
+                '根因只能以【假设】形式给出，不要编造服务端数据。')
+    lines =['## 服务端指标（Prometheus，压测时间窗内，确定性计算）']
     for row in evidence.get('metrics', []):
         if row.get('error'):
             lines.append(f"- {row['name']}：采集失败（{row['error']}）")
+            continue
+        if row.get('no_data'):
+            lines.append(f"- {row['name']}：压测时间窗内无数据")
             continue
         unit = row['unit']
         extra = []

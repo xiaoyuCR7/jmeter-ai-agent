@@ -52,7 +52,7 @@ async def test_collect_queries_run_window_with_margin_and_records_failures():
     assert raw['prometheus_url'] == 'http://prom.local:9090'
     assert [p[1] for p in raw['metrics'][0]['series'][0]['points']] == [10.0, 20.0]  # NaN/garbage dropped
     assert raw['metrics'][0]['series'][0]['labels'] == 'instance=app-1:9100'
-    assert 'HTTPStatusError' in raw['metrics'][1]['error']
+    assert raw['metrics'][1]['error'].startswith('HTTP 400 Bad Request from http://prom.local:9090/')
 
 
 @pytest.mark.asyncio
@@ -128,3 +128,43 @@ def test_prompt_lists_values_saturation_and_correlation():
         {'name': 'CPU', 'unit': '%', 'series': 'instance=a', 'avg': 70, 'p95': 95, 'max': 99, 'peak_at_s': 120,
          'saturation': 85, 'above_saturation_pct': 40.0, 'corr_response_time': 0.88}]})
     assert '峰值 99%（第 120s）' in text and '40.0%' in text and '0.88' in text and 'CPU 饱和' in text
+
+
+def test_queries_without_points_in_the_window_are_reported_as_no_data():
+    raw = {'test_start': START.timestamp(), 'test_end': END.timestamp(), 'metrics': [
+        {'name': 'CPU', 'unit': '%', 'series': []},
+        {'name': 'Mem', 'unit': '%', 'series': [{'labels': 'all', 'points': [[END.timestamp() + 30, 50.0]]}]}]}
+    rows = sm.analyze(raw, summary_with_timeline([100]))['metrics']
+    assert rows == [{'name': 'CPU', 'unit': '%', 'no_data': True}, {'name': 'Mem', 'unit': '%', 'no_data': True}]
+    assert '无数据' in sm.format_for_prompt({'status': 'ok', 'metrics': rows})
+
+
+@pytest.mark.asyncio
+async def test_evidence_says_no_data_when_nothing_matched(tmp_path, monkeypatch):
+    async def fake_config(project_id):
+        return config(sm.MetricQuery(name='CPU', promql='cpu'))
+    monkeypatch.setattr(sm, 'get_config', fake_config)
+    real_collect = sm.collect
+
+    async def collect(cfg, start, end):
+        return await real_collect(cfg, start, end, transport=prometheus(lambda q: []))
+    monkeypatch.setattr(sm, 'collect', collect)
+    execution = SimpleNamespace(project_id='p', start_time=START, end_time=END, report_dir=str(tmp_path), id='run')
+    evidence = await sm.evidence_for(execution, summary_with_timeline([100]))
+    assert evidence['status'] == 'no_data'
+    assert '【假设】' in sm.format_for_prompt(evidence)
+
+
+@pytest.mark.asyncio
+async def test_probe_separates_unreachable_from_reachable():
+    def handler(request):
+        assert request.url.path == '/api/v1/status/buildinfo'
+        return httpx.Response(200, json={'status': 'success', 'data': {'version': '2.53.0'}})
+    ok = await sm.probe('http://prom.local:9090', transport=httpx.MockTransport(handler))
+    assert ok == {'reachable': True, 'version': '2.53.0', 'error': None}
+    not_prometheus = await sm.probe('http://prom.local:9090', transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json={'hello': 'world'})))
+    assert not_prometheus['reachable'] is False and 'Prometheus' in not_prometheus['error']
+    down = await sm.probe('http://prom.local:9090', transport=httpx.MockTransport(
+        lambda request: (_ for _ in ()).throw(httpx.ConnectError('refused'))))
+    assert down['reachable'] is False and 'ConnectError' in down['error']
