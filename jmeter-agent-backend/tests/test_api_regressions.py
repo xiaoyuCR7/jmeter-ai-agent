@@ -192,3 +192,45 @@ async def test_saving_tree_with_new_name_persists_the_rename(monkeypatch, tmp_pa
     assert [p.name for p in persisted] == ['New']
     await routes.update_jmx_tree(plan.id, UpdateJMXTreeRequest(tree=tree))
     assert len(persisted) == 1
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['plan.jmx']  # no .backup or .tmp left behind
+
+
+@pytest.mark.asyncio
+async def test_failed_tree_save_keeps_the_old_file(monkeypatch, tmp_path):
+    from app.api import routes
+    from app.models.schemas import TestConfig, TestPlanInfo, UpdateJMXTreeRequest
+    jmx = tmp_path / 'plan.jmx'
+    jmx.write_text('<jmeterTestPlan><hashTree><TestPlan testclass="TestPlan" testname="P"/><hashTree/></hashTree></jmeterTestPlan>',
+                   encoding='utf-8')
+    original = jmx.read_bytes()
+    plan = TestPlanInfo(id='abcd1234', project_id='default', name='Old', jmx_path=str(jmx),
+                        created_at=datetime.now(), test_config=TestConfig(test_type='baseline'), endpoints_count=1)
+    monkeypatch.setitem(routes.store.test_plans, plan.id, plan)
+    def broken_replace(src, dst):
+        raise OSError('disk full')
+    monkeypatch.setattr(routes.os, 'replace', broken_replace)
+    with pytest.raises(HTTPException):
+        await routes.update_jmx_tree(plan.id, UpdateJMXTreeRequest(tree=routes.parse_jmx(str(jmx))))
+    assert jmx.read_bytes() == original
+    assert sorted(p.name for p in tmp_path.iterdir()) == ['plan.jmx']
+
+
+@pytest.mark.asyncio
+async def test_analysis_records_the_requirement_verdict_it_was_written_against(monkeypatch, tmp_path):
+    from app.api import routes
+    from app.models.schemas import DetailedTestSummary, ReportAnalysis
+    from app.services import requirements as requirement_service
+    from app.services.ai.rag.archiver import rag_archiver
+    import app.services.notifications as notifications
+    analysis = ReportAnalysis(overall_assessment='ok', conclusion='ok')
+    monkeypatch.setattr(routes, 'TestAnalyzer', lambda **kwargs: SimpleNamespace(analyze=AsyncMock(return_value=analysis)))
+    monkeypatch.setattr(rag_archiver, 'archive_raw_report', lambda **kwargs: None)
+    monkeypatch.setattr(notifications, 'notify_test_completed', AsyncMock())
+    monkeypatch.setattr(requirement_service, 'get_requirements', AsyncMock(return_value=None))
+    summary = DetailedTestSummary(total_requests=10, avg_response_time=100, min_response_time=1, max_response_time=200,
+                                  error_rate=0, throughput=5, received_bytes_per_sec=1, sent_bytes_per_sec=1)
+    execution = SimpleNamespace(id='run', project_id='p', status=routes.TestExecutionStatus.COMPLETED, summary=summary,
+        test_plan_id='plan', report_dir=str(tmp_path), error_message=None, log_path=None,
+        report_status='running', report_error=None)
+    await routes._postprocess_web_execution(execution, {})
+    assert execution.ai_analysis.requirements_verdict == {'verdict': 'none', 'passed': 0, 'failed': 0, 'missing': 0}

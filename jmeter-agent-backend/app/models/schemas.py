@@ -302,6 +302,8 @@ class ReportAnalysis(BaseModel):
     improvement_plan: List[str] = Field(default_factory=list, description="具体的分步改进计划")
     risk_areas: List[str] = Field(default_factory=list, description="风险区域")
     conclusion: str = Field(..., description="最终结论")
+    # Requirement verdict when the analysis was written, so the report can flag it once requirements change.
+    requirements_verdict: Optional[Dict[str, Any]] = None
 
 
 class TestExecutionInfo(BaseModel):

@@ -117,6 +117,9 @@
 
         <el-tab-pane :label="L('AI 分析', 'AI analysis')" name="ai" lazy>
           <section v-if="ai" class="panel ai-analysis">
+            <el-alert v-if="staleVerdict" type="error" :closable="false" show-icon
+              :title="L('需求判定已变化，这份分析可能过时', 'The requirement verdict has changed since this analysis was written')"
+              :description="L(`生成分析时：${staleVerdict.then}；现在：${staleVerdict.now}。`, `When written: ${staleVerdict.then}. Now: ${staleVerdict.now}.`)" />
             <el-alert :title="t('report.evidenceWarning')" type="warning" :closable="false" show-icon />
             <div class="ai-block lead">
               <h4>{{ t('report.evaluation') }}</h4>
@@ -298,6 +301,18 @@ const percentileOption = computed(() => {
     series: [{ type: 'bar', barWidth: '40%', data: [p.p50, p.p90, p.p95, p.p99], color: cssVar('--app-primary'),
       label: { show: true, position: 'top', color: cssVar('--app-text-secondary'), formatter: '{c}' } }],
   }
+})
+
+// The analysis stores the verdict it saw; flag it once requirements (or a re-check) move the verdict.
+const staleVerdict = computed(() => {
+  const then = ai.value?.requirements_verdict
+  const now = report.value?.evidence?.requirements
+  if (!then || !now) return null
+  const same = ['verdict', 'passed', 'failed', 'missing'].every(k => then[k] === now[k])
+  const describe = (v: any) => v.verdict === 'none'
+    ? L('未设性能需求', 'no requirements')
+    : L(`达标 ${v.passed} · 不达标 ${v.failed} · 无数据 ${v.missing}`, `${v.passed} met · ${v.failed} not met · ${v.missing} no data`)
+  return same ? null : { then: describe(then), now: describe(now) }
 })
 
 const aiLists = computed(() => {

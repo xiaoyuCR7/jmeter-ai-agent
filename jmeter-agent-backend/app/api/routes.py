@@ -563,24 +563,23 @@ async def update_jmx_tree(plan_id: str, request: UpdateJMXTreeRequest):
         raise HTTPException(status_code=404, detail="Test plan not found")
 
     plan = store.test_plans[plan_id]
-    backup_path = plan.jmx_path + ".backup"
+    temp_path = plan.jmx_path + ".tmp"
 
     try:
         jmx_content = build_jmx(request.tree.model_dump() if hasattr(request.tree, "model_dump") else request.tree)
 
-        if os.path.exists(plan.jmx_path):
-            shutil.move(plan.jmx_path, backup_path)
-
-        with open(plan.jmx_path, "w", encoding="utf-8") as f:
+        # Write beside the plan, then swap in one step: a failed save leaves the old file untouched.
+        with open(temp_path, "w", encoding="utf-8") as f:
             f.write(jmx_content)
+        os.replace(temp_path, plan.jmx_path)
 
         if request.name and request.name != plan.name:
             await _persist_test_plan(plan.model_copy(update={"name": request.name}))
 
         return {"success": True, "message": "JMX updated successfully"}
     except Exception as e:
-        if os.path.exists(backup_path):
-            shutil.move(backup_path, plan.jmx_path)
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
         raise HTTPException(status_code=500, detail=f"Failed to update JMX: {str(e)}")
 
 
@@ -634,15 +633,28 @@ async def _execution_started(execution: TestExecutionInfo):
         logger.warning("Start notification failed for %s: %s", execution.id, error)
 
 
+async def _requirements_verdict(execution) -> Optional[dict]:
+    from app.services import requirements as requirement_service
+    try:
+        stored = await requirement_service.get_requirements(getattr(execution, "project_id", None) or "default")
+        result = requirement_service.evaluate(stored, execution.summary)
+    except Exception as error:
+        logger.warning("Requirement verdict unavailable for %s: %s", execution.id, error)
+        return None
+    return {"verdict": result.verdict, "passed": result.passed, "failed": result.failed, "missing": result.missing}
+
+
 async def _postprocess_web_execution(execution: TestExecutionInfo, test_config: dict, ai_model=None):
     """Optional Web analysis/archive hooks; process status belongs to lifecycle."""
     if execution.status == TestExecutionStatus.COMPLETED and execution.summary:
         effective_model = ai_model or settings.DEFAULT_AI_MODEL or "deepseek"
         try:
             analyzer = TestAnalyzer(model_type=effective_model)
-            execution.ai_analysis = await analyzer.analyze(
+            analysis = await analyzer.analyze(
                 summary_data=execution.summary.model_dump(), test_config=test_config,
                 test_type=test_config.get("test_type", "unknown"))
+            analysis.requirements_verdict = await _requirements_verdict(execution)
+            execution.ai_analysis = analysis
             _save_analysis_markdown(execution.report_dir, execution.id, execution.ai_analysis)
             if execution.ai_analysis.analysis_status != 'completed':
                 execution.report_status = 'failed'

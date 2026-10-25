@@ -28,6 +28,9 @@ const report = {
       ] } },
     server_metrics: { status: 'not_configured' },
   },
+  // Written before the project had requirements, so the report should flag it as out of date.
+  ai_analysis: { analysis_status: 'completed', evidence_status: 'unverified', overall_assessment: 'Looks healthy',
+    key_findings: [], conclusion: 'Fine', requirements_verdict: { verdict: 'none', passed: 0, failed: 0, missing: 0 } },
 }
 
 const workflowStream = [
@@ -80,4 +83,8 @@ test('document to report', async ({ page }) => {
   await expect(page.getByText('Compared with baseline「September release」')).toBeVisible()
   await expect(page.locator('.kpi-delta.bad')).toHaveText(/▲ \+25%/)
   await expect(page.locator('.kpi-delta.good')).toHaveText(/▲ \+5\.3%/)
+
+  await page.getByRole('tab', { name: 'AI analysis' }).click()
+  await expect(page.getByText('The requirement verdict has changed since this analysis was written')).toBeVisible()
+  await expect(page.getByText('When written: no requirements. Now: 1 met · 0 not met · 0 no data.')).toBeVisible()
 })
