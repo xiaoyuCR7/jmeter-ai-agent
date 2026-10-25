@@ -106,7 +106,9 @@ cd jmeter-agent-backend && pip install -r requirements.txt && python -m app.main
 cd jmeter-agent-frontend && npm install && npm run dev                             # http://localhost:3000
 ```
 
-**3. Add a model** in **Settings → AI models** (or put an API key in `jmeter-agent-backend/.env`, see [`.env.example`](jmeter-agent-backend/.env.example)), then click **Start from a document**.
+**3. Add a model** in **Settings → AI models**: pick DeepSeek, Qwen, OpenAI, Claude or any OpenAI-compatible endpoint and paste
+an API key. Leave **Context window** empty and the app asks the provider for the model's real size (DeepSeek and Claude report
+it; documented sizes cover the rest). Then click **Start from a document**.
 
 API docs are served at http://127.0.0.1:8000/api/docs.
 
@@ -131,7 +133,11 @@ Common settings in `jmeter-agent-backend/.env`:
 | `JMETER_TIMEOUT` | Max run time in seconds | `3600` |
 | `JMETER_HEAP_MIN` / `JMETER_HEAP_MAX` | JMeter JVM heap | `256m` / `2g` |
 | `RESOURCE_CPU_THRESHOLD` / `RESOURCE_MEMORY_THRESHOLD` | Queue new runs above this load-generator usage (%) | `80` / `85` |
-| `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `QWEN_API_KEY` | Model keys (models can also be added in the UI) | – |
+| `DEFAULT_AI_MODEL` | Model ID used when a request names none | first enabled model |
+| `AGENT_CONTEXT_TOKEN_BUDGET` | Token budget for a model whose context window is unknown | `16384` |
+
+Model API keys are not read from `.env`; add models in the UI. They are stored in `jmeter-agent-backend/ai_models_config.json`,
+which git ignores.
 
 `HOST` must stay a loopback address: there is no login, so the server refuses to start on anything else.
 
@@ -178,6 +184,8 @@ jmeter-ai-agent/
 
 - **`JMeter executable not found`** — check `java -version`, then one of: `bin/jmeter(.bat)` in the project root, `JMETER_HOME`, or JMeter on `PATH` (`jmeter --version`).
 - **AI analysis fails** — test the model in **Settings → AI models**; check the key and network access.
+- **"exceeds the context budget"** — the model's context window is unknown, so the conservative `AGENT_CONTEXT_TOKEN_BUDGET`
+  applies. Edit the model and enter its context window (in tokens).
 - **Port in use** — `PORT=8001 ./start.sh` (Windows: `set PORT=8001` then `start.bat`).
 - **Runs stay queued** — the load generator is above `RESOURCE_*_THRESHOLD`; the top bar shows its CPU / memory.
 - **Logs** — `jmeter-agent-backend/server_stdout.log`, `server_stderr.log`, and `reports/{execution_id}/jmeter.log` per run.

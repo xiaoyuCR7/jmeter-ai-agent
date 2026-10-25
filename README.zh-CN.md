@@ -104,7 +104,9 @@ cd jmeter-agent-backend && pip install -r requirements.txt && python -m app.main
 cd jmeter-agent-frontend && npm install && npm run dev                             # http://localhost:3000
 ```
 
-**3. 添加模型**：在「设置 → AI 模型配置」里添加（也可以把 API Key 写进 `jmeter-agent-backend/.env`，参考 [`.env.example`](jmeter-agent-backend/.env.example)），然后点左上角「从文档开始」。
+**3. 添加模型**：在「设置 → AI 模型配置」里选择 DeepSeek、通义千问、OpenAI、Claude 或任意 OpenAI 兼容接口，填入 API Key。
+「上下文窗口」留空即可，保存时会向服务商查询这个模型的真实大小（DeepSeek 和 Claude 的接口会返回，其余按官方公布值）。
+然后点左上角「从文档开始」。
 
 接口文档地址：http://127.0.0.1:8000/api/docs
 
@@ -127,7 +129,10 @@ Cursor、VS Code 等客户端的配置可以在「设置 → 外部助手接入�
 | `JMETER_TIMEOUT` | 单次执行最长时间（秒） | `3600` |
 | `JMETER_HEAP_MIN` / `JMETER_HEAP_MAX` | JMeter JVM 堆内存 | `256m` / `2g` |
 | `RESOURCE_CPU_THRESHOLD` / `RESOURCE_MEMORY_THRESHOLD` | 压测机占用超过该比例（%）时新执行排队 | `80` / `85` |
-| `DEEPSEEK_API_KEY`、`OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`QWEN_API_KEY` | 模型密钥（也可以在界面里添加模型） | – |
+| `DEFAULT_AI_MODEL` | 请求没有指定模型时使用的模型 ID | 第一个启用的模型 |
+| `AGENT_CONTEXT_TOKEN_BUDGET` | 上下文窗口未知的模型使用的 token 预算 | `16384` |
+
+模型的 API Key 不从 `.env` 读取，请在界面里添加。它们保存在 `jmeter-agent-backend/ai_models_config.json`，这个文件已被 git 忽略。
 
 因为没有登录，`HOST` 只能是本机回环地址，设成其它地址服务会拒绝启动。
 
@@ -174,6 +179,7 @@ jmeter-ai-agent/
 
 - **提示 `JMeter executable not found`**：先确认 `java -version`，再检查三种方式之一：项目根目录有 `bin/jmeter(.bat)`、设置了 `JMETER_HOME`、或 JMeter 在 `PATH` 中（`jmeter --version`）。
 - **AI 分析失败**：在「设置 → AI 模型配置」里测试模型连接，检查密钥和网络。
+- **提示「exceeds the context budget」**：这个模型的上下文窗口未知，用的是保守的 `AGENT_CONTEXT_TOKEN_BUDGET`。编辑模型，填上它的上下文窗口（单位 tokens）即可。
 - **端口被占用**：`PORT=8001 ./start.sh`（Windows：先 `set PORT=8001` 再 `start.bat`）。
 - **执行一直排队**：压测机占用超过了 `RESOURCE_*_THRESHOLD`，顶栏会显示 CPU / 内存。
 - **日志**：`jmeter-agent-backend/server_stdout.log`、`server_stderr.log`，以及每次执行的 `reports/{execution_id}/jmeter.log`。
