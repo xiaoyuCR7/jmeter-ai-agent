@@ -1,6 +1,10 @@
 <template>
   <section class="panel">
     <el-result icon="success" :title="title" :sub-title="detail">
+      <template v-if="draftCount" #sub-title>
+        <p>{{ detail }}</p>
+        <p class="draft-note">{{ L(`AI 已起草 ${draftCount} 条性能需求，核对后保存才会生效`, `AI drafted ${draftCount} performance requirements; they apply once you review and save them`) }}</p>
+      </template>
       <template #extra>
         <el-button type="primary" @click="emit('review')">{{ L('核对性能需求', 'Review requirements') }}</el-button>
         <el-button @click="router.push(`/projects/${projectId}/plans`)">{{ L('查看测试计划', 'View test plans') }}</el-button>
@@ -19,7 +23,7 @@ import { useRouter } from 'vue-router'
 import MarkdownIt from 'markdown-it'
 import { useI18n } from '@/composables/useI18n'
 
-defineProps<{ projectId: string; title: string; detail: string; diagnostic?: string }>()
+defineProps<{ projectId: string; title: string; detail: string; diagnostic?: string; draftCount?: number }>()
 const emit = defineEmits<{ review: []; reset: [] }>()
 const md = new MarkdownIt()
 const router = useRouter()
@@ -34,5 +38,6 @@ const L = (zh: string, en: string) => currentLang.value === 'en' ? en : zh
   h4 { margin: 0 0 8px; font-size: 14px; color: var(--app-text); }
   .markdown { color: var(--app-text-secondary); font-size: 13px; }
 }
+.draft-note { margin: 6px 0 0; color: var(--app-primary); }
 .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 </style>

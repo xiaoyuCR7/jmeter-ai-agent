@@ -8,6 +8,11 @@ from app.services.ai.agent.types import AgentEvent
 from app.services.ai.agent.tool_registry import ToolRegistry
 from app.services.ai.agent.tools import get_all_builtin_tools
 
+# The start-from-document route drafts requirements itself after the workflow, every time.
+# Left to the model, the draft was sometimes saved, sometimes skipped.
+REQUIREMENT_TOOLS = {'extract_performance_requirements', 'save_performance_requirements',
+                     'get_performance_requirements'}
+
 
 WORKFLOW_SYSTEM_PROMPT = """JMeter performance test workflow orchestrator. End-to-end: API doc → project → test plans → execute → analyze.
 
@@ -50,7 +55,7 @@ class WorkflowAgent(BaseAgent):
     ):
         if tools is None:
             tools = ToolRegistry()
-            tools.register_many(get_all_builtin_tools())
+            tools.register_many([t for t in get_all_builtin_tools() if t.name not in REQUIREMENT_TOOLS])
 
         super().__init__(
             name="WorkflowAgent",
@@ -110,7 +115,10 @@ Execute in order:
 3. create_jmx for each test type
 4. validate_jmx
 5. If execution enabled: resource check → execute → analyze
-6. Summarize results"""
+6. Summarize results
+
+Performance requirements are drafted for the user's review by the app after this workflow;
+do not try to extract or save them here."""
         return task
 
     async def run_from_doc(
@@ -170,7 +178,7 @@ Execute in order:
     def _extract_workflow_results(result) -> dict:
         """Scan plan steps for create_project + create_jmx results to extract IDs."""
         project_id = ""
-        test_plan_ids = []
+        plans_by_file: dict[str, str] = {}  # one entry per JMX file, however many tools mention it
         diagnostic_summary = ""
 
         for step in (result.plan or []):
@@ -200,10 +208,13 @@ Execute in order:
                 jmx_path = payload.get("jmx_path", "")
                 if jmx_path:
                     import os
-                    # create_jmx returns the registered plan ID; the file name is only a fallback.
-                    plan_id = payload.get("test_plan_id") or os.path.basename(jmx_path).replace(".jmx", "")
-                    if plan_id not in test_plan_ids:
-                        test_plan_ids.append(plan_id)
+                    # create_jmx returns the registered plan ID; other tools that read or validate the
+                    # same file return only its path, which once counted one plan twice.
+                    key = os.path.normcase(os.path.abspath(jmx_path))
+                    if payload.get("test_plan_id"):
+                        plans_by_file[key] = payload["test_plan_id"]
+                    else:
+                        plans_by_file.setdefault(key, os.path.basename(jmx_path).replace(".jmx", ""))
 
                 msg = payload.get("message", "")
                 if msg:
@@ -214,6 +225,6 @@ Execute in order:
 
         return {
             "project_id": project_id,
-            "test_plan_ids": test_plan_ids,
+            "test_plan_ids": list(dict.fromkeys(plans_by_file.values())),
             "diagnostic_summary": diagnostic_summary.strip(),
         }

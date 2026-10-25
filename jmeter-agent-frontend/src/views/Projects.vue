@@ -43,7 +43,7 @@
         </el-tabs>
 
         <ProjectOverview v-if="tab === 'overview'" :project-id="project.id" />
-        <RequirementsPanel v-else-if="tab === 'requirements'" :project-id="project.id" :initial-doc="initialDoc" />
+        <RequirementsPanel v-else-if="tab === 'requirements'" :project-id="project.id" :initial-doc="initialDoc" :initial-draft="initialDraft" />
         <PlanList v-else-if="tab === 'plans'" :project-id="project.id" @changed="loadProjects" />
         <BaselineList v-else-if="tab === 'baselines'" :project-id="project.id" />
         <ProjectSettingsPanel v-else :project-id="project.id" @updated="loadProjects" @deleted="onDeleted" />
@@ -98,8 +98,10 @@ const createVisible = ref(false)
 const creating = ref(false)
 const form = ref({ name: '', base_url: '', description: '' })
 
-// Text handed over by the start-from-document wizard, prefilled for requirement extraction.
+// Handed over by the start-from-document wizard: the user's text, prefilled for extraction,
+// and the requirements drafted from it, shown for review until saved.
 const initialDoc: string = (window.history.state as any)?.requirementsDoc || ''
+const initialDraft = (window.history.state as any)?.requirementsDraft || null
 const projectId = computed(() => route.params.projectId as string | undefined)
 const project = computed(() => projects.value.find(p => p.id === projectId.value))
 const tab = computed(() => (PROJECT_TABS as readonly string[]).includes(route.params.tab as string) ? route.params.tab as string : 'overview')

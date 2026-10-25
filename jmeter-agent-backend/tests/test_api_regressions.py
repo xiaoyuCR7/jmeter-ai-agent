@@ -299,3 +299,50 @@ async def test_workflow_whose_steps_all_finished_is_complete_even_if_the_summary
     failed = dict(result, plan_steps=[{'step_id': 1, 'success': False}])
     events = await _workflow_events(monkeypatch, [('result', failed)])
     assert events[-1]['step'] == 'error'
+
+
+@pytest.mark.asyncio
+async def test_workflow_always_returns_a_requirements_draft_for_review(monkeypatch):
+    from app.services import requirements as requirement_service
+    calls = []
+
+    async def extract(document, adapter, source_name=''):
+        calls.append(document)
+        return requirement_service.PerformanceRequirements(items=[requirement_service.RequirementItem(
+            id='R1', scope='transaction', transaction='POST /api/pizza', metric='p95', operator='lte', value=800)])
+    saved = []
+    monkeypatch.setattr(requirement_service, 'extract_requirements', extract)
+    monkeypatch.setattr(requirement_service, 'get_requirements', AsyncMock(return_value=None))
+    monkeypatch.setattr(requirement_service, 'save_requirements', AsyncMock(side_effect=saved.append))
+    result = {'success': True, 'plan_steps': [{'step_id': 1, 'success': True}], 'project_id': 'p1',
+              'test_plan_ids': [], 'diagnostic_summary': '', 'error': None}
+    events = await _workflow_events(monkeypatch, [('result', result)])
+    assert calls == ['req\n\ndoc']  # the user's goal and document, as typed
+    assert events[-1]['requirements_draft']['items'][0]['transaction'] == 'POST /api/pizza'
+    assert not saved  # a draft is for review; nothing applies until the user saves
+
+
+@pytest.mark.asyncio
+async def test_workflow_skips_the_draft_when_requirements_already_exist_or_drafting_fails(monkeypatch):
+    from app.services import requirements as requirement_service
+    existing = requirement_service.PerformanceRequirements(items=[requirement_service.RequirementItem(
+        id='R1', metric='error_rate', operator='lt', value=1)])
+    monkeypatch.setattr(requirement_service, 'get_requirements', AsyncMock(return_value=existing))
+    extract = AsyncMock()
+    monkeypatch.setattr(requirement_service, 'extract_requirements', extract)
+    result = {'success': True, 'plan_steps': [{'step_id': 1, 'success': True}], 'project_id': 'p1',
+              'test_plan_ids': [], 'diagnostic_summary': '', 'error': None}
+    events = await _workflow_events(monkeypatch, [('result', result)])
+    assert events[-1]['requirements_draft'] is None
+    extract.assert_not_awaited()
+    monkeypatch.setattr(requirement_service, 'get_requirements', AsyncMock(return_value=None))
+    monkeypatch.setattr(requirement_service, 'extract_requirements', AsyncMock(side_effect=ValueError('model down')))
+    events = await _workflow_events(monkeypatch, [('result', result)])
+    assert events[-1]['step'] == 'complete' and events[-1]['requirements_draft'] is None
+
+
+def test_workflow_agent_leaves_requirements_to_the_app():
+    from app.services.ai.agents.workflow_agent import REQUIREMENT_TOOLS, WorkflowAgent
+    agent = WorkflowAgent(SimpleNamespace())
+    assert not REQUIREMENT_TOOLS & set(agent.tools._tools)
+    assert 'create_project' in agent.tools._tools

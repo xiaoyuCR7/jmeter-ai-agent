@@ -16,13 +16,14 @@
       :generating="workflowLoading" :importing="importing" @generate="startWorkflow" @import="importOpenApi" />
     <ProgressStep v-else-if="stage === 1" :steps="workflowSteps" :running="workflowRunning" @back="resetWorkflow" />
     <ResultStep v-else :project-id="result!.projectId" :title="result!.title" :detail="result!.detail"
-      :diagnostic="workflowResult?.diagnostic_summary" @review="reviewRequirements" @reset="resetWorkflow" />
+      :diagnostic="workflowResult?.diagnostic_summary" :draft-count="workflowResult?.requirements_draft?.items?.length"
+      @review="reviewRequirements" @reset="resetWorkflow" />
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, type HistoryState } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { api } from '@/api'
 import SourceStep from '@/components/start/SourceStep.vue'
@@ -133,7 +134,8 @@ const startWorkflow = async () => {
                 message: data.message,
                 project_id: data.project_id,
                 test_plan_ids: data.test_plan_ids,
-                diagnostic_summary: data.diagnostic_summary
+                diagnostic_summary: data.diagnostic_summary,
+                requirements_draft: data.requirements_draft
               }
               workflowRunning.value = false
             }
@@ -180,10 +182,15 @@ const resetWorkflow = () => {
   importResult.value = null
 }
 
-// The requirements tab opens with the user's own text prefilled, ready for "Extract with AI".
+// The requirements tab opens with the drafted requirements to review, and the user's own text
+// prefilled in case they want to extract again. history.state takes plain data only.
 function reviewRequirements() {
   const doc = workflowResult.value ? `${workflowRequirements.value.trim()}\n\n${workflowApiDoc.value.trim()}`.trim() : ''
-  router.push({ path: `/projects/${result.value!.projectId}/requirements`, state: doc ? { requirementsDoc: doc } : {} })
+  const draft = workflowResult.value?.requirements_draft
+  const state: HistoryState = {}
+  if (doc) state.requirementsDoc = doc
+  if (draft?.items?.length) state.requirementsDraft = JSON.parse(JSON.stringify(draft))
+  router.push({ path: `/projects/${result.value!.projectId}/requirements`, state })
 }
 </script>
 

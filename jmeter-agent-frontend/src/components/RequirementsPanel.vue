@@ -34,6 +34,9 @@
         </div>
       </template>
 
+      <el-alert v-if="showingDraft && dirty" type="info" :closable="false" show-icon class="draft-alert"
+        :title="L('这是 AI 根据你的文档起草的需求', 'AI drafted these requirements from your document')"
+        :description="L('逐条核对数值和文档原文，改好后点「保存需求」才会生效；之后的报告会按它判定。', 'Check each value against its source quote, then click Save requirements. Reports judge runs against them only after that.')" />
       <el-table :data="draft.items" size="small" class="req-table" :empty-text="L('还没有需求，可从文档提取或手动添加', 'No requirements yet: extract from a document or add one')">
         <el-table-column :label="L('编号', 'ID')" width="80">
           <template #default="{ row }"><el-input v-model="row.id" size="small" /></template>
@@ -114,7 +117,7 @@ import { Delete, Plus } from '@element-plus/icons-vue'
 import { api, type PerformanceRequirements, type RequirementItem } from '@/api'
 import { useI18n } from '@/composables/useI18n'
 
-const props = defineProps<{ projectId: string; initialDoc?: string }>()
+const props = defineProps<{ projectId: string; initialDoc?: string; initialDraft?: PerformanceRequirements | null }>()
 const { currentLang } = useI18n()
 const L = (zh: string, en: string) => currentLang.value === 'en' ? en : zh
 
@@ -140,6 +143,8 @@ const models = ref<any[]>([])
 const model = ref('')
 const extracting = ref(false)
 const saving = ref(false)
+const showingDraft = ref(false)
+let draftOffered = false
 
 function normalize(data: PerformanceRequirements | null): PerformanceRequirements {
   const base = empty()
@@ -155,6 +160,12 @@ async function load() {
     draft.value = normalize(res.data)
     hasSaved.value = !!res.data
     savedJson.value = JSON.stringify(draft.value)
+    // Offer the wizard's draft once, and never over requirements the user already saved.
+    if (props.initialDraft?.items?.length && !draftOffered && !draft.value.items.length) {
+      draft.value = normalize({ ...props.initialDraft, updated_at: null })
+      showingDraft.value = true
+    }
+    draftOffered = true
   } catch {
     ElMessage.error(L('读取性能需求失败', 'Failed to load requirements'))
   }
@@ -239,6 +250,7 @@ async function save() {
     draft.value = normalize(res.data)
     savedJson.value = JSON.stringify(draft.value)
     hasSaved.value = true
+    showingDraft.value = false
     ElMessage.success(L('性能需求已保存，之后的报告会逐条判定达标情况', 'Saved. Reports will now judge each requirement.'))
   } catch (e: any) {
     ElMessage.error(e.response?.data?.detail?.[0]?.msg || e.response?.data?.detail || L('保存失败', 'Save failed'))
@@ -262,6 +274,7 @@ async function remove() {
 .block-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
 .hint { color: var(--app-text-muted); font-size: 12px; }
 .dirty { margin-left: 8px; }
+.draft-alert { margin-bottom: 12px; }
 .extract-actions { display: flex; align-items: center; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
 .file-pick input { display: none; }
 .model-select { width: 200px; margin-left: auto; }

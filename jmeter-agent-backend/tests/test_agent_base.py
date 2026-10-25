@@ -1385,6 +1385,21 @@ class TestAuditRegressions:
         result = AgentResult(True, 'task', plan=[PlanStep(1, 'create', success=True, result=ToolResult(True, data=data))])
         assert WorkflowAgent._extract_workflow_results(result)['test_plan_ids'] == ['8bbad6ad']
 
+    def test_workflow_counts_a_plan_once_even_when_other_tools_return_its_path(self):
+        from app.services.ai.agents.workflow_agent import WorkflowAgent
+        from app.services.ai.agent.types import AgentResult
+        created = {'tool_statuses': [{'tool': 'create_jmx', 'success': True, 'error': None},
+                                     {'tool': 'get_jmx_content', 'success': True, 'error': None}],
+                   'tool_results': [{'jmx_path': 'test_plans/p/a1.jmx', 'test_plan_id': 'plan-a'},
+                                    {'jmx_path': 'test_plans/p/a1.jmx', 'content': '<jmeterTestPlan/>'}]}
+        read_first = {'jmx_path': 'test_plans/p/b2.jmx'}
+        result = AgentResult(True, 'task', plan=[
+            PlanStep(1, 'read b', success=True, result=ToolResult(True, data=read_first)),
+            PlanStep(2, 'create a', success=True, result=ToolResult(True, data=created)),
+            PlanStep(3, 'create b', success=True, result=ToolResult(True, data={
+                'jmx_path': 'test_plans/p/b2.jmx', 'test_plan_id': 'plan-b'}))])
+        assert WorkflowAgent._extract_workflow_results(result)['test_plan_ids'] == ['plan-b', 'plan-a']
+
 
 class TestToolResultContract:
     @pytest.mark.asyncio

@@ -1202,6 +1202,22 @@ async def ai_workflow_stream(request: AIWorkflowRequest):
             pid = result.get("project_id", "")
             plan_ids = result.get("test_plan_ids", [])
 
+            # Always draft requirements from the same text, for review; never saved here.
+            requirements_draft = None
+            if pid:
+                from app.services import requirements as requirement_service
+                try:
+                    already_saved = await requirement_service.get_requirements(pid)
+                    if already_saved is None or not already_saved.items:
+                        msg = "Drafting performance requirements..." if is_en else "正在起草性能需求..."
+                        yield f"data: {json.dumps({'step': 'drafting_requirements', 'message': msg, 'progress': 92}, ensure_ascii=False)}\n\n"
+                        source = f"{request.testing_requirements}\n\n{request.api_documentation}".strip()
+                        draft = await requirement_service.extract_requirements(
+                            source, adapter, "start-from-document")
+                        requirements_draft = draft.model_dump()
+                except Exception as error:
+                    logger.warning("Requirement draft failed for project %s: %s", pid, error)
+
             # ── Complete ──────────────────────────────────
             plan_count = len(plan_ids)
             complete_msg = (
@@ -1215,6 +1231,7 @@ async def ai_workflow_stream(request: AIWorkflowRequest):
                 'project_id': pid,
                 'test_plan_ids': plan_ids,
                 'diagnostic_summary': result.get('diagnostic_summary', ''),
+                'requirements_draft': requirements_draft,
             }
             yield f"data: {json.dumps(complete_event, ensure_ascii=False)}\n\n"
 

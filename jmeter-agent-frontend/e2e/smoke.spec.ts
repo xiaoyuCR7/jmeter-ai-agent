@@ -35,7 +35,11 @@ const report = {
 
 const workflowStream = [
   { step: 'parse', message: 'Reading the document', progress: 30 },
-  { step: 'complete', message: 'Created 1 test plan', progress: 100, project_id: 'p1', test_plan_ids: ['plan1'] },
+  { step: 'complete', message: 'Created 1 test plan', progress: 100, project_id: 'p1', test_plan_ids: ['plan1'],
+    requirements_draft: { items: [{ id: 'R1', scope: 'transaction', transaction: 'POST /checkout', metric: 'p95',
+      operator: 'lte', value: 300, source: 'Checkout P95 within 300 ms', source_verified: true }],
+      load_profile: { concurrency: 10, ramp_up_seconds: 10, duration_seconds: 60, target_tps: null, source: '' },
+      assumptions: [], source_name: 'start-from-document' } },
 ].map(event => `data: ${JSON.stringify(event)}\n\n`).join('')
 
 async function mockApi(page: Page) {
@@ -70,8 +74,16 @@ test('document to report', async ({ page }) => {
   await page.getByPlaceholder(/Test login and checkout/).fill('Checkout P95 within 300 ms')
   await page.getByRole('button', { name: 'Generate' }).click()
   await expect(page.getByText('Project created')).toBeVisible()
+  await expect(page.getByText('AI drafted 1 performance requirements')).toBeVisible()
 
-  await page.getByRole('button', { name: 'View test plans' }).click()
+  // The draft opens for review, unsaved, on the requirements tab.
+  await page.getByRole('button', { name: 'Review requirements' }).click()
+  await expect(page).toHaveURL(/\/projects\/p1\/requirements$/)
+  await expect(page.getByText('AI drafted these requirements from your document')).toBeVisible()
+  await expect(page.getByText('Unsaved', { exact: true })).toBeVisible()
+  await expect(page.getByPlaceholder('Endpoint (e.g. POST /api/order) or sampler label')).toHaveValue('POST /checkout')
+
+  await page.getByRole('tab', { name: 'Test plans' }).click()
   await expect(page).toHaveURL(/\/projects\/p1\/plans$/)
   await page.getByRole('row', { name: /Checkout baseline/ }).getByRole('button', { name: 'Run' }).click()
   await expect(page).toHaveURL(/\/executions\?projectId=p1$/)
