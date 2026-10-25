@@ -310,6 +310,14 @@ TEST_TEMPLATES = [
 ]
 
 
+async def _fill_context_window(config: dict) -> dict:
+    """Keep a user-entered size; otherwise ask the provider or use the documented size."""
+    if not config.get("context_window") and config.get("api_key") not in (None, "", "***"):
+        from app.services.ai.model_limits import detect_context_window
+        config = {**config, "context_window": await detect_context_window(config)}
+    return config
+
+
 def _load_and_merge_model_config(model_id: str, payload: dict) -> dict:
     """Merge an update payload with the existing config, preserving api_key when
     the frontend sends the redacted placeholder.
@@ -342,12 +350,13 @@ async def add_user_model(model: AIModelConfig):
     # 检查是否已存在
     for i, config in enumerate(configs):
         if config.get("id") == model.id:
-            config = _load_and_merge_model_config(model.id, data)
+            config = await _fill_context_window(_load_and_merge_model_config(model.id, data))
             configs[i] = config
             save_user_model_configs(configs)
             await AIAdapterFactory.invalidate(model.id)
             return {"success": True, "message": "模型已更新", "config": sanitize_model_config(config)}
 
+    data = await _fill_context_window(data)
     configs.append(data)
     save_user_model_configs(configs)
     await AIAdapterFactory.invalidate(model.id)
@@ -378,11 +387,12 @@ async def add_model_config(model: AIModelConfig):
     data = model.model_dump()
     for i, config in enumerate(configs):
         if config.get("id") == model.id:
-            config = _load_and_merge_model_config(model.id, data)
+            config = await _fill_context_window(_load_and_merge_model_config(model.id, data))
             configs[i] = config
             save_user_model_configs(configs)
             await AIAdapterFactory.invalidate(model.id)
             return {"success": True, "message": "模型配置已更新", "config": sanitize_model_config(config)}
+    data = await _fill_context_window(data)
     configs.append(data)
     save_user_model_configs(configs)
     await AIAdapterFactory.invalidate(model.id)
@@ -395,7 +405,7 @@ async def update_model_config(model_id: str, model: AIModelConfig):
     configs = load_user_model_configs()
     for i, config in enumerate(configs):
         if config.get("id") == model_id:
-            data = _load_and_merge_model_config(model_id, model.model_dump())
+            data = await _fill_context_window(_load_and_merge_model_config(model_id, model.model_dump()))
             configs[i] = data
             save_user_model_configs(configs)
             await AIAdapterFactory.invalidate(model_id)

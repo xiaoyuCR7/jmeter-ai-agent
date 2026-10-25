@@ -15,6 +15,14 @@
           <div class="table-scroll">
             <el-table :data="customModelConfigs" style="width: 100%" v-loading="loading">
               <el-table-column prop="id" :label="t('settings.table.id')" min-width="100" />
+            <el-table-column :label="t('settings.table.contextWindow')" width="120" align="right">
+              <template #default="{ row }">
+                <span v-if="row.context_window" class="num">{{ formatTokens(row.context_window) }}</span>
+                <el-tooltip v-else :content="t('settings.form.contextWindowUnknown')">
+                  <span class="muted">16K*</span>
+                </el-tooltip>
+              </template>
+            </el-table-column>
             <el-table-column prop="enabled" :label="t('settings.table.status')" width="100">
               <template #default="{ row }">
                 <el-tag size="small" :type="row.enabled ? 'success' : 'info'">
@@ -183,6 +191,12 @@
           />
         </el-form-item>
 
+        <el-form-item :label="t('settings.form.contextWindow')">
+          <el-input-number v-model="form.context_window" :min="4096" :max="2000000" :step="1024"
+            :controls="false" :value-on-clear="null" :placeholder="t('settings.form.contextWindowAuto')" class="full" />
+          <div class="form-tip">{{ t('settings.form.contextWindowTip') }}</div>
+        </el-form-item>
+
         <el-form-item v-if="isEdit" :label="t('settings.form.enabled')">
           <el-switch v-model="form.enabled" />
         </el-form-item>
@@ -259,16 +273,17 @@ const pathsForm = reactive({
   reports_dir: ''
 })
 
-// 服务商预设：选中后自动带出 API 地址和适配器，无需手填
+// 服务商预设：选中后自动带出 API 地址和适配器，无需手填。
+// 模型名按各家 2026-10-25 的官方文档；列表外的名字也可以直接输入。
 const PROVIDERS = [
   { key: 'deepseek', label: 'DeepSeek', api_base: 'https://api.deepseek.com/v1', adapter_type: 'openai_compatible',
-    models: ['deepseek-chat', 'deepseek-reasoner'] },
+    models: ['deepseek-flash', 'deepseek-v4-pro'] },
   { key: 'qwen', label: 'Qwen 通义千问', api_base: 'https://dashscope.aliyuncs.com/compatible-mode/v1', adapter_type: 'openai_compatible',
-    models: ['qwen-plus', 'qwen-max', 'qwen-turbo'] },
+    models: ['qwen-plus', 'qwen-flash', 'qwen-max'] },
   { key: 'openai', label: 'OpenAI', api_base: 'https://api.openai.com/v1', adapter_type: 'openai_compatible',
-    models: ['gpt-4o', 'gpt-4o-mini'] },
+    models: ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-luna'] },
   { key: 'anthropic', label: 'Claude', api_base: '', adapter_type: 'anthropic',
-    models: ['claude-sonnet-5-5', 'claude-opus-5-5', 'claude-haiku-5-5'] },
+    models: ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-1'] },
   { key: 'custom', label: '', api_base: '', adapter_type: 'openai_compatible', models: [] as string[] }
 ]
 
@@ -278,8 +293,11 @@ const form = ref({
   model: '',
   api_key: '',
   api_base: '',
+  context_window: null as number | null,
   enabled: true
 })
+
+const formatTokens = (n: number) => n >= 1_000_000 ? `${+(n / 1_000_000).toFixed(2)}M` : `${Math.round(n / 1024)}K`
 
 const currentProvider = computed(() => PROVIDERS.find(p => p.key === form.value.provider) || PROVIDERS[PROVIDERS.length - 1])
 
@@ -290,7 +308,9 @@ const onProviderChange = () => {
 // 编辑时根据已保存的地址/适配器反推服务商
 const detectProvider = (row: any) => {
   if (row.adapter_type === 'anthropic') return 'anthropic'
-  return PROVIDERS.find(p => p.api_base && p.api_base === row.api_base)?.key || 'custom'
+  // "https://api.deepseek.com" and ".../v1/" are the same endpoint.
+  const base = (url: string) => (url || '').replace(/\/+$/, '').replace(/\/v1$/, '')
+  return PROVIDERS.find(p => p.api_base && base(p.api_base) === base(row.api_base))?.key || 'custom'
 }
 
 // 由模型名生成唯一标识，如 deepseek-chat、deepseek-chat-2
@@ -371,6 +391,7 @@ const openAddDialog = () => {
     model: PROVIDERS[0].models[0],
     api_key: '',
     api_base: '',
+    context_window: null,
     enabled: true
   }
   dialogVisible.value = true
@@ -384,6 +405,7 @@ const openEditDialog = (row: any) => {
     model: row.model || '',
     api_key: '',
     api_base: row.api_base || '',
+    context_window: row.context_window ?? null,
     enabled: row.enabled
   }
   dialogVisible.value = true
@@ -405,6 +427,8 @@ const handleSubmit = async () => {
       api_key: form.value.api_key || '***',
       api_base: (provider.key === 'custom' ? form.value.api_base.trim() : provider.api_base) || null,
       adapter_type: provider.adapter_type,
+      // Empty: the backend asks the provider for the real size.
+      context_window: form.value.context_window || null,
       enabled: form.value.enabled
     }
     
@@ -638,4 +662,9 @@ onUnmounted(() => {
     overflow-x: auto;
   }
 }
+
+// The dialog is teleported out of .settings, so its helpers sit at the top level.
+.full { width: 100%; }
+.muted { color: var(--app-text-muted); }
+.num { font-variant-numeric: tabular-nums; }
 </style>

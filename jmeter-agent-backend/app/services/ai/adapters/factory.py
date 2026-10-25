@@ -79,6 +79,7 @@ class AIAdapterFactory:
                 api_key=api_key, model=model_name, api_base=api_base,
             )
 
+        adapter.set_context_window(cfg.get("context_window"))
         cls._adapters[model] = adapter
         return adapter
 

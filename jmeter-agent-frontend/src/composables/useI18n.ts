@@ -383,6 +383,7 @@ const messages: Translations = {
 
   // ── Settings view (remaining strings) ──
   'settings.table.id': { 'zh-CN': '标识', en: 'ID' },
+  'settings.table.contextWindow': { 'zh-CN': '上下文窗口', en: 'Context' },
   'settings.table.status': { 'zh-CN': '状态', en: 'Status' },
   'settings.table.enabled': { 'zh-CN': '启用', en: 'Enabled' },
   'settings.table.disabled': { 'zh-CN': '禁用', en: 'Disabled' },
@@ -396,6 +397,10 @@ const messages: Translations = {
   'settings.table.actions': { 'zh-CN': '操作', en: 'Actions' },
   'settings.form.model': { 'zh-CN': '模型', en: 'Model' },
   'settings.form.apiKey': { 'zh-CN': 'API Key', en: 'API Key' },
+  'settings.form.contextWindow': { 'zh-CN': '上下文窗口', en: 'Context window' },
+  'settings.form.contextWindowAuto': { 'zh-CN': '留空自动检测', en: 'Leave empty to detect' },
+  'settings.form.contextWindowTip': { 'zh-CN': '单位 tokens。留空时保存会向服务商查询真实大小，查不到再用官方公布值；也可以手动填写。', en: 'In tokens. Leave empty and saving asks the provider for the real size, falling back to the documented size; or enter it yourself.' },
+  'settings.form.contextWindowUnknown': { 'zh-CN': '没检测到这个模型的上下文大小，按 16K 保守值使用；编辑模型可以手动填写。', en: 'Size not detected, so a conservative 16K is used; edit the model to set it.' },
   'settings.form.apiKeyPlaceholder': { 'zh-CN': '输入 API Key', en: 'Enter API Key' },
   'settings.form.apiBase': { 'zh-CN': 'API 地址', en: 'API Base URL' },
   'settings.form.enabled': { 'zh-CN': '启用', en: 'Enabled' },

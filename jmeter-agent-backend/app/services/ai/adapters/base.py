@@ -88,6 +88,19 @@ class BaseAIAdapter(ABC):
         self.api_base = api_base
         self.max_retries = max_retries
         self.max_tokens = max_tokens
+        self.context_window: Optional[int] = None
+
+    def set_context_window(self, tokens: Optional[int]) -> None:
+        """Use the model's real context size instead of the conservative global defaults."""
+        if tokens:
+            self.context_window = int(tokens)
+            self.max_tokens = int(tokens)
+
+    @property
+    def context_budget(self) -> int:
+        """Total tokens one request may use: input, tool schemas and reserved output."""
+        from app.core.config import settings
+        return getattr(self, 'context_window', None) or settings.AGENT_CONTEXT_TOKEN_BUDGET
 
     @asynccontextmanager
     async def _operation(self):
@@ -162,8 +175,7 @@ class BaseAIAdapter(ABC):
 
     def prepare_chat_messages(self, messages: List[AIChatMessage], *, response_tokens: int) -> List[AIChatMessage]:
         """Reserve the existing output allowance before selecting plain-chat input."""
-        from app.core.config import settings
-        input_budget = min(self.max_tokens, settings.AGENT_CONTEXT_TOKEN_BUDGET - response_tokens - 256)
+        input_budget = min(self.max_tokens, self.context_budget - response_tokens - 256)
         if input_budget <= 0:
             raise ValueError('Response allowance exceeds the context budget; review token limits')
         return self._truncate_messages(messages, max_tokens=input_budget)
@@ -231,8 +243,7 @@ class BaseAIAdapter(ABC):
         else:
             msgs.insert(0, AIChatMessage(role="system", content=system_msg))
 
-        from app.core.config import settings
-        total_budget = kwargs.pop('context_window_tokens', settings.AGENT_CONTEXT_TOKEN_BUDGET)
+        total_budget = kwargs.pop('context_window_tokens', self.context_budget)
         input_budget = total_budget - kwargs.get('max_tokens', 8000) - 256
         # Measure the final text representation, but select complete native groups.
         selected = self._truncate_messages(msgs, max_tokens=input_budget, text_fallback=True)

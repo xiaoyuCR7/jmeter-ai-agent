@@ -29,6 +29,8 @@ class AIModelConfig(BaseModel):
     api_key: str = Field(..., description="API Key")
     api_base: Optional[str] = Field(None, description="API Base URL")
     adapter_type: str = Field("openai_compatible", description="适配器类型: openai_compatible / anthropic")
+    context_window: Optional[int] = Field(None, ge=4096, le=2_000_000,
+                                          description="模型上下文窗口(tokens)；不填则用全局保守默认值")
     is_builtin: bool = Field(False, description="是否为内置模型")
     enabled: bool = Field(True, description="是否启用")
 
