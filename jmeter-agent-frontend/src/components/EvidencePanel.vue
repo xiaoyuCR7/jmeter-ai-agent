@@ -30,7 +30,8 @@
         </el-table-column>
         <el-table-column :label="L('结果', 'Result')" width="130">
           <template #default="{ row }">
-            <el-tag :type="statusType(row.status)" size="small">{{ statusText(row.status) }}</el-tag>
+            <!-- Solid for failures: a light red tag disappears on the red-tinted failing row. -->
+            <el-tag :type="statusType(row.status)" :effect="row.status === 'fail' ? 'dark' : 'light'" size="small">{{ statusText(row.status) }}</el-tag>
             <span v-if="row.gap_pct !== null" class="gap">+{{ row.gap_pct }}%</span>
           </template>
         </el-table-column>
