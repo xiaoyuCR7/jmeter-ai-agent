@@ -24,7 +24,8 @@
       <el-table-column :label="L('创建时间', 'Created')" width="170">
         <template #default="{ row }"><span class="num">{{ formatTime(row.created_at) }}</span></template>
       </el-table-column>
-      <el-table-column :label="L('操作', 'Actions')" width="220" align="right">
+      <!-- Pinned so Run stays reachable when a narrow window makes the table scroll. -->
+      <el-table-column :label="L('操作', 'Actions')" width="210" align="right" fixed="right">
         <template #default="{ row }">
           <div class="actions" @click.stop>
             <el-button size="small" type="primary" :loading="running === row.id" @click="run(row.id)">
