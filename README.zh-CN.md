@@ -185,6 +185,7 @@ jmeter-ai-agent/
 ```bash
 cd jmeter-agent-backend && pip install -r requirements-dev.txt && pytest tests
 cd jmeter-agent-frontend && npm install && npm run test:run && npx vue-tsc --noEmit
+cd jmeter-agent-frontend && npx playwright install chromium && npm run test:e2e   # 浏览器冒烟测试（API 已模拟）；加 PW_CHANNEL=chrome 可复用本机 Chrome
 ```
 
 欢迎提 Issue 和 PR。PR 请保持聚焦，行为改动请附带测试。

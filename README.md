@@ -189,6 +189,7 @@ jmeter-ai-agent/
 ```bash
 cd jmeter-agent-backend && pip install -r requirements-dev.txt && pytest tests
 cd jmeter-agent-frontend && npm install && npm run test:run && npx vue-tsc --noEmit
+cd jmeter-agent-frontend && npx playwright install chromium && npm run test:e2e   # browser smoke test (mocked API); add PW_CHANNEL=chrome to reuse a local Chrome
 ```
 
 Issues and pull requests are welcome. Please keep PRs focused and include tests for behaviour changes.
