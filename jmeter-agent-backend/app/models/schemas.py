@@ -173,7 +173,8 @@ class UpdateEnvironmentRequest(BaseModel):
 
 class TestConfig(BaseModel):
     test_type: TestType = Field(..., description="测试类型")
-    target_rps: Optional[int] = Field(100, description="目标RPS")
+    # No default rate: a throughput timer the user never asked for silently caps the load.
+    target_rps: Optional[int] = Field(None, description="目标RPS（不填则不限速）")
     concurrent_users: Optional[int] = Field(100, description="并发用户数")
     ramp_up_seconds: Optional[int] = Field(60, description="Ramp-up时间(秒)")
     duration_seconds: Optional[int] = Field(300, description="测试持续时间(秒)")

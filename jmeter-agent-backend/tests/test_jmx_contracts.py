@@ -107,8 +107,8 @@ def test_unsupported_load_controls_are_explicit(values):
 
 
 @pytest.mark.parametrize('kind', ['baseline', 'concurrency', 'stress', 'stability', 'custom'])
-def test_complete_ui_defaults_generate_shared_rps_timer_without_losing_duration(kind):
-    config = LoadConfig(**LoadConfig(test_type=kind).model_dump())
+def test_explicit_rate_generates_one_shared_rps_timer_without_losing_duration(kind):
+    config = LoadConfig(**LoadConfig(test_type=kind, target_rps=100).model_dump())
     root = ET.fromstring(JMXGenerator().generate_basic_jmx(
         [APIEndpoint(name='one', method='GET', path='/1'), APIEndpoint(name='two', method='GET', path='/2')],
         config, 'https://example.invalid'))
@@ -132,6 +132,13 @@ def test_template_rps_converts_samples_per_second_to_per_minute():
         config = LoadConfig(**template.default_config.model_dump())
         root = ET.fromstring(JMXGenerator().generate_basic_jmx([], config, 'https://example.invalid'))
         assert float(root.find('.//ConstantThroughputTimer/doubleProp/value').text) == config.target_rps * 60
+
+
+def test_default_config_does_not_cap_the_rate():
+    # A throughput timer nobody asked for silently caps the load and misleads the analysis.
+    assert LoadConfig(test_type='baseline').target_rps is None
+    root = ET.fromstring(JMXGenerator().generate_basic_jmx([], LoadConfig(test_type='baseline'), 'https://example.invalid'))
+    assert root.find('.//ConstantThroughputTimer') is None
 
 
 @pytest.mark.parametrize('rate', [None, 0])

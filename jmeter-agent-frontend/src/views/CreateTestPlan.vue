@@ -201,7 +201,8 @@
         <el-row :gutter="12">
           <el-col :span="8" :xs="24" :sm="12" :md="8">
             <el-form-item :label="t('createPlan.targetRps')">
-              <el-input-number v-model="form.test_config.target_rps" :min="1" style="width: 100%;" />
+              <el-input-number v-model="form.test_config.target_rps" :min="1" :value-on-clear="null"
+                :placeholder="t('createPlan.targetRpsUnlimited')" style="width: 100%;" />
             </el-form-item>
           </el-col>
           <el-col :span="8" :xs="24" :sm="12" :md="8">
@@ -295,7 +296,7 @@ const form = ref({
     concurrent_users: 100,
     ramp_up_seconds: 60,
     duration_seconds: 300,
-    target_rps: 100,
+    target_rps: null as number | null,
     think_time_ms: 0,
     iterations: null as number | null,
     step_users: 10,

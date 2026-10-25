@@ -258,6 +258,7 @@ const messages: Translations = {
   'createPlan.rampUp': { 'zh-CN': 'Ramp-up时间 (秒)', en: 'Ramp-up Time (seconds)' },
   'createPlan.duration': { 'zh-CN': '持续时间 (秒)', en: 'Duration (seconds)' },
   'createPlan.targetRps': { 'zh-CN': '目标RPS', en: 'Target RPS' },
+  'createPlan.targetRpsUnlimited': { 'zh-CN': '不填则不限速', en: 'Leave empty for no limit' },
   'createPlan.thinkTime': { 'zh-CN': '思考时间 (ms)', en: 'Think Time (ms)' },
   'createPlan.iterations': { 'zh-CN': '迭代次数 (可选)', en: 'Iterations (optional)' },
   'createPlan.selectModel': { 'zh-CN': '选择AI模型', en: 'Select AI Model' },
