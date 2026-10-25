@@ -24,9 +24,10 @@ class TestAnalyzer:
     def __init__(self, model_type: Optional[str] = None):
         self.adapter = AIAdapterFactory.create(model_type)
 
-    async def analyze(self, summary_data: dict, test_config: dict, test_type: str) -> ReportAnalysis:
-        """分析测试报告"""
-        prompt = build_analysis_prompt(summary_data, test_config, test_type)
+    async def analyze(self, summary_data: dict, test_config: dict, test_type: str,
+                      evidence_text: str = '') -> ReportAnalysis:
+        """分析测试报告；evidence_text 是确定性证据（需求判定、基线对比、服务端指标）"""
+        prompt = build_analysis_prompt(summary_data, test_config, test_type, evidence_text)
 
         messages = [
             {"role": "system", "content": TEST_ANALYZER_SYSTEM_PROMPT},

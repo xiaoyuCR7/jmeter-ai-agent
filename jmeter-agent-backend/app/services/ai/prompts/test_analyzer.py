@@ -15,7 +15,7 @@ Preserve the requested JSON fields; use empty lists or an explicit insufficient-
 where data is missing. Output JSON only."""
 
 
-def build_analysis_prompt(summary_data: dict, test_config: dict, test_type: str) -> str:
+def build_analysis_prompt(summary_data: dict, test_config: dict, test_type: str, evidence_text: str = '') -> str:
     def finite(value):
         return value if isinstance(value, (int, float)) and math.isfinite(value) else None
 
@@ -58,6 +58,8 @@ def build_analysis_prompt(summary_data: dict, test_config: dict, test_type: str)
     return ('请基于以下 JSON 数据用中文分析。null 表示未知；抽样时间段不代表完整时间线。'
             '只引用已提供指标；根因、容量与资源瓶颈必须区分假设和实测，缺证据时说明需补采的数据。\n'
             + json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
+            + (('\n\n以下证据由程序确定性计算（需求判定、基线对比、服务端指标），结论必须与之一致，'
+                '不得改判需求是否达标：\n' + evidence_text) if evidence_text else '')
             + '\n输出 JSON 字段：overall_assessment（字符串），key_findings（字符串列表），'
             'specific_issues（字符串列表），timeline_analysis（字符串），resource_bottlenecks（字符串列表），'
             'performance_bottlenecks（字符串列表），error_analysis（字符串列表），recommendations（字符串列表），'

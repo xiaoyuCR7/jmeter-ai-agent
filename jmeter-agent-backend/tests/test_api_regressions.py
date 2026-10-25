@@ -216,21 +216,38 @@ async def test_failed_tree_save_keeps_the_old_file(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_analysis_records_the_requirement_verdict_it_was_written_against(monkeypatch, tmp_path):
+async def test_post_run_analysis_sees_the_report_evidence_and_records_its_verdict(monkeypatch, tmp_path):
     from app.api import routes
     from app.models.schemas import DetailedTestSummary, ReportAnalysis
+    from app.services import evidence as evidence_service
     from app.services import requirements as requirement_service
     from app.services.ai.rag.archiver import rag_archiver
     import app.services.notifications as notifications
-    analysis = ReportAnalysis(overall_assessment='ok', conclusion='ok')
-    monkeypatch.setattr(routes, 'TestAnalyzer', lambda **kwargs: SimpleNamespace(analyze=AsyncMock(return_value=analysis)))
+    analyze = AsyncMock(return_value=ReportAnalysis(overall_assessment='ok', conclusion='ok'))
+    monkeypatch.setattr(routes, 'TestAnalyzer', lambda **kwargs: SimpleNamespace(analyze=analyze))
     monkeypatch.setattr(rag_archiver, 'archive_raw_report', lambda **kwargs: None)
     monkeypatch.setattr(notifications, 'notify_test_completed', AsyncMock())
-    monkeypatch.setattr(requirement_service, 'get_requirements', AsyncMock(return_value=None))
     summary = DetailedTestSummary(total_requests=10, avg_response_time=100, min_response_time=1, max_response_time=200,
                                   error_rate=0, throughput=5, received_bytes_per_sec=1, sent_bytes_per_sec=1)
+    evaluation = requirement_service.RequirementEvaluation(verdict='fail', passed=1, failed=2, missing=0)
+    async def build_evidence(execution, run_summary):
+        assert run_summary is summary
+        return evidence_service.ExecutionEvidence(execution_id='run', project_id='p', requirements=evaluation,
+                                                  baseline=None, server_metrics={'status': 'not_configured'})
+    monkeypatch.setattr(evidence_service, 'build_evidence', build_evidence)
     execution = SimpleNamespace(id='run', project_id='p', status=routes.TestExecutionStatus.COMPLETED, summary=summary,
         test_plan_id='plan', report_dir=str(tmp_path), error_message=None, log_path=None,
         report_status='running', report_error=None)
     await routes._postprocess_web_execution(execution, {})
-    assert execution.ai_analysis.requirements_verdict == {'verdict': 'none', 'passed': 0, 'failed': 0, 'missing': 0}
+    text = analyze.call_args.kwargs['evidence_text']
+    assert text == evidence_service.format_for_prompt(await build_evidence(execution, summary))
+    assert '服务端指标' in text and '历史对比' in text
+    assert execution.ai_analysis.requirements_verdict == {'verdict': 'fail', 'passed': 1, 'failed': 2, 'missing': 0}
+
+
+def test_analysis_prompt_includes_evidence_only_when_given():
+    from app.services.ai.prompts.test_analyzer import build_analysis_prompt
+    plain = build_analysis_prompt({'total_requests': 1}, {}, 'baseline')
+    assert '不得改判' not in plain
+    with_evidence = build_analysis_prompt({'total_requests': 1}, {}, 'baseline', '## 性能需求\nR1 不达标')
+    assert '不得改判需求是否达标' in with_evidence and 'R1 不达标' in with_evidence

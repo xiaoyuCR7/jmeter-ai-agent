@@ -633,15 +633,17 @@ async def _execution_started(execution: TestExecutionInfo):
         logger.warning("Start notification failed for %s: %s", execution.id, error)
 
 
-async def _requirements_verdict(execution) -> Optional[dict]:
-    from app.services import requirements as requirement_service
+async def _analysis_evidence(execution):
+    """The same requirement verdicts, baseline comparison and server metrics the report shows."""
+    from app.services.evidence import build_evidence, format_for_prompt
     try:
-        stored = await requirement_service.get_requirements(getattr(execution, "project_id", None) or "default")
-        result = requirement_service.evaluate(stored, execution.summary)
+        evidence = await build_evidence(execution, execution.summary)
     except Exception as error:
-        logger.warning("Requirement verdict unavailable for %s: %s", execution.id, error)
-        return None
-    return {"verdict": result.verdict, "passed": result.passed, "failed": result.failed, "missing": result.missing}
+        logger.warning("Evidence unavailable for analysis of %s: %s", execution.id, error)
+        return "", None
+    req = evidence.requirements
+    verdict = {"verdict": req.verdict, "passed": req.passed, "failed": req.failed, "missing": req.missing}
+    return format_for_prompt(evidence), verdict
 
 
 async def _postprocess_web_execution(execution: TestExecutionInfo, test_config: dict, ai_model=None):
@@ -650,10 +652,11 @@ async def _postprocess_web_execution(execution: TestExecutionInfo, test_config: 
         effective_model = ai_model or settings.DEFAULT_AI_MODEL or "deepseek"
         try:
             analyzer = TestAnalyzer(model_type=effective_model)
+            evidence_text, verdict = await _analysis_evidence(execution)
             analysis = await analyzer.analyze(
                 summary_data=execution.summary.model_dump(), test_config=test_config,
-                test_type=test_config.get("test_type", "unknown"))
-            analysis.requirements_verdict = await _requirements_verdict(execution)
+                test_type=test_config.get("test_type", "unknown"), evidence_text=evidence_text)
+            analysis.requirements_verdict = verdict
             execution.ai_analysis = analysis
             _save_analysis_markdown(execution.report_dir, execution.id, execution.ai_analysis)
             if execution.ai_analysis.analysis_status != 'completed':
