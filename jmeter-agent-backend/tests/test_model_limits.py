@@ -71,3 +71,43 @@ async def test_saving_a_model_keeps_a_manual_window_and_fills_a_missing_one(monk
     redacted = await routes._fill_context_window({'model': 'c', 'api_key': '***', 'context_window': None})
     assert (manual['context_window'], filled['context_window'], redacted['context_window']) == (65536, 1048576, None)
     assert calls == ['b']
+
+
+@pytest.mark.asyncio
+async def test_unnamed_requests_use_the_default_or_the_first_enabled_model(tmp_path, monkeypatch):
+    # UI-added models get IDs like "deepseek-flash"; a fixed default name broke post-run analysis.
+    import json
+    from app.core.config import settings
+    from app.services.ai.adapters.factory import AIAdapterFactory
+    path = tmp_path / 'models.json'
+    path.write_text(json.dumps([
+        {'id': 'off', 'name': 'Off', 'model': 'm0', 'api_key': 'k', 'enabled': False, 'api_base': 'https://a.test/v1'},
+        {'id': 'deepseek-flash', 'name': 'D', 'model': 'deepseek-flash', 'api_key': 'k', 'api_base': 'https://a.test/v1',
+         'context_window': 1048576},
+        {'id': 'second', 'name': 'S', 'model': 'm2', 'api_key': 'k', 'api_base': 'https://a.test/v1'},
+    ]), encoding='utf-8')
+    monkeypatch.setattr(settings, 'AI_MODELS_CONFIG_FILE', str(path))
+    await AIAdapterFactory.invalidate()
+    try:
+        monkeypatch.setattr(settings, 'DEFAULT_AI_MODEL', '')
+        adapter = AIAdapterFactory.create()
+        assert adapter.model == 'deepseek-flash' and adapter.context_budget == 1048576
+        monkeypatch.setattr(settings, 'DEFAULT_AI_MODEL', 'second')
+        assert AIAdapterFactory.create().model == 'm2'
+        monkeypatch.setattr(settings, 'DEFAULT_AI_MODEL', 'openai')  # stale name from an old .env
+        assert AIAdapterFactory.create().model == 'deepseek-flash'
+        with pytest.raises(ValueError, match='not configured'):
+            AIAdapterFactory.create('openai')  # an explicitly named model must exist
+    finally:
+        await AIAdapterFactory.invalidate()
+
+
+@pytest.mark.asyncio
+async def test_no_model_at_all_says_where_to_add_one(tmp_path, monkeypatch):
+    from app.core.config import settings
+    from app.services.ai.adapters.factory import AIAdapterFactory
+    monkeypatch.setattr(settings, 'AI_MODELS_CONFIG_FILE', str(tmp_path / 'none.json'))
+    monkeypatch.setattr(settings, 'DEFAULT_AI_MODEL', '')
+    await AIAdapterFactory.invalidate()
+    with pytest.raises(ValueError, match='Settings'):
+        AIAdapterFactory.create()

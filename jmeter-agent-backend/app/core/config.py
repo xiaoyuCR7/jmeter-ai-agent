@@ -70,23 +70,10 @@ class Settings(BaseSettings):
         paths_config = load_paths_config()
         return paths_config.get("reports_dir", self.REPORTS_DIR_DEFAULT)
     
-    # AI Models
-    DEFAULT_AI_MODEL: str = "openai"
-    OPENAI_API_KEY: Optional[str] = None
-    OPENAI_API_BASE: Optional[str] = "https://api.openai.com/v1"
-    OPENAI_MODEL: str = "gpt-4o"
-    
-    ANTHROPIC_API_KEY: Optional[str] = None
-    ANTHROPIC_MODEL: str = "claude-3-5-sonnet-20241022"
-    
-    QWEN_API_KEY: Optional[str] = None
-    QWEN_API_BASE: Optional[str] = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    QWEN_MODEL: str = "qwen-max"
-    
-    DEEPSEEK_API_KEY: Optional[str] = None
-    DEEPSEEK_API_BASE: Optional[str] = "https://api.deepseek.com"
-    DEEPSEEK_MODEL: str = "deepseek-chat"
-    
+    # AI models are configured in the UI (ai_models_config.json). This names the one used when a
+    # request does not choose; empty or unknown falls back to the first enabled model.
+    DEFAULT_AI_MODEL: str = ""
+
     # JMeter
     JMETER_TIMEOUT: int = 3600  # seconds
 
@@ -101,7 +88,7 @@ class Settings(BaseSettings):
     # Agent
     AGENT_TOOL_TIMEOUT_SECONDS: float = 600.0    # max seconds per tool call (10 min)
     AGENT_MAX_CONCURRENT: int = 3                # max concurrent agent executions
-    AGENT_CONTEXT_TOKEN_BUDGET: int = 16384      # input + schemas + reserved output; set to model capacity
+    AGENT_CONTEXT_TOKEN_BUDGET: int = 16384      # fallback for models whose context window is unknown
     AGENT_MAX_TOOL_CALLS_PER_RESPONSE: int = 8
 
     # Conversation Memory Persistence

@@ -659,9 +659,8 @@ async def _analysis_evidence(execution):
 async def _postprocess_web_execution(execution: TestExecutionInfo, test_config: dict, ai_model=None):
     """Optional Web analysis/archive hooks; process status belongs to lifecycle."""
     if execution.status == TestExecutionStatus.COMPLETED and execution.summary:
-        effective_model = ai_model or settings.DEFAULT_AI_MODEL or "deepseek"
         try:
-            analyzer = TestAnalyzer(model_type=effective_model)
+            analyzer = TestAnalyzer(model_type=ai_model)  # None: the factory picks the default model
             evidence_text, verdict = await _analysis_evidence(execution)
             analysis = await analyzer.analyze(
                 summary_data=execution.summary.model_dump(), test_config=test_config,

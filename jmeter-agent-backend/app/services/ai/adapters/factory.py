@@ -56,6 +56,15 @@ class AIAdapterFactory:
         config_map = {c["id"]: c for c in configs}
 
         cfg = config_map.get(model)
+        if not cfg and not model_type:
+            # Model IDs come from the UI (e.g. "deepseek-flash"), so a fixed default name rarely
+            # exists; without this, post-run analysis failed for anyone who had not set one.
+            cfg = next((c for c in configs if c.get("enabled", True)), None)
+            if cfg is None:
+                raise ValueError("No AI model configured; add one in Settings -> AI models")
+            model = cfg["id"]
+            if model in cls._adapters:
+                return cls._adapters[model]
         if not cfg:
             raise ValueError(f"AI model not configured: {model}")
 
