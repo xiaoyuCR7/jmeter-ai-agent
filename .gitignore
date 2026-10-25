@@ -47,6 +47,8 @@ rag_lancedb/
 *.db-wal
 *.sqlite
 *.sqlite3
+# 后端启动时防止重复启动的锁文件
+*.startup.lock
 
 # ============================================================
 # Python
@@ -66,6 +68,9 @@ venv/
 # ============================================================
 node_modules/
 **/dist/
+# Playwright 输出
+/jmeter-agent-frontend/test-results/
+/jmeter-agent-frontend/playwright-report/
 npm-debug.log*
 yarn-error.log*
 
@@ -84,3 +89,8 @@ yarn-error.log*
 .vscode/
 .DS_Store
 Thumbs.db
+
+# ============================================================
+# 本地 Claude Code 配置（各人自己的预览/权限设置）
+# ============================================================
+/.claude/
