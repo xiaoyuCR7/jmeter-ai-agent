@@ -62,9 +62,34 @@ async def promote_execution_to_baseline(execution_id: str) -> dict:
     return await promote(execution_id)
 
 
+# Spelled out so the model uses the real field names; with a bare "object" it once sent
+# load_profile.concurrent_users, which was silently dropped.
 _REQUIREMENTS_SCHEMA = {
     'type': 'object',
-    'description': 'PerformanceRequirements object as returned by extract/get (items, load_profile, assumptions, source_name)',
+    'description': 'PerformanceRequirements object as returned by extract/get',
+    'properties': {
+        'items': {'type': 'array', 'items': {'type': 'object', 'properties': {
+            'id': {'type': 'string', 'description': 'R1, R2, ...'},
+            'scope': {'type': 'string', 'enum': ['global', 'transaction']},
+            'transaction': {'type': ['string', 'null'],
+                            'description': 'For scope=transaction: endpoint such as "POST /api/order", or sampler label'},
+            'metric': {'type': 'string', 'enum': ['avg_response_time', 'p90', 'p95', 'p99', 'max_response_time',
+                                                  'error_rate', 'throughput']},
+            'operator': {'type': 'string', 'enum': ['lte', 'lt', 'gte', 'gt']},
+            'value': {'type': 'number', 'description': 'ms for times, % for error_rate, TPS for throughput'},
+            'source': {'type': 'string', 'description': 'Exact clause quoted from the document'},
+            'source_verified': {'type': 'boolean'},
+        }, 'required': ['id', 'scope', 'metric', 'operator', 'value']}},
+        'load_profile': {'type': 'object', 'properties': {
+            'concurrency': {'type': ['integer', 'null'], 'description': 'Concurrent users'},
+            'ramp_up_seconds': {'type': ['integer', 'null']},
+            'duration_seconds': {'type': ['integer', 'null']},
+            'target_tps': {'type': ['number', 'null']},
+        }},
+        'assumptions': {'type': 'array', 'items': {'type': 'string'}},
+        'source_name': {'type': 'string'},
+    },
+    'required': ['items'],
 }
 
 evidence_tools = [

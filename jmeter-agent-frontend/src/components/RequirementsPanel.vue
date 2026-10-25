@@ -38,7 +38,7 @@
         <el-table-column :label="L('编号', 'ID')" width="80">
           <template #default="{ row }"><el-input v-model="row.id" size="small" /></template>
         </el-table-column>
-        <el-table-column :label="L('对象', 'Applies to')" min-width="190">
+        <el-table-column :label="L('对象', 'Applies to')" min-width="300">
           <template #default="{ row }">
             <div class="target">
               <el-select v-model="row.scope" size="small" class="scope" @change="row.transaction = row.scope === 'global' ? null : (row.transaction || '')">
@@ -46,7 +46,7 @@
                 <el-option :label="L('接口', 'Transaction')" value="transaction" />
               </el-select>
               <el-input v-if="row.scope === 'transaction'" v-model="row.transaction" size="small"
-                :placeholder="L('采样器名称或其中一段', 'Sampler label or part of it')" />
+                :placeholder="L('接口（如 POST /api/order）或采样器名', 'Endpoint (e.g. POST /api/order) or sampler label')" />
             </div>
           </template>
         </el-table-column>
@@ -267,7 +267,7 @@ async function remove() {
 .model-select { width: 200px; margin-left: auto; }
 .req-table :deep(.el-input-number) { width: 100%; }
 .target, .condition, .source { display: flex; gap: 6px; align-items: center; }
-.scope { width: 116px; flex-shrink: 0; }
+.scope { width: 88px; flex-shrink: 0; }
 .op { width: 64px; flex-shrink: 0; }
 .num { flex: 1; min-width: 70px; }
 .add { margin-top: 8px; }

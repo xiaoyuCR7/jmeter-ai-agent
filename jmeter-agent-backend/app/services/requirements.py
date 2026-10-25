@@ -14,7 +14,7 @@ from functools import lru_cache
 from typing import Literal, Optional
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator
 
 from app.models.schemas import AIChatMessage, DetailedTestSummary
 
@@ -32,6 +32,7 @@ _SUMMARY_FIELDS = {
     'max_response_time': 'max_response_time', 'error_rate': 'error_rate', 'throughput': 'throughput',
 }
 _OPERATOR_TEXT = {'lte': '≤', 'lt': '<', 'gte': '≥', 'gt': '>'}
+_OPERATOR_SYMBOLS = {'<=': 'lte', '≤': 'lte', '<': 'lt', '>=': 'gte', '≥': 'gte', '>': 'gt'}
 
 
 class RequirementItem(BaseModel):
@@ -44,6 +45,12 @@ class RequirementItem(BaseModel):
     source: str = Field('', max_length=1000, description='Exact clause quoted from the source document')
     source_verified: bool = Field(False, description='The quoted clause was found in the source text')
 
+    @field_validator('operator', mode='before')
+    @classmethod
+    def _operator_symbols(cls, value):
+        # Models often write the symbol instead of the code.
+        return _OPERATOR_SYMBOLS.get(value.strip(), value) if isinstance(value, str) else value
+
     @field_validator('transaction')
     @classmethod
     def _strip(cls, value):
@@ -51,7 +58,10 @@ class RequirementItem(BaseModel):
 
 
 class LoadProfile(BaseModel):
-    concurrency: Optional[int] = Field(None, ge=1)
+    # Unknown keys are dropped, so accept the names models actually send; "concurrent_users"
+    # once lost a saved concurrency of 10 without any error.
+    concurrency: Optional[int] = Field(None, ge=1, validation_alias=AliasChoices(
+        'concurrency', 'concurrent_users', 'users', 'threads'))
     ramp_up_seconds: Optional[int] = Field(None, ge=0)
     duration_seconds: Optional[int] = Field(None, ge=1)
     target_tps: Optional[float] = Field(None, gt=0)

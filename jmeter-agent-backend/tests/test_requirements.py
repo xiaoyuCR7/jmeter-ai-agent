@@ -216,3 +216,15 @@ async def test_execution_list_rows_carry_plan_name_and_requirement_verdict(api, 
     assert rows[0]['metrics']['p95_response_time'] == 650
     assert rows[2]['metrics'] is None and rows[2]['requirements'] is None
     assert rows[0]['has_ai_analysis'] is False
+
+
+def test_requirements_accept_the_names_and_symbols_models_send():
+    # A save with load_profile.concurrent_users once kept every field except the concurrency.
+    saved = req.PerformanceRequirements.model_validate({
+        'items': [{'id': 'R1', 'metric': 'p95', 'operator': '<=', 'value': 800},
+                  {'id': 'R2', 'metric': 'throughput', 'operator': '≥', 'value': 5}],
+        'load_profile': {'concurrent_users': 10, 'ramp_up_seconds': 10, 'duration_seconds': 60}})
+    assert [i.operator for i in saved.items] == ['lte', 'gte']
+    assert saved.load_profile.concurrency == 10
+    assert saved.model_dump()['load_profile']['concurrency'] == 10
+    assert req.LoadProfile.model_validate({'concurrency': 5}).concurrency == 5
