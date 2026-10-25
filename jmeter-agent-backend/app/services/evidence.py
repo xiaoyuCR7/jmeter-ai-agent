@@ -47,7 +47,8 @@ async def build_evidence(execution, summary: DetailedTestSummary) -> ExecutionEv
         history = None
     return ExecutionEvidence(
         execution_id=get('id'), project_id=project_id, test_plan_id=get('test_plan_id'),
-        requirements=requirement_service.evaluate(stored, summary), baseline=history, server_metrics=server)
+        requirements=requirement_service.evaluate(stored, summary, requirement_service.sampler_routes(get('jmx_path'))),
+        baseline=history, server_metrics=server)
 
 
 def format_for_prompt(evidence: ExecutionEvidence) -> str:

@@ -6,9 +6,13 @@ came from, so a verdict can always be traced back to the source text.
 """
 import json
 import logging
+import os
 import re
+import xml.etree.ElementTree as ET
 from datetime import datetime
+from functools import lru_cache
 from typing import Literal, Optional
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -211,11 +215,68 @@ class RequirementEvaluation(BaseModel):
     load_profile: Optional[LoadProfile] = None
 
 
-def _matching_labels(summary: DetailedTestSummary, transaction: str) -> list[str]:
+_HTTP_METHODS = ('GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS')
+_ROUTE_PATTERN = re.compile(r'^\s*(?:(%s)\s+)?(\S+)\s*$' % '|'.join(_HTTP_METHODS), re.IGNORECASE)
+
+
+def _normalize_path(path: str) -> str:
+    if '://' in path:
+        path = urlsplit(path).path
+    path = path.split('?', 1)[0].strip()
+    return path.rstrip('/') or '/'
+
+
+def _route_keys(transaction: str) -> set[str]:
+    """'POST /api/pizza' -> {'POST /api/pizza'}; a bare '/api/pizza' matches any method."""
+    match = _ROUTE_PATTERN.match(transaction)
+    if not match or not (match.group(2).startswith('/') or '://' in match.group(2)):
+        return set()
+    method, path = match.group(1), _normalize_path(match.group(2))
+    return {f'{method.upper()} {path}'} if method else {path}
+
+
+@lru_cache(maxsize=64)
+def _sampler_routes_cached(jmx_path: str, mtime_ns: int) -> dict[str, frozenset[str]]:
+    routes: dict[str, set[str]] = {}
+    for element in ET.parse(jmx_path).iter():
+        if element.get('testclass') not in ('HTTPSamplerProxy', 'HTTPSampler'):
+            continue
+        props = {prop.get('name'): (prop.text or '') for prop in element if prop.tag == 'stringProp'}
+        path = props.get('HTTPSampler.path', '')
+        if not path:
+            continue
+        path = _normalize_path(path)
+        method = (props.get('HTTPSampler.method') or 'GET').upper()
+        routes.setdefault(element.get('testname', ''), set()).update({f'{method} {path}', path})
+    return {label: frozenset(keys) for label, keys in routes.items()}
+
+
+def sampler_routes(jmx_path: Optional[str]) -> dict[str, frozenset[str]]:
+    """Map each HTTP sampler label in the JMX that ran to 'METHOD /path' keys.
+
+    JMeter reports sampler names ("RecommendPizza"), while documents name endpoints
+    ("POST /api/pizza"); this lets a requirement written either way find its sampler.
+    """
+    if not jmx_path:
+        return {}
+    try:
+        return _sampler_routes_cached(jmx_path, os.stat(jmx_path).st_mtime_ns)
+    except (OSError, ET.ParseError) as error:
+        logger.warning('Cannot read sampler routes from %s: %s', jmx_path, error)
+        return {}
+
+
+def _matching_labels(summary: DetailedTestSummary, transaction: str,
+                     routes: Optional[dict[str, frozenset[str]]] = None) -> list[str]:
     labels = list((summary.per_label or {}).keys())
     exact = [label for label in labels if label == transaction]
     if exact:
         return exact
+    keys = _route_keys(transaction)
+    if keys and routes:
+        by_route = [label for label in labels if keys & routes.get(label, frozenset())]
+        if by_route:
+            return by_route
     needle = transaction.lower()
     return [label for label in labels if needle in label.lower()]
 
@@ -244,7 +305,9 @@ def _worst(values: list[float], operator: str) -> float:
     return max(values) if operator in ('lte', 'lt') else min(values)
 
 
-def evaluate(requirements: Optional[PerformanceRequirements], summary: DetailedTestSummary) -> RequirementEvaluation:
+def evaluate(requirements: Optional[PerformanceRequirements], summary: DetailedTestSummary,
+             routes: Optional[dict[str, frozenset[str]]] = None) -> RequirementEvaluation:
+    """``routes`` comes from :func:`sampler_routes` for the JMX that produced ``summary``."""
     if requirements is None or not requirements.items:
         return RequirementEvaluation(verdict='none', load_profile=requirements.load_profile if requirements else None)
     verdicts = []
@@ -253,7 +316,7 @@ def evaluate(requirements: Optional[PerformanceRequirements], summary: DetailedT
         actual = None
         if summary.total_requests > 0:
             if item.scope == 'transaction' and item.transaction:
-                labels = _matching_labels(summary, item.transaction)
+                labels = _matching_labels(summary, item.transaction, routes)
                 values = [v for v in (_label_value((summary.per_label or {})[label], item.metric) for label in labels)
                           if v is not None]
                 actual = _worst(values, item.operator) if values else None

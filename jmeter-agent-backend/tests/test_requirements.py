@@ -70,6 +70,49 @@ def test_unmatched_transaction_or_empty_run_is_missing_not_passing():
     assert empty.items[0].status == 'missing'
 
 
+SAMPLER_JMX = """<jmeterTestPlan><hashTree><TestPlan testclass="TestPlan" testname="P"/><hashTree>
+  <ThreadGroup testclass="ThreadGroup" testname="Users"/><hashTree>
+    <HTTPSamplerProxy testclass="HTTPSamplerProxy" testname="GetQuotes">
+      <stringProp name="HTTPSampler.path">/api/quotes?limit=5</stringProp>
+      <stringProp name="HTTPSampler.method">GET</stringProp></HTTPSamplerProxy><hashTree/>
+    <HTTPSamplerProxy testclass="HTTPSamplerProxy" testname="RecommendPizza">
+      <stringProp name="HTTPSampler.path">/api/pizza/</stringProp>
+      <stringProp name="HTTPSampler.method">POST</stringProp></HTTPSamplerProxy><hashTree/>
+  </hashTree></hashTree></hashTree></jmeterTestPlan>"""
+
+
+def sampler_summary():
+    stats = lambda p95: {'count': 100, 'avg_response_time': p95 / 2, 'p90_response_time': p95, 'p95_response_time': p95,
+                         'p99_response_time': p95, 'error_rate': 0.0, 'throughput': 10, 'max_response_time': p95}
+    return summary(per_label={'GetQuotes': stats(916), 'RecommendPizza': stats(657)})
+
+
+def test_endpoint_requirements_find_samplers_through_the_jmx_that_ran(tmp_path):
+    # Documents name endpoints, JMeter reports sampler names; the run's JMX links the two.
+    jmx = tmp_path / 'snapshot.jmx'
+    jmx.write_text(SAMPLER_JMX, encoding='utf-8')
+    requirements = req.PerformanceRequirements(items=[
+        item(id='R1', scope='transaction', transaction='POST /api/pizza', value=800),
+        item(id='R2', scope='transaction', transaction='get /api/quotes', value=500),
+        item(id='R3', scope='transaction', transaction='/api/quotes', value=1000),
+    ])
+    result = req.evaluate(requirements, sampler_summary(), req.sampler_routes(str(jmx)))
+    by_id = {v.id: v for v in result.items}
+    assert (by_id['R1'].matched_labels, by_id['R1'].status) == (['RecommendPizza'], 'pass')
+    assert (by_id['R2'].matched_labels, by_id['R2'].actual, by_id['R2'].status) == (['GetQuotes'], 916, 'fail')
+    assert by_id['R3'].matched_labels == ['GetQuotes']
+    # Without the JMX the same requirements cannot be judged, rather than guessed.
+    assert req.evaluate(requirements, sampler_summary()).missing == 3
+
+
+def test_route_matching_respects_the_method_and_tolerates_a_missing_jmx(tmp_path):
+    jmx = tmp_path / 'snapshot.jmx'
+    jmx.write_text(SAMPLER_JMX, encoding='utf-8')
+    wrong_method = req.PerformanceRequirements(items=[item(scope='transaction', transaction='GET /api/pizza')])
+    assert req.evaluate(wrong_method, sampler_summary(), req.sampler_routes(str(jmx))).items[0].status == 'missing'
+    assert req.sampler_routes(str(tmp_path / 'gone.jmx')) == {} and req.sampler_routes(None) == {}
+
+
 def test_no_requirements_prompt_forbids_claiming_compliance():
     evaluation = req.evaluate(None, summary())
     assert evaluation.verdict == 'none'
