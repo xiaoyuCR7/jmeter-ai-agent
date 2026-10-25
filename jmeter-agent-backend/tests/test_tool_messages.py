@@ -275,3 +275,16 @@ async def test_factory_closes_idle_clients_and_bounds_health_checks(monkeypatch)
     monkeypatch.setattr(module.AIAdapterFactory, 'create', lambda _: SimpleNamespace(chat=blocked))
     result = await asyncio.wait_for(module.AIAdapterFactory.health_check('fixture'), .5)
     assert not result['healthy'] and cancelled.is_set()
+
+
+def test_a_four_item_requirements_draft_reaches_the_model_whole():
+    # Regression: each dict value was capped at 600 chars, so the 4th requirement never arrived.
+    from app.services.ai.agent.types import ToolResult
+    items = [{'id': f'R{i}', 'scope': 'transaction', 'transaction': f'POST /api/endpoint-{i}', 'metric': 'p95',
+              'operator': 'lte', 'value': 800, 'source': f'接口 {i} 的 P95 不超过 800 ms', 'source_verified': True}
+             for i in range(1, 5)]
+    draft = {'items': items, 'load_profile': {'concurrent_users': 10, 'duration_seconds': 60}, 'assumptions': []}
+    result = ToolResult(True, data={'project_id': 'p1', 'draft': draft, 'saved': False, 'note': 'Draft only.'})
+    payload = json.loads(result.to_json())
+    assert [item['id'] for item in payload['data']['draft']['items']] == ['R1', 'R2', 'R3', 'R4']
+    assert payload['data']['draft']['items'][3]['source'] == '接口 4 的 P95 不超过 800 ms'

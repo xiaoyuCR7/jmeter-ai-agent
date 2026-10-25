@@ -318,6 +318,8 @@ class BaseAgent:
 
                     if not result.success:
                         category = result.error_category or ErrorCategory.TOOL_ERROR
+                        logger.warning("[%s] Step %s failed (%s): %s", self.name, step.step_id,
+                                       category.value, result.error)
 
                         if category == ErrorCategory.CANCELLED:
                             self._state = AgentState.CANCELLED
@@ -422,9 +424,14 @@ class BaseAgent:
 
             # Step 3: Generate final response
             succeeded = bool(plan) and step_index == len(plan) and all(s.success for s in plan)
+            failed_step = next((s for s in plan if not s.success and s.result is not None), None)
             run_error = None if succeeded else (
                 "Iteration budget exhausted before task completion"
                 if iterations >= self.max_iterations and step_index < len(plan)
+                # Name the step and its error; a bare "did not complete" left nothing to act on.
+                else f"Step {failed_step.step_id} failed ({failed_step.description[:120]}): "
+                     f"{failed_step.result.error or 'stopped before confirming completion'}"
+                if failed_step is not None
                 else "Task did not complete successfully"
             )
             self._state = AgentState.REFLECTING
@@ -546,12 +553,18 @@ class BaseAgent:
                     self._stream_runner = None
 
     def _conversation_context(self) -> list[AIChatMessage]:
-        """Keep the current task outside the sliding history, without duplicates."""
+        """History in the order it happened, with the current task pinned so truncation keeps it.
+
+        The task must come before this run's tool exchanges: placed after them, it reads as a
+        fresh request and the model redoes the whole task (e.g. creates the project again) at
+        every step. If memory has already evicted or compacted the task, it is restored up front.
+        """
         pinned = {id(message) for message in self._run_context}
-        history = [message.model_copy(update={'pinned': False}) for message in self.memory.messages
-                   if message.role != "system" and id(message) not in pinned]
-        return [AIChatMessage(role="system", content=self.system_prompt),
-                *history, *self._run_context]
+        history = [message if id(message) in pinned else message.model_copy(update={'pinned': False})
+                   for message in self.memory.messages if message.role != "system"]
+        present = {id(message) for message in history}
+        missing = [message for message in self._run_context if id(message) not in present]
+        return [AIChatMessage(role="system", content=self.system_prompt), *missing, *history]
 
     # ── ReAct step execution ──────────────────────────────────
 
@@ -592,7 +605,10 @@ class BaseAgent:
 
         # Schemas still count toward model context. Keep the current policy once,
         # then pass bounded history so resource IDs survive across steps.
-        step_prompt = f"Execute: {step.description}"
+        step_prompt = (f"Current step {step.step_id}: {step.description}\n"
+                       "Do only this step. Earlier steps are already done: their tool calls and results are "
+                       "above, so reuse the IDs and paths they returned instead of repeating those calls. "
+                       "Reply without a tool call once this step is complete.")
         if step.tool_name:
             step_prompt += f"\nSuggested tool: {step.tool_name}"
             if step.tool_args:
@@ -881,8 +897,14 @@ If replan is false, omit new_steps. Keep response under 200 chars."""
                 if s.result.data is not None:
                     # Include partial receipts and false/zero values. Never silently
                     # drop evidence; the complete request is budget-checked below.
-                    data_str = s.result.data if isinstance(s.result.data, str) else json.dumps(
-                        s.result.data, ensure_ascii=False, separators=(',', ':'), default=str, allow_nan=False)
+                    data = s.result.data
+                    if isinstance(data, dict) and 'tool_statuses' in data and (
+                            data.get('tool_results') or data.get('results')):
+                        # A ReAct step's closing narration restates its tool receipts, which stay;
+                        # on long plans it alone pushed the summary past the context budget.
+                        data = {k: v for k, v in data.items() if k != 'final_text'}
+                    data_str = data if isinstance(data, str) else json.dumps(
+                        data, ensure_ascii=False, separators=(',', ':'), default=str, allow_nan=False)
                     detail = f" ({data_str})"
                 if s.result.error:
                     cat = s.result.error_category.value if s.result.error_category else "unknown"

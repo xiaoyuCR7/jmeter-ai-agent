@@ -1378,6 +1378,13 @@ class TestAuditRegressions:
         assert extracted['project_id'] == 'project-1'
         assert extracted['test_plan_ids'] == ['plan-1']
 
+    def test_workflow_prefers_the_registered_plan_id_over_the_file_name(self):
+        from app.services.ai.agents.workflow_agent import WorkflowAgent
+        from app.services.ai.agent.types import AgentResult
+        data = {'project_id': 'p', 'jmx_path': 'test_plans/p/237f8f15.jmx', 'test_plan_id': '8bbad6ad'}
+        result = AgentResult(True, 'task', plan=[PlanStep(1, 'create', success=True, result=ToolResult(True, data=data))])
+        assert WorkflowAgent._extract_workflow_results(result)['test_plan_ids'] == ['8bbad6ad']
+
 
 class TestToolResultContract:
     @pytest.mark.asyncio
@@ -1444,3 +1451,85 @@ class TestToolTimeout:
         assert tr.success is False
         assert tr.error_category == ErrorCategory.RETRYABLE
         assert "timed out" in tr.error
+
+
+@pytest.mark.asyncio
+async def test_later_steps_see_the_task_before_earlier_results_and_are_told_not_to_redo_them():
+    # Regression: with the task after the history, each step re-ran the whole task (duplicate projects).
+    calls = []
+    registry = ToolRegistry()
+    registry.register(make_echo_tool(calls))
+    adapter = FakeAdapter(tool_responses=[
+        ToolCallResponse(tool_calls=[ToolCallRequest('c1', 'echo_tool', {'msg': 'project p1 created'})]),
+        ToolCallResponse(text='step 1 done'),
+        ToolCallResponse(tool_calls=[ToolCallRequest('c2', 'echo_tool', {'msg': 'plan for p1'})]),
+        ToolCallResponse(text='step 2 done'),
+    ])
+    agent = make_agent(adapter, registry)
+    agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'create project', 'echo_tool'),
+                                                 PlanStep(2, 'create plan', 'echo_tool')])
+    result = await agent.run('TASK: create project then plan')
+    assert result.success and calls == ['project p1 created', 'plan for p1']
+    second_step = adapter.tool_messages[2]
+    contents = [m.content or '' for m in second_step]
+    task_at = next(i for i, c in enumerate(contents) if c.startswith('TASK:'))
+    result_at = next(i for i, m in enumerate(second_step) if m.role == 'tool' and 'project p1 created' in (m.content or ''))
+    assert task_at < result_at
+    assert contents.count('TASK: create project then plan') == 1
+    assert contents[-1].startswith('Current step 2: create plan') and 'Do only this step' in contents[-1]
+
+
+@pytest.mark.asyncio
+async def test_workflow_stream_yields_step_events_then_the_result():
+    from app.services.ai.agents.workflow_agent import WorkflowAgent
+    calls = []
+    registry = ToolRegistry()
+    registry.register(make_echo_tool(calls))
+    adapter = FakeAdapter(tool_responses=[
+        ToolCallResponse(tool_calls=[ToolCallRequest('c1', 'echo_tool', {'msg': 'hi'})]),
+        ToolCallResponse(text='done')], chat_responses=['## Summary\nAll good'])
+    agent = WorkflowAgent(adapter, tools=registry)
+    agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'echo', 'echo_tool')])
+    items = [item async for item in agent.stream_from_doc('GET /x', 'r')]
+    kinds = [kind for kind, _ in items]
+    assert kinds[-1] == 'result' and kinds.count('result') == 1
+    assert 'step_start' in [payload.type for kind, payload in items if kind == 'event']
+    result = items[-1][1]
+    assert result['success'] and result['diagnostic_summary'] == '## Summary\nAll good'
+
+
+@pytest.mark.asyncio
+async def test_run_error_names_the_failed_step_and_its_error():
+    calls = []
+    registry = ToolRegistry()
+    registry.register(make_echo_tool(calls))
+
+    async def broken(path: str = '') -> dict:
+        raise FileNotFoundError(f'no such plan: {path}')
+    registry.register(Tool(name='validate', description='validate', handler=broken,
+                           parameters={'type': 'object', 'properties': {'path': {'type': 'string'}}}))
+    adapter = FakeAdapter(tool_responses=[
+        ToolCallResponse(tool_calls=[ToolCallRequest('a', 'echo_tool', {'msg': 'created'}),
+                                     ToolCallRequest('b', 'validate', {'path': 'wrong.jmx'})]),
+        ToolCallResponse(text='done')])
+    agent = make_agent(adapter, registry)
+    agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'create and validate the plan', 'echo_tool')])
+    result = await agent.run('task')
+    assert not result.success and calls == ['created']
+    assert result.error.startswith('Step 1 failed (create and validate the plan):')
+    assert 'wrong.jmx' in result.error
+
+
+@pytest.mark.asyncio
+async def test_summary_keeps_tool_receipts_but_drops_the_step_narration():
+    adapter = FakeAdapter()
+    agent = make_agent(adapter)
+    data = {'tool_statuses': [{'tool': 'create_jmx', 'success': True, 'error': None}],
+            'final_text': 'NARRATION ' * 50, 'tool_results': [{'jmx_path': 'RECEIPT_PATH'}]}
+    await agent._generate_final_response('task', [PlanStep(1, 'make plan', success=True, result=ToolResult(True, data=data))])
+    prompt = adapter.chat_calls[0][-1].content
+    assert 'RECEIPT_PATH' in prompt and 'NARRATION' not in prompt
+    # With no receipts, the narration is all there is and stays.
+    only_text = {'tool_statuses': [], 'final_text': 'ONLY_TEXT', 'message': 'ONLY_TEXT'}
+    await agent._generate_final_response('task', [PlanStep(1, 'x', success=False, result=ToolResult(False, data=only_text))])
+    assert 'ONLY_TEXT' in adapter.chat_calls[1][-1].content

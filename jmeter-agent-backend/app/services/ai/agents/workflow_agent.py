@@ -122,11 +122,35 @@ Execute in order:
     ) -> dict:
         """Generate plans and optionally execute, returning progress and actual artifact IDs."""
         task = self.build_task(api_documentation, testing_requirements, test_types, execute)
-        result = await self.run(task)
+        return self._result_dict(await self.run(task))
 
+    async def stream_from_doc(
+        self,
+        api_documentation: str,
+        testing_requirements: str = "",
+        test_types: Optional[list[str]] = None,
+        execute: bool = False,
+    ) -> AsyncIterator[tuple[str, object]]:
+        """Like run_from_doc, but yields ("event", AgentEvent) as work happens, then ("result", dict)."""
+        task = self.build_task(api_documentation, testing_requirements, test_types, execute)
+        finished = {}
+
+        async def operation():
+            finished['result'] = await self.run(task)
+            return finished['result']
+
+        async for event in self._stream_operation(operation):
+            if event.type != 'done':
+                yield 'event', event
+            elif 'result' in finished:
+                yield 'result', self._result_dict(finished['result'])
+            else:  # rejected before running, e.g. the agent was busy
+                yield 'result', {'success': False, 'error': (event.data or {}).get('error') or event.message,
+                                 'project_id': '', 'test_plan_ids': [], 'diagnostic_summary': ''}
+
+    def _result_dict(self, result) -> dict:
         # Extract structured data from plan results for frontend compatibility
         extracted = self._extract_workflow_results(result)
-
         return {
             "success": result.success,
             "output": result.output,
@@ -138,7 +162,8 @@ Execute in order:
             "error": result.error,
             "project_id": extracted.get("project_id", ""),
             "test_plan_ids": extracted.get("test_plan_ids", []),
-            "diagnostic_summary": extracted.get("diagnostic_summary", result.output[:500] if result.output else ""),
+            # The agent's own summary reads better than raw tool receipts (which list file paths).
+            "diagnostic_summary": result.output if result.success and result.output else extracted.get("diagnostic_summary", ""),
         }
 
     @staticmethod
@@ -175,9 +200,10 @@ Execute in order:
                 jmx_path = payload.get("jmx_path", "")
                 if jmx_path:
                     import os
-                    fname = os.path.basename(jmx_path).replace(".jmx", "")
-                    if fname not in test_plan_ids:
-                        test_plan_ids.append(fname)
+                    # create_jmx returns the registered plan ID; the file name is only a fallback.
+                    plan_id = payload.get("test_plan_id") or os.path.basename(jmx_path).replace(".jmx", "")
+                    if plan_id not in test_plan_ids:
+                        test_plan_ids.append(plan_id)
 
                 msg = payload.get("message", "")
                 if msg:

@@ -742,7 +742,8 @@ async def list_executions(
         summary = e.summary
         verdict = None
         if summary and summary.total_requests:
-            evaluation = requirements_service.evaluate(project_requirements.get(e.project_id), summary)
+            evaluation = requirements_service.evaluate(project_requirements.get(e.project_id), summary,
+                                                       requirements_service.sampler_routes(e.jmx_path))
             verdict = {"verdict": evaluation.verdict, "passed": evaluation.passed,
                        "failed": evaluation.failed, "missing": evaluation.missing}
         rows.append({
@@ -1154,37 +1155,45 @@ async def ai_workflow_stream(request: AIWorkflowRequest):
             msg = "Analyzing API documentation..." if is_en else "正在分析API文档..."
             yield f"data: {json.dumps({'step': 'analyzing_doc', 'message': msg, 'progress': 10})}\n\n"
 
-            result = await agent.run_from_doc(
+            # Forward each plan step as it starts; generation takes minutes and a static
+            # "analyzing" line looked stuck. Unchanged step keys update one progress line.
+            result = None
+            step_count = 0
+            async for kind, payload in agent.stream_from_doc(
                 api_documentation=request.api_documentation,
                 testing_requirements=request.testing_requirements,
                 test_types=None,
                 execute=False,
-            )
+            ):
+                if kind == "result":
+                    result = payload
+                elif payload.type == "plan_ready":
+                    step_count = len((payload.data or {}).get("steps", []))
+                elif payload.type == "step_start" and step_count:
+                    step_id = (payload.data or {}).get("step_id", 0)
+                    step_count = max(step_count, step_id)  # replanning can append steps
+                    description = payload.message.split(": ", 1)[-1]
+                    progress = 10 + int(80 * (step_id - 1) / step_count)
+                    msg = (f"Step {step_id}/{step_count}: {description}" if is_en
+                           else f"第 {step_id}/{step_count} 步：{description}")
+                    yield f"data: {json.dumps({'step': f'agent_step_{step_id}', 'message': msg, 'progress': progress}, ensure_ascii=False)}\n\n"
 
-            if not result["success"]:
+            steps_done = bool(result.get("plan_steps")) and all(step["success"] for step in result["plan_steps"])
+            if not result["success"] and steps_done and result.get("project_id"):
+                # Every step finished and the project exists; only the closing summary failed.
+                # Reporting failure here made people retry and create a duplicate project.
+                note = ("All steps finished, but the closing summary could not be written: "
+                        if is_en else "所有步骤都已完成，只是最后的总结没能生成：")
+                result["diagnostic_summary"] = note + str(result.get("error") or "")
+            elif not result["success"]:
                 err_msg = result.get("error", "Unknown error")
                 yield f"data: {json.dumps({'step': 'error', 'message': err_msg, 'progress': 100, 'error': True}, ensure_ascii=False)}\n\n"
                 return
 
-            # ── Step 2: Extracting ────────────────────────
-            msg2 = "Extracting project info and endpoints..." if is_en else "正在提取项目和接口信息..."
-            yield f"data: {json.dumps({'step': 'extracting_info', 'message': msg2, 'progress': 25})}\n\n"
-
-            # ── Step 3: Creating project ──────────────────
             pid = result.get("project_id", "")
-            msg3 = (f"Creating project (ID: {pid})..." if is_en
-                    else f"正在创建项目 (ID: {pid})...")
-            yield f"data: {json.dumps({'step': 'creating_project', 'message': msg3, 'progress': 40})}\n\n"
-
-            # ── Step 4: Generating test plans ─────────────
             plan_ids = result.get("test_plan_ids", [])
-            for i in range(len(plan_ids)):
-                gen_msg = (f"Generating test plan ({i+1}/{len(plan_ids)})..."
-                           if is_en else f"正在生成测试计划 ({i+1}/{len(plan_ids)})...")
-                progress = 55 + int(25 * ((i + 1) / max(len(plan_ids), 1)))
-                yield f"data: {json.dumps({'step': 'generating_test_plan', 'message': gen_msg, 'progress': progress})}\n\n"
 
-            # ── Step 5: Complete ──────────────────────────
+            # ── Complete ──────────────────────────────────
             plan_count = len(plan_ids)
             complete_msg = (
                 f"Workflow complete! Created project with {plan_count} test plans"

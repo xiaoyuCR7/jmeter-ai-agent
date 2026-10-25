@@ -251,3 +251,51 @@ def test_analysis_prompt_includes_evidence_only_when_given():
     assert '不得改判' not in plain
     with_evidence = build_analysis_prompt({'total_requests': 1}, {}, 'baseline', '## 性能需求\nR1 不达标')
     assert '不得改判需求是否达标' in with_evidence and 'R1 不达标' in with_evidence
+
+
+async def _workflow_events(monkeypatch, items):
+    import json
+    from app.api import routes
+    from app.models.schemas import AIWorkflowRequest
+    from app.services.ai.agents import workflow_agent
+
+    class FakeAgent:
+        def __init__(self, adapter):
+            pass
+
+        async def stream_from_doc(self, **kwargs):
+            for item in items:
+                yield item
+    monkeypatch.setattr(workflow_agent, 'WorkflowAgent', FakeAgent)
+    monkeypatch.setattr(routes.AIAdapterFactory, 'get_adapter', lambda model: object())
+    response = await routes.ai_workflow_stream(AIWorkflowRequest(api_documentation='doc', testing_requirements='req'))
+    body = ''.join([chunk if isinstance(chunk, str) else chunk.decode() async for chunk in response.body_iterator])
+    return [json.loads(line[6:]) for line in body.splitlines() if line.startswith('data: ')]
+
+
+@pytest.mark.asyncio
+async def test_workflow_stream_reports_each_step_and_counts_appended_steps(monkeypatch):
+    from app.services.ai.agent.types import AgentEvent
+    result = {'success': True, 'plan_steps': [{'step_id': 1, 'success': True}], 'project_id': 'p1',
+              'test_plan_ids': ['plan1'], 'diagnostic_summary': 'ok', 'error': None}
+    events = await _workflow_events(monkeypatch, [
+        ('event', AgentEvent('plan_ready', 'Plan has 2 steps', {'steps': [{}, {}]})),
+        ('event', AgentEvent('step_start', 'Step 1/2: create project', {'step_id': 1})),
+        ('event', AgentEvent('step_start', 'Step 3/2: summarize', {'step_id': 3})),
+        ('result', result),
+    ])
+    messages = [e['message'] for e in events]
+    assert '第 1/2 步：create project' in messages and '第 3/3 步：summarize' in messages
+    assert events[-1]['step'] == 'complete' and events[-1]['project_id'] == 'p1'
+
+
+@pytest.mark.asyncio
+async def test_workflow_whose_steps_all_finished_is_complete_even_if_the_summary_failed(monkeypatch):
+    result = {'success': False, 'plan_steps': [{'step_id': 1, 'success': True}], 'project_id': 'p1',
+              'test_plan_ids': ['plan1'], 'diagnostic_summary': '', 'error': 'Summary generation failed: budget'}
+    events = await _workflow_events(monkeypatch, [('result', result)])
+    assert events[-1]['step'] == 'complete' and events[-1]['project_id'] == 'p1'
+    assert '最后的总结没能生成' in events[-1]['diagnostic_summary']
+    failed = dict(result, plan_steps=[{'step_id': 1, 'success': False}])
+    events = await _workflow_events(monkeypatch, [('result', failed)])
+    assert events[-1]['step'] == 'error'

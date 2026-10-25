@@ -89,7 +89,9 @@ def _compact_tool_data(value, budget=1800, depth=0):
             if remaining < len(str(key)) + 40:
                 result['_truncated'] = True
                 break
-            item = _compact_tool_data(value[key], min(600, remaining - len(str(key)) - 10), depth + 1)
+            # Priority keys are already first, so a value may use what is left. A fixed per-key cap
+            # cut a 4-item requirements draft to 3 items, and the model then made up the 4th.
+            item = _compact_tool_data(value[key], remaining - len(str(key)) - 10, depth + 1)
             result[str(key)] = item
             remaining -= len(json.dumps({str(key): item}, ensure_ascii=False, default=str))
         return result
