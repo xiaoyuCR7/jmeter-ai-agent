@@ -172,74 +172,6 @@ def _save_analysis_markdown(report_dir: str, execution_id: str, analysis) -> str
 # Startup Helpers
 # ═══════════════════════════════════════════════════════════
 
-def scan_test_plans():
-    """启动时扫描 test_plans 目录，加载未在DB中记录的 .jmx 文件。
-
-    文件名格式（兼容两种）:
-    - 新格式: {plan_id}.jmx (如 d3ee03d4.jmx)
-    - 旧格式: {type}_test_{plan_id}_{hash}.jmx (如 baseline_test_d3ee03d4_a242a763.jmx)
-
-    只恢复 store 中不存在的测试计划（DB已同步的优先）。
-    """
-    if not os.path.exists(settings.TEST_PLANS_DIR):
-        return
-    import re as _re
-    for item in os.listdir(settings.TEST_PLANS_DIR):
-        item_path = os.path.join(settings.TEST_PLANS_DIR, item)
-
-        if os.path.isdir(item_path):
-            for filename in os.listdir(item_path):
-                if filename.endswith('.jmx'):
-                    filepath = os.path.join(item_path, filename)
-                    # Try to extract plan_id from filename
-                    basename = filename.replace('.jmx', '')
-                    # Pattern: type_test_PLANID_HASH or just PLANID
-                    match = _re.match(r'(?:[a-z]+_test_)?([a-f0-9]{8})(?:_[a-f0-9]{8})?$', basename)
-                    if match:
-                        plan_id = match.group(1)
-                    else:
-                        # Fallback: use last 8-char hex segment, or whole basename[:8]
-                        hex_segments = _re.findall(r'[a-f0-9]{8}', basename)
-                        plan_id = hex_segments[-1] if hex_segments else basename[:8]
-
-                    # Skip if already in store (loaded from DB)
-                    if plan_id in store.test_plans:
-                        continue
-
-                    from app.models.schemas import TestConfig, TestType
-                    info = TestPlanInfo(
-                        id=plan_id,
-                        project_id=item,
-                        name=basename,
-                        description="从磁盘恢复的测试计划",
-                        jmx_path=filepath,
-                        created_at=datetime.fromtimestamp(os.path.getmtime(filepath)),
-                        test_config=TestConfig(test_type=TestType.BASELINE),
-                        endpoints_count=0
-                    )
-                    store.test_plans[plan_id] = info
-
-        elif item.endswith('.jmx'):
-            filepath = item_path
-            basename = item.replace('.jmx', '')
-            match = _re.match(r'(?:[a-z]+_test_)?([a-f0-9]{8})(?:_[a-f0-9]{8})?$', basename)
-            plan_id = match.group(1) if match else basename[:8]
-
-            if plan_id not in store.test_plans:
-                from app.models.schemas import TestConfig, TestType
-                info = TestPlanInfo(
-                    id=plan_id,
-                    project_id=DEFAULT_PROJECT_ID,
-                    name=basename,
-                    description="从磁盘恢复的测试计划（已迁移到默认项目）",
-                    jmx_path=filepath,
-                    created_at=datetime.fromtimestamp(os.path.getmtime(filepath)),
-                    test_config=TestConfig(test_type=TestType.BASELINE),
-                    endpoints_count=0
-                )
-                store.test_plans[plan_id] = info
-
-
 async def ensure_default_project():
     """确保默认项目存在，并持久化到数据库"""
     if DEFAULT_PROJECT_ID not in store.projects:
@@ -307,12 +239,6 @@ def scan_reports():
         logging.getLogger(__name__).info(
             f"Recovered {recovered} orphan execution(s) from reports directory"
         )
-
-
-# 移除模块级别的调用，改为在应用启动时调用
-# scan_test_plans()
-# scan_reports()
-# ensure_default_project()
 
 
 # ===== Test Templates =====
@@ -648,8 +574,8 @@ async def update_jmx_tree(plan_id: str, request: UpdateJMXTreeRequest):
         with open(plan.jmx_path, "w", encoding="utf-8") as f:
             f.write(jmx_content)
 
-        if request.name:
-            plan.name = request.name
+        if request.name and request.name != plan.name:
+            await _persist_test_plan(plan.model_copy(update={"name": request.name}))
 
         return {"success": True, "message": "JMX updated successfully"}
     except Exception as e:

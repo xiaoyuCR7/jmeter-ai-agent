@@ -173,3 +173,22 @@ def test_utc_now_naive_preserves_legacy_database_contract():
     assert value.tzinfo is None
     assert before <= value <= after
 
+
+
+@pytest.mark.asyncio
+async def test_saving_tree_with_new_name_persists_the_rename(monkeypatch, tmp_path):
+    from app.api import routes
+    from app.models.schemas import TestConfig, TestPlanInfo, UpdateJMXTreeRequest
+    jmx = tmp_path / 'plan.jmx'
+    jmx.write_text('<jmeterTestPlan><hashTree><TestPlan testclass="TestPlan" testname="P"/><hashTree/></hashTree></jmeterTestPlan>',
+                   encoding='utf-8')
+    plan = TestPlanInfo(id='abcd1234', project_id='default', name='Old', jmx_path=str(jmx),
+                        created_at=datetime.now(), test_config=TestConfig(test_type='baseline'), endpoints_count=1)
+    monkeypatch.setitem(routes.store.test_plans, plan.id, plan)
+    persisted = []
+    monkeypatch.setattr(routes, '_persist_test_plan', AsyncMock(side_effect=persisted.append))
+    tree = routes.parse_jmx(str(jmx))
+    await routes.update_jmx_tree(plan.id, UpdateJMXTreeRequest(tree=tree, name='New'))
+    assert [p.name for p in persisted] == ['New']
+    await routes.update_jmx_tree(plan.id, UpdateJMXTreeRequest(tree=tree))
+    assert len(persisted) == 1
