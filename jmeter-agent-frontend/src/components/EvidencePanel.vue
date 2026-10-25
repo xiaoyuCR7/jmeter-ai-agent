@@ -1,7 +1,13 @@
 <template>
   <div class="evidence-panel">
     <section class="panel">
-    <div class="section-header"><h4>{{ L('性能需求达标', 'Requirements') }}</h4></div>
+    <div class="section-header">
+      <h4>{{ L('性能需求达标', 'Requirements') }}</h4>
+      <div class="header-actions">
+        <el-button text size="small" @click="$router.push(`/projects/${projectId}/requirements`)">{{ L('编辑需求', 'Edit requirements') }}</el-button>
+        <el-button text size="small" :loading="rejudging" @click="rejudge">{{ L('按当前需求重新判定', 'Re-check against current requirements') }}</el-button>
+      </div>
+    </div>
     <template v-if="req && req.verdict !== 'none'">
       <p class="tally">
         {{ L('通过', 'Passed') }} <b class="ok">{{ req.passed }}</b> ·
@@ -95,7 +101,10 @@
           {{ L('配置服务端监控 →', 'Configure server monitoring →') }}
         </el-button>
       </div>
-      <el-alert v-else-if="server.status === 'error'" type="error" :closable="false" :title="L('采集失败：', 'Collection failed: ') + (server.error || '')" />
+      <el-alert v-else-if="server.status === 'error'" type="error" :closable="false" :title="L('采集失败：', 'Collection failed: ') + (server.error || '')"
+        :description="L('多数是 Prometheus 地址不通或 PromQL 有误，可以到项目设置里点「测试连接」排查。', 'Usually the Prometheus address is unreachable or a PromQL query is wrong. Use Test connection in project settings to check.')" />
+      <el-alert v-else-if="server.status === 'no_data'" type="warning" :closable="false" :title="L('Prometheus 连得上，但压测期间没有数据', 'Prometheus answered, but had no data for this run')"
+        :description="L('常见原因：查询的标签和实际不符、目标机器没装对应的 exporter，或这次执行早于 Prometheus 的数据保留期。', 'Common causes: the query labels do not match, the target has no matching exporter, or the run is older than Prometheus retention.')" />
       <template v-else>
         <ul v-if="server.findings?.length" class="findings">
           <li v-for="(f, i) in server.findings" :key="i">{{ f }}</li>
@@ -110,6 +119,7 @@
           <el-table-column :label="L('平均 / P95 / 峰值', 'Avg / P95 / Peak')" min-width="190">
             <template #default="{ row }">
               <span v-if="row.error" class="bad">{{ row.error }}</span>
+              <span v-else-if="row.no_data" class="muted">{{ L('压测期间无数据', 'No data during the run') }}</span>
               <span v-else>{{ row.avg }} / {{ row.p95 }} / <b>{{ row.max }}</b>{{ row.unit }} <span class="sub">@{{ row.peak_at_s }}s</span></span>
             </template>
           </el-table-column>
@@ -192,6 +202,21 @@ const metricTitle = (m: string) => ({
   max_response_time: L('最大', 'Max'), error_rate: L('错误率', 'Errors %'), throughput: 'TPS',
 } as Record<string, string>)[m] || m
 const promoting = ref(false)
+const rejudging = ref(false)
+
+// Evidence is recomputed on every request, so fetching it again applies requirement edits made since the page loaded.
+async function rejudge() {
+  if (!props.evidence) return
+  rejudging.value = true
+  try {
+    emit('updated', (await api.getExecutionEvidence(props.evidence.execution_id)).data)
+    ElMessage.success(L('已按当前需求重新判定', 'Re-checked against the current requirements'))
+  } catch (e: any) {
+    ElMessage.error(e.response?.data?.detail || L('重新判定失败', 'Re-check failed'))
+  } finally {
+    rejudging.value = false
+  }
+}
 
 async function promote() {
   if (!props.evidence) return
@@ -263,6 +288,7 @@ const chartOption = computed(() => {
 .delta small { color: inherit; opacity: .8; }
 .tx-table { margin-top: 8px; }
 .section-header { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; }
+.header-actions { display: flex; gap: 4px; flex-wrap: wrap; }
 .section-header h4 { margin: 0; font-size: 15px; font-weight: 600; color: var(--app-text); }
 .findings { margin: 0 0 12px; padding-left: 18px; color: var(--app-danger); font-size: 13px; }
 .chart-block { margin-top: 12px; }

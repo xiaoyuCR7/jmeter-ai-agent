@@ -29,10 +29,19 @@
         </div>
       </section>
 
-      <section class="kpis">
-        <div v-for="kpi in kpis" :key="kpi.label" class="kpi">
-          <div class="kpi-label">{{ kpi.label }}</div>
-          <div :class="['kpi-value', 'num', kpi.tone]">{{ kpi.value }}</div>
+      <section class="kpi-block">
+        <div v-if="reference" class="kpi-caption">
+          <span>{{ reference.kind === 'baseline' ? L('对比基线', 'Compared with baseline') : L('对比上一次执行', 'Compared with the previous run') }}「{{ reference.data.name }}」</span>
+          <span class="hint">{{ L(`变化超过 ${reference.data.threshold_pct ?? 20}% 且变差记为退化`, `A change worse than ${reference.data.threshold_pct ?? 20}% counts as a regression`) }}</span>
+        </div>
+        <div class="kpis">
+          <div v-for="kpi in kpis" :key="kpi.label" class="kpi">
+            <div class="kpi-label">{{ kpi.label }}</div>
+            <div :class="['kpi-value', 'num', kpi.tone]">{{ kpi.value }}</div>
+            <div v-if="kpi.delta" :class="['kpi-delta', 'num', kpi.delta.tone]" :title="kpi.delta.title">
+              {{ kpi.delta.text }} <span class="was">{{ kpi.delta.was }}</span>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -200,15 +209,36 @@ const historyLines = computed(() => {
   ]
 })
 
+// The baseline wins over the previous run when both exist; it is the reference the team agreed on.
+const reference = computed(() => {
+  const history = report.value?.evidence?.baseline
+  if (history?.baseline?.deltas?.length) return { kind: 'baseline', data: history.baseline }
+  if (history?.previous?.deltas?.length) return { kind: 'previous', data: history.previous }
+  return null
+})
+
+function deltaFor(metric: string, format: (v: number) => string) {
+  const d = reference.value?.data.deltas.find((x: any) => x.metric === metric)
+  if (!d) return null
+  const arrow = d.target > d.baseline ? '▲' : d.target < d.baseline ? '▼' : '='
+  const change = d.delta_pct === null ? '' : ` ${d.delta_pct > 0 ? '+' : ''}${d.delta_pct}%`
+  return {
+    text: `${arrow}${change}`,
+    was: `${L('原', 'was')} ${format(d.baseline)}`,
+    tone: d.is_regression ? 'bad' : d.direction === 'better' ? 'good' : '',
+    title: d.is_regression ? L('退化', 'Regression') : d.direction === 'better' ? L('变好', 'Better') : L('基本持平', 'Stable'),
+  }
+}
+
 const kpis = computed(() => {
   const s = summary.value
   return [
-    { label: L('总请求', 'Requests'), value: (s.total_requests ?? 0).toLocaleString() },
-    { label: L('平均响应', 'Avg'), value: formatMs(s.avg_response_time) },
-    { label: 'P95', value: formatMs(s.percentiles?.p95 ?? s.p95_response_time) },
-    { label: 'P99', value: formatMs(s.percentiles?.p99 ?? s.p99_response_time) },
-    { label: L('错误率', 'Error rate'), value: formatPct(s.error_rate), tone: s.error_rate > 0 ? 'bad' : '' },
-    { label: L('吞吐量 TPS', 'Throughput'), value: formatTps(s.throughput) },
+    { label: L('总请求', 'Requests'), value: (s.total_requests ?? 0).toLocaleString(), delta: null },
+    { label: L('平均响应', 'Avg'), value: formatMs(s.avg_response_time), delta: deltaFor('avg_response_time', formatMs) },
+    { label: 'P95', value: formatMs(s.percentiles?.p95 ?? s.p95_response_time), delta: deltaFor('p95_response_time', formatMs) },
+    { label: 'P99', value: formatMs(s.percentiles?.p99 ?? s.p99_response_time), delta: deltaFor('p99_response_time', formatMs) },
+    { label: L('错误率', 'Error rate'), value: formatPct(s.error_rate), tone: s.error_rate > 0 ? 'bad' : '', delta: deltaFor('error_rate', formatPct) },
+    { label: L('吞吐量 TPS', 'Throughput'), value: formatTps(s.throughput), delta: deltaFor('throughput', formatTps) },
   ]
 })
 
@@ -368,13 +398,27 @@ onMounted(loadReport)
   .good { color: var(--app-success); }
 }
 
-.kpis {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+.kpi-block {
   border: 1px solid var(--app-border);
   border-radius: var(--app-radius-lg);
   background: var(--app-surface);
   overflow: hidden;
+}
+
+.kpi-caption {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px 16px;
+  flex-wrap: wrap;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--app-border);
+  font-size: 13px;
+  color: var(--app-text-secondary);
+}
+
+.kpis {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
 
   @media (max-width: 900px) { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   @media (max-width: 520px) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -383,6 +427,10 @@ onMounted(loadReport)
   .kpi-label { font-size: 12px; color: var(--app-text-muted); }
   .kpi-value { font-size: 22px; font-weight: 600; color: var(--app-text); margin-top: 2px; }
   .kpi-value.bad { color: var(--app-danger); }
+  .kpi-delta { margin-top: 2px; font-size: 12px; color: var(--app-text-muted); white-space: nowrap; }
+  .kpi-delta.bad { color: var(--app-danger); font-weight: 600; }
+  .kpi-delta.good { color: var(--app-success); }
+  .kpi-delta .was { font-weight: 400; color: var(--app-text-muted); }
 }
 
 .report-tabs :deep(.el-tab-pane) { display: flex; flex-direction: column; gap: 16px; }
