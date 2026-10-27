@@ -38,6 +38,11 @@ def _directory_project(path):
 
 TERMINAL = {TestExecutionStatus.COMPLETED, TestExecutionStatus.FAILED, TestExecutionStatus.CANCELLED}
 
+# started: the process is launching. finished: the run reached a terminal status (completed,
+# failed or cancelled), with its summary when the report parsed; sent once per run.
+# analysis_completed: emitted by whoever ran the post-run AI analysis.
+EVENTS = ('started', 'finished', 'analysis_completed')
+
 
 def validate_id(value: str) -> str:
     """IDs are portable single path components, including on Windows."""
@@ -93,6 +98,33 @@ class ExecutionLifecycle:
         self._closed = False
         self._executors = {}
         self._prepared = set()
+        self._listeners = {event: [] for event in EVENTS}
+        self._finished = set()
+
+    def on(self, event, handler):
+        """Call ``await handler(execution)`` on ``event`` for every run, whatever started it.
+
+        Unlike the per-call before_execute/postprocess, listeners see runs from the Web,
+        agents, the scheduler and MCP alike. They get a copy, must return quickly and
+        cannot fail the run.
+        """
+        if handler not in self._listeners[event]:
+            self._listeners[event].append(handler)
+
+    def off(self, event, handler):
+        if handler in self._listeners[event]:
+            self._listeners[event].remove(handler)
+
+    async def emit(self, event, execution):
+        if event == 'finished':
+            if execution.status not in TERMINAL or execution.id in self._finished:
+                return
+            self._finished.add(execution.id)
+        for handler in list(self._listeners[event]):
+            try:
+                await handler(execution.model_copy(deep=True))
+            except Exception as error:
+                logger.warning('%s listener failed for %s: %s', event, execution.id, error)
 
     def start(self):
         """Reopen admission only after the previous lifecycle fully drained."""
@@ -270,12 +302,14 @@ class ExecutionLifecycle:
             if execution.status == TestExecutionStatus.CANCELLED:
                 execution.end_time = datetime.now()
                 await persist_execution(execution)
+                await self.emit('finished', execution)
                 return execution
             if hashlib.sha256(Path(execution.jmx_path).read_bytes()).hexdigest() != execution.source_sha256:
                 raise ValueError('Execution snapshot changed after registration')
             execution.status = TestExecutionStatus.RUNNING
             execution.start_time = datetime.now()
             await persist_execution(execution)
+            await self.emit('started', execution)
             def progress(pct):
                 execution.progress = pct
                 cached = store.get_execution(execution_id)
@@ -327,6 +361,8 @@ class ExecutionLifecycle:
                     execution.report_error = str(error)
             else:
                 execution.report_status = 'skipped'
+            # Notify on the process result; postprocessing such as AI analysis can take minutes.
+            await self.emit('finished', execution)
             if postprocess:
                 previous_report_status = execution.report_status
                 execution.report_status = 'running'
@@ -353,6 +389,7 @@ class ExecutionLifecycle:
             elif execution.report_status == 'running':
                 execution.report_status = 'cancelled'
             await self._persist_owned_state(execution)
+            await self.emit('finished', execution)
             raise
         except Exception as error:
             if execution.status not in TERMINAL:
@@ -360,6 +397,7 @@ class ExecutionLifecycle:
                 execution.error_message = str(error)
                 execution.end_time = datetime.now()
             await self._persist_owned_state(execution)
+            await self.emit('finished', execution)
             raise
         finally:
             self._prepared.discard(execution_id)
@@ -391,6 +429,7 @@ class ExecutionLifecycle:
                 execution.end_time = datetime.now()
                 execution.error_message = 'Execution stopped before launch; authorization or admission failed'
                 await self._persist_owned_state(execution)
+                await self.emit('finished', execution)
                 self._prepared.discard(execution.id)
                 self._tasks.pop(execution.id, None)
             raise
@@ -431,6 +470,7 @@ class ExecutionLifecycle:
             execution.status = TestExecutionStatus.CANCELLED
             execution.end_time = datetime.now()
             await persist_execution(execution)
+            await self.emit('finished', execution)
         self._prepared.discard(execution_id)
         return True
 

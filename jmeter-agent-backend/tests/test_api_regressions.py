@@ -77,22 +77,21 @@ async def test_resource_fallback_uses_configured_readiness_thresholds(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_invalid_analysis_does_not_mark_report_complete(monkeypatch, tmp_path):
+async def test_invalid_analysis_is_recorded_on_the_analysis_not_the_report(monkeypatch, tmp_path):
     from app.api import routes
     from app.models.schemas import ReportAnalysis
     from app.services.ai.rag.archiver import rag_archiver
-    import app.services.notifications as notifications
     analysis = ReportAnalysis(analysis_status='invalid', overall_assessment='Invalid model response', conclusion='Unknown')
     monkeypatch.setattr(routes, 'TestAnalyzer', lambda **kwargs: SimpleNamespace(analyze=AsyncMock(return_value=analysis)))
     monkeypatch.setattr(rag_archiver, 'archive_raw_report', lambda **kwargs: None)
-    monkeypatch.setattr(notifications, 'notify_test_completed', AsyncMock())
     execution = SimpleNamespace(id='fixture', status=routes.TestExecutionStatus.COMPLETED,
         summary=SimpleNamespace(model_dump=lambda: {'total_requests': 10}), test_plan_id='fixture',
         report_dir=str(tmp_path), error_message=None, log_path=None, report_status='running', report_error=None)
     await routes._postprocess_web_execution(execution, {})
     assert execution.status == routes.TestExecutionStatus.COMPLETED
-    assert execution.report_status == 'failed'
-    assert execution.report_error == 'Invalid model response'
+    # The parsed report is still good; the lifecycle restores its status after postprocessing.
+    assert execution.report_status == 'running' and execution.report_error is None
+    assert execution.ai_analysis.analysis_status == 'invalid'
     assert '尚未逐项事实核验' in (tmp_path / 'ai_analysis.md').read_text(encoding='utf-8')
 
 
@@ -222,11 +221,9 @@ async def test_post_run_analysis_sees_the_report_evidence_and_records_its_verdic
     from app.services import evidence as evidence_service
     from app.services import requirements as requirement_service
     from app.services.ai.rag.archiver import rag_archiver
-    import app.services.notifications as notifications
     analyze = AsyncMock(return_value=ReportAnalysis(overall_assessment='ok', conclusion='ok'))
     monkeypatch.setattr(routes, 'TestAnalyzer', lambda **kwargs: SimpleNamespace(analyze=analyze))
     monkeypatch.setattr(rag_archiver, 'archive_raw_report', lambda **kwargs: None)
-    monkeypatch.setattr(notifications, 'notify_test_completed', AsyncMock())
     summary = DetailedTestSummary(total_requests=10, avg_response_time=100, min_response_time=1, max_response_time=200,
                                   error_rate=0, throughput=5, received_bytes_per_sec=1, sent_bytes_per_sec=1)
     evaluation = requirement_service.RequirementEvaluation(verdict='fail', passed=1, failed=2, missing=0)
@@ -346,3 +343,24 @@ def test_workflow_agent_leaves_requirements_to_the_app():
     agent = WorkflowAgent(SimpleNamespace())
     assert not REQUIREMENT_TOOLS & set(agent.tools._tools)
     assert 'create_project' in agent.tools._tools
+
+
+@pytest.mark.asyncio
+async def test_analysis_crash_is_recorded_on_the_analysis_and_announced(monkeypatch, tmp_path):
+    from app.api import routes
+    from app.services.ai.rag.archiver import rag_archiver
+    from app.services.execution_lifecycle import execution_lifecycle
+    monkeypatch.setattr(routes, 'TestAnalyzer', lambda **kwargs: SimpleNamespace(
+        analyze=AsyncMock(side_effect=TimeoutError('model timed out'))))
+    monkeypatch.setattr(rag_archiver, 'archive_raw_report', lambda **kwargs: None)
+    monkeypatch.setattr(routes, '_analysis_evidence', AsyncMock(return_value=('', None)))
+    emit = AsyncMock()
+    monkeypatch.setattr(execution_lifecycle, 'emit', emit)
+    execution = SimpleNamespace(id='crash', project_id='p', status=routes.TestExecutionStatus.COMPLETED,
+        summary=SimpleNamespace(model_dump=lambda: {'total_requests': 10}), test_plan_id='plan',
+        report_dir=str(tmp_path), error_message=None, log_path=None, report_status='running', report_error=None)
+    await routes._postprocess_web_execution(execution, {})
+    assert execution.report_status == 'running' and execution.report_error is None
+    assert execution.ai_analysis.analysis_status == 'failed'
+    assert 'model timed out' in execution.ai_analysis.overall_assessment
+    emit.assert_awaited_once_with('analysis_completed', execution)

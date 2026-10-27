@@ -141,6 +141,21 @@ which git ignores.
 
 `HOST` must stay a loopback address: there is no login, so the server refuses to start on anything else.
 
+### Webhook
+
+Set `WEBHOOK_URL` to receive a POST for every run, however it was started (UI, agent, scheduler, MCP):
+
+| Event | When | Switch |
+|---|---|---|
+| `test.started` | JMeter is launching | `WEBHOOK_ON_START` |
+| `test.completed` / `test.failed` / `test.cancelled` | The run ended; sent before AI analysis | `WEBHOOK_ON_COMPLETE` / `WEBHOOK_ON_FAILURE` (both failure kinds) |
+| `analysis.completed` | Post-run AI analysis finished or failed | `WEBHOOK_ON_ANALYSIS` |
+
+The JSON body carries the execution, project and plan IDs, plan name, status, duration, key metrics, the requirements
+verdict and any error. `X-JMeter-Agent-Delivery` is a delivery ID that stays the same across retries; use it to drop
+duplicates. With `WEBHOOK_SECRET` set, verify `X-JMeter-Agent-Signature`, which is `sha256=` plus the hex HMAC-SHA256
+of the raw body. Network errors, 408, 429 and 5xx are retried 3 times (after 1 s, 5 s, 15 s); other 4xx are not.
+
 <details>
 <summary><b>Key API endpoints</b></summary>
 

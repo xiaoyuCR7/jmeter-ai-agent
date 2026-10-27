@@ -197,17 +197,6 @@ async def test_disconnect_cancels_and_awaits_pending_tool(server):
 
 
 @pytest.mark.asyncio
-async def test_closing_after_endpoint_does_not_leak_global_subscriber(server):
-    from app.services import notifications
-    before = len(notifications._sse_subscribers)
-    stream, _, _ = await connect()
-    assert len(notifications._sse_subscribers) == before
-    await stream.aclose()
-    assert len(notifications._sse_subscribers) == before
-    assert not server._sessions
-
-
-@pytest.mark.asyncio
 async def test_completed_request_history_and_pending_work_are_bounded(server, monkeypatch):
     stream, query, sid = await connect()
     try:

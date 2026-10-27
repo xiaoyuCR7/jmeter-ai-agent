@@ -204,7 +204,6 @@ class TestSchedulerReadiness:
         scheduler = TestScheduler(monitor=monitor)
         assert scheduler.check_readiness().decision == SchedulerDecision.PROCEED
         assert scheduler._executor is None
-        assert scheduler.on_before_test is None
         assert scheduler._active_test_count == 0
 
     def test_explicit_zero_disables_cooldown_and_wait(self):

@@ -6,7 +6,6 @@ import asyncio
 import platform
 import signal
 import logging
-import httpx
 import psutil
 from datetime import datetime
 from typing import Optional, Callable
@@ -609,41 +608,6 @@ class JMeterExecutor:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         tree.write(output_path, encoding="utf-8", xml_declaration=True)
         return output_path
-
-    async def fire_webhook(self, info: "TestExecutionInfo"):
-        """Send a webhook notification on test completion.
-
-        The webhook URL is configured via WEBHOOK_URL in settings.
-        Payload includes test ID, status, duration, and key metrics.
-        """
-        if not settings.WEBHOOK_URL:
-            return
-
-        # Only fire if conditions match
-        if info.status.value == "completed" and not settings.WEBHOOK_ON_COMPLETE:
-            return
-        if info.status.value == "failed" and not settings.WEBHOOK_ON_FAILURE:
-            return
-
-        duration = 0
-        if info.start_time and info.end_time:
-            duration = (info.end_time - info.start_time).total_seconds()
-
-        payload = {
-            "event": "test_completed",
-            "execution_id": info.id,
-            "status": info.status.value,
-            "duration_seconds": duration,
-            "jmx_path": info.jmx_path,
-            "report_dir": info.report_dir,
-            "error_message": info.error_message,
-        }
-
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                await client.post(settings.WEBHOOK_URL, json=payload)
-        except Exception:
-            pass  # Never let webhook failure affect test execution
 
 
 _executor_instance: Optional[JMeterExecutor] = None

@@ -114,11 +114,6 @@ class TestScheduler:
         self.max_wait_seconds = settings.RESOURCE_MAX_WAIT_SECONDS if max_wait_seconds is None else max_wait_seconds
         self.max_concurrent_tests = max_concurrent_tests or settings.RESOURCE_MAX_CONCURRENT_TESTS
 
-        # Callbacks
-        self.on_before_test: Optional[Callable[[ReadinessCheck], None]] = None
-        self.on_after_test: Optional[Callable[[BatchResult], None]] = None
-        self.on_wait: Optional[Callable[[ResourceSnapshot, float], None]] = None
-
         self._last_test_end: float = 0.0
         self._active_test_count: int = 0
         self._test_semaphore = asyncio.Semaphore(self.max_concurrent_tests)
@@ -243,8 +238,6 @@ class TestScheduler:
             readiness = self.check_readiness()
             pre_snap = readiness.snapshot
             execution.resource_snapshot_pre = pre_snap.to_dict()
-            if self.on_before_test:
-                self.on_before_test(readiness)
             if readiness.decision == SchedulerDecision.OVERLOADED:
                 execution.status = TestExecutionStatus.CANCELLED
                 execution.error_message = f"System overloaded: {readiness.message}"
@@ -254,8 +247,6 @@ class TestScheduler:
                     execution.status = TestExecutionStatus.CANCELLED
                     execution.error_message = f"Resources not ready (auto_wait=False): {readiness.message}"
                     return
-                if self.on_wait:
-                    self.on_wait(pre_snap, readiness.suggested_wait_seconds)
                 safe = await self.monitor.wait_until_safe(timeout=self.max_wait_seconds, check_interval=5.0)
                 if not safe and readiness.decision == SchedulerDecision.WAIT:
                     execution.status = TestExecutionStatus.CANCELLED
@@ -307,9 +298,6 @@ class TestScheduler:
             pre_snapshot=pre_snap,
             post_snapshot=post_snap,
         )
-
-        if self.on_after_test:
-            self.on_after_test(batch_result)
 
         return batch_result
 

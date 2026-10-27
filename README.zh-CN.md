@@ -136,6 +136,20 @@ Cursor、VS Code 等客户端的配置可以在「设置 → 外部助手接入�
 
 因为没有登录，`HOST` 只能是本机回环地址，设成其它地址服务会拒绝启动。
 
+### Webhook
+
+设置 `WEBHOOK_URL` 后，每次执行都会向它 POST 事件，不论是从界面、智能体、调度器还是 MCP 发起的：
+
+| 事件 | 时机 | 开关 |
+|---|---|---|
+| `test.started` | JMeter 正在启动 | `WEBHOOK_ON_START` |
+| `test.completed` / `test.failed` / `test.cancelled` | 执行结束，在 AI 分析之前发送 | `WEBHOOK_ON_COMPLETE` / `WEBHOOK_ON_FAILURE`（同时管失败和取消） |
+| `analysis.completed` | 执行后的 AI 分析完成或失败 | `WEBHOOK_ON_ANALYSIS` |
+
+JSON 内容包括执行、项目、计划的 ID，计划名称，状态，时长，关键指标，需求判定结果和错误信息。`X-JMeter-Agent-Delivery`
+是投递 ID，重试时不变，可用来去重。设置了 `WEBHOOK_SECRET` 时，请校验 `X-JMeter-Agent-Signature`：它是 `sha256=`
+加上请求原始内容的 HMAC-SHA256（十六进制）。网络错误、408、429 和 5xx 会重试 3 次（间隔 1 秒、5 秒、15 秒），其它 4xx 不重试。
+
 <details>
 <summary><b>主要接口</b></summary>
 

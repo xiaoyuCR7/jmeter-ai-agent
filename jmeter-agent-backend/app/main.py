@@ -53,6 +53,7 @@ async def lifespan(app: FastAPI):
     from app.api.mcp_routes import init_mcp_server
     from app.services.ws_manager import ws_manager
     from app.services.execution_lifecycle import execution_lifecycle
+    from app.services import notifications
     from app.services.ai.adapters.factory import AIAdapterFactory
     from app.services.jmeter import resource_monitor
 
@@ -65,6 +66,10 @@ async def lifespan(app: FastAPI):
         cleanup.push_async_callback(AIAdapterFactory.close_all)
         cleanup.push_async_callback(stop_monitoring)
         execution_lifecycle.start()
+        notifications.register(execution_lifecycle)
+        # Runs after the lifecycle shutdown below, so the cancellations it causes are still sent.
+        cleanup.push_async_callback(notifications.drain, 10.0)
+        cleanup.callback(notifications.unregister, execution_lifecycle)
         cleanup.push_async_callback(execution_lifecycle.shutdown)
         cleanup.push_async_callback(ws_manager.stop)
         ws_manager.start()

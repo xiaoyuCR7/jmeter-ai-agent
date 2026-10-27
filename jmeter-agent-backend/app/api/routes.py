@@ -21,7 +21,7 @@ from app.core.config import settings
 from app.services.db_store import db_store
 from app.models.schemas import (
     GenerateTestPlanRequest, TestPlanInfo, ExecuteTestRequest,
-    TestExecutionInfo, TestReport, TestExecutionStatus,
+    TestExecutionInfo, TestReport, TestExecutionStatus, ReportAnalysis,
     AIChatMessage, TestTemplate, TestType, AIModelConfig,
     JMXTreeNode, UpdateJMXTreeRequest,
     ProjectInfo, ProjectEnvironment, ProjectEnvironments, EnvironmentConfig,
@@ -633,16 +633,6 @@ async def download_test_plan(plan_id: str):
 
 
 # ===== Test Execution =====
-async def _execution_started(execution: TestExecutionInfo):
-    from app.services.notifications import notify_test_started
-    plan = store.get_test_plan(execution.test_plan_id)
-    try:
-        await notify_test_started(execution_id=execution.id, jmx_path=execution.source_jmx_path,
-                                  test_plan_name=plan.name if plan else "")
-    except Exception as error:
-        logger.warning("Start notification failed for %s: %s", execution.id, error)
-
-
 async def _analysis_evidence(execution):
     """The same requirement verdicts, baseline comparison and server metrics the report shows."""
     from app.services.evidence import build_evidence, format_for_prompt
@@ -657,7 +647,8 @@ async def _analysis_evidence(execution):
 
 
 async def _postprocess_web_execution(execution: TestExecutionInfo, test_config: dict, ai_model=None):
-    """Optional Web analysis/archive hooks; process status belongs to lifecycle."""
+    """Web runs add AI analysis and RAG archiving. Process status and notifications belong to
+    the lifecycle; an analysis that fails is recorded on the analysis, the report stays usable."""
     if execution.status == TestExecutionStatus.COMPLETED and execution.summary:
         try:
             analyzer = TestAnalyzer(model_type=ai_model)  # None: the factory picks the default model
@@ -668,13 +659,12 @@ async def _postprocess_web_execution(execution: TestExecutionInfo, test_config: 
             analysis.requirements_verdict = verdict
             execution.ai_analysis = analysis
             _save_analysis_markdown(execution.report_dir, execution.id, execution.ai_analysis)
-            if execution.ai_analysis.analysis_status != 'completed':
-                execution.report_status = 'failed'
-                execution.report_error = execution.ai_analysis.overall_assessment
         except Exception as error:
-            execution.report_status = "failed"
-            execution.report_error = f"AI analysis failed: {error}"
             logger.warning("AI analysis failed for %s: %s", execution.id, error)
+            execution.ai_analysis = ReportAnalysis(
+                analysis_status='failed', overall_assessment=f"AI analysis failed: {error}",
+                conclusion="AI 分析未完成")
+        await execution_lifecycle.emit('analysis_completed', execution)
         try:
             from app.services.ai.rag.archiver import rag_archiver
             plan = store.get_test_plan(execution.test_plan_id)
@@ -684,23 +674,13 @@ async def _postprocess_web_execution(execution: TestExecutionInfo, test_config: 
                 version=execution.id, execution_id=execution.id, plan_id=execution.test_plan_id)
         except Exception as error:
             logger.warning("RAG archiving skipped for %s: %s", execution.id, error)
-    from app.services.notifications import notify_test_completed
-    try:
-        await notify_test_completed(
-            execution_id=execution.id, status=execution.status.value,
-            summary=execution.summary.model_dump() if execution.summary else None,
-            error=execution.error_message, report_dir=execution.report_dir or "",
-            log_path=execution.log_path or "")
-    except Exception as error:
-        logger.warning("Completion notification failed for %s: %s", execution.id, error)
 
 
 async def _run_test(execution_id: str, jmx_path: str, test_config: dict, ai_model=None):
     """Compatibility adapter for an already prepared execution."""
     async def postprocess(execution):
         await _postprocess_web_execution(execution, test_config, ai_model)
-    return await execution_lifecycle.run(execution_id, before_execute=_execution_started,
-                                         postprocess=postprocess)
+    return await execution_lifecycle.run(execution_id, postprocess=postprocess)
 
 
 @router.post("/test-plans/{plan_id}/execute", response_model=TestExecutionInfo)
@@ -718,7 +698,7 @@ async def execute_test_plan(
         await _postprocess_web_execution(execution, plan.test_config.model_dump(), ai_model)
     try:
         return await execution_lifecycle.submit(
-            plan.jmx_path, test_plan_id=plan_id, before_execute=_execution_started,
+            plan.jmx_path, test_plan_id=plan_id,
             postprocess=postprocess)
     except (ValueError, FileExistsError) as error:
         raise HTTPException(status_code=409, detail=str(error)) from error

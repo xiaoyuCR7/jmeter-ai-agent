@@ -106,9 +106,12 @@ class Settings(BaseSettings):
     I18N_ENABLED_LANGS: str = "zh-CN,en"         # comma-separated enabled languages
 
     # CI/CD integration
-    WEBHOOK_URL: Optional[str] = None            # URL to POST test completion notifications
-    WEBHOOK_ON_COMPLETE: bool = True             # Fire webhook on test completion
-    WEBHOOK_ON_FAILURE: bool = True              # Fire webhook on test failure
+    WEBHOOK_URL: Optional[str] = None            # URL to POST execution lifecycle events to
+    WEBHOOK_SECRET: Optional[str] = None         # HMAC-SHA256 key for the X-JMeter-Agent-Signature header
+    WEBHOOK_ON_START: bool = True                # test.started
+    WEBHOOK_ON_COMPLETE: bool = True             # test.completed
+    WEBHOOK_ON_FAILURE: bool = True              # test.failed and test.cancelled
+    WEBHOOK_ON_ANALYSIS: bool = True             # analysis.completed (post-run AI analysis)
 
     # JMeter JVM configuration
     JMETER_HEAP_MIN: str = "256m"                # -Xms initial heap

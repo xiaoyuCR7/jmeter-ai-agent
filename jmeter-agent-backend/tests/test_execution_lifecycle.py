@@ -448,3 +448,78 @@ async def test_postprocess_cancel_keeps_process_status_and_marks_reporting_cance
     await lifecycle.shutdown()
     row = await env.db.get_execution(execution.id)
     assert row['status'] == 'completed' and row['report_status'] == 'cancelled'
+
+
+def _record_events(lifecycle):
+    seen = []
+    for event in ('started', 'finished'):
+        async def listener(execution, event=event):
+            seen.append((event, execution.status.value, execution.summary is not None))
+        lifecycle.on(event, listener)
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_listeners_hear_start_and_finish_once_before_postprocessing(env, monkeypatch):
+    lifecycle, module = service()
+    seen = _record_events(lifecycle)
+    async def broken(execution):
+        raise RuntimeError('listener bug')
+    lifecycle.on('finished', broken)
+    async def execute(path, execution_id, **kwargs):
+        return Execution(id=execution_id, test_plan_id='', status=Status.COMPLETED,
+                         jmx_path=path, end_time=datetime.now())
+    async def postprocess(execution):
+        seen.append(('postprocess',))
+    monkeypatch.setattr(module, 'get_executor', lambda: SimpleNamespace(execute=execute))
+    result = await lifecycle.execute(str(env.path), 'events-ok', postprocess=postprocess)
+    assert result.status == Status.COMPLETED  # a failing listener cannot fail the run
+    assert seen == [('started', 'running', False), ('finished', 'completed', False), ('postprocess',)]
+
+
+@pytest.mark.asyncio
+async def test_runs_cancelled_before_launch_or_failing_still_finish(env, monkeypatch):
+    lifecycle, module = service()
+    seen = _record_events(lifecycle)
+    async def not_ready(execution):
+        execution.status = Status.CANCELLED
+    await lifecycle.execute(str(env.path), 'events-cancelled', before_execute=not_ready)
+    async def crash(path, execution_id, **kwargs):
+        raise RuntimeError('JMeter crashed')
+    monkeypatch.setattr(module, 'get_executor', lambda: SimpleNamespace(execute=crash))
+    with pytest.raises(RuntimeError):
+        await lifecycle.execute(str(env.path), 'events-failed')
+    assert seen == [('finished', 'cancelled', False), ('started', 'running', False), ('finished', 'failed', False)]
+
+
+@pytest.mark.asyncio
+async def test_cancelling_during_postprocessing_does_not_finish_twice(env, monkeypatch):
+    lifecycle, module = service()
+    seen = _record_events(lifecycle)
+    entered = asyncio.Event()
+    async def execute(path, execution_id, **kwargs):
+        return Execution(id=execution_id, test_plan_id='', status=Status.COMPLETED, jmx_path=path)
+    async def hook(execution):
+        entered.set()
+        await asyncio.Event().wait()
+    monkeypatch.setattr(module, 'get_executor', lambda: SimpleNamespace(execute=execute))
+    await lifecycle.submit(str(env.path), 'events-post-cancel', postprocess=hook)
+    await entered.wait()
+    await lifecycle.shutdown()
+    assert [e for e in seen if e[0] == 'finished'] == [('finished', 'completed', False)]
+
+
+@pytest.mark.asyncio
+async def test_cancel_endpoint_path_emits_cancelled(env, monkeypatch):
+    lifecycle, module = service()
+    seen = _record_events(lifecycle)
+    started = asyncio.Event()
+    async def execute(path, execution_id, **kwargs):
+        started.set()
+        await asyncio.Event().wait()
+    monkeypatch.setattr(module, 'get_executor', lambda: SimpleNamespace(execute=execute))
+    execution = await lifecycle.submit(str(env.path), 'events-user-cancel')
+    await started.wait()
+    assert await lifecycle.cancel(execution.id)
+    assert seen == [('started', 'running', False), ('finished', 'cancelled', False)]
+
