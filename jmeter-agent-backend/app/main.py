@@ -82,7 +82,8 @@ async def lifespan(app: FastAPI):
         await init_mcp_server()
 
         try:
-            from app.services.jmeter.executor import get_executor
+            from app.services.jmeter.executor import get_executor, remove_orphan_containers
+            await _asyncio.to_thread(remove_orphan_containers)
             executor = get_executor()
             if executor.jmeter_path:
                 logger.info(f"JMeter executable found at: {executor.jmeter_path}")

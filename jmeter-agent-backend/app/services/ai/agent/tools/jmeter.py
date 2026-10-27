@@ -7,6 +7,7 @@ import logging
 
 from app.core.config import settings
 from app.services.execution_lifecycle import execution_lifecycle
+from app.services.jmeter.script_risk import ScriptApprovalRequired
 from app.services.jmeter.report_parser import ReportParser
 from app.services.jmeter.test_scheduler import TestScheduler, SchedulerDecision
 from app.services.jmeter.resource_monitor import get_resource_monitor
@@ -18,6 +19,22 @@ logger = logging.getLogger(__name__)
 # this module never probes the filesystem for the JMeter binary.
 _report_parser = ReportParser()
 _scheduler = TestScheduler()
+
+
+async def _execute_with_script_approval(tool_name: str, jmx_path: str, *args, **kwargs):
+    """Run through the lifecycle; a plan with scripts needs a second, explicit user approval.
+
+    Approving the tool call alone does not show the scripts, so the user is asked again
+    with the list of what will run on this machine. The model can never grant this itself.
+    """
+    try:
+        return await execution_lifecycle.execute(jmx_path, *args, **kwargs)
+    except ScriptApprovalRequired as error:
+        from app.services.confirmations import confirmations
+        if not await confirmations.request(tool_name, {'jmx_path': jmx_path,
+                                                       'runs_scripts_on_this_machine': error.findings}):
+            raise ValueError(f'{error} The user did not approve it; do not retry automatically.') from error
+    return await execution_lifecycle.execute(jmx_path, *args, allow_scripts=True, **kwargs)
 
 
 async def execute_test(jmx_path: str, execution_id: str = "",
@@ -66,8 +83,8 @@ async def execute_test(jmx_path: str, execution_id: str = "",
         resource_info.update(post_test_cpu=snapshot.cpu_percent, post_test_memory=snapshot.memory_percent)
 
     try:
-        result = await execution_lifecycle.execute(
-            jmx_path, execution_id, before_execute=before_execute, postprocess=postprocess)
+        result = await _execute_with_script_approval(
+            'execute_test', jmx_path, execution_id, before_execute=before_execute, postprocess=postprocess)
     except (ValueError, FileNotFoundError, FileExistsError) as error:
         return {"error": str(error), "execution_id": execution_id}
     return {
@@ -202,7 +219,8 @@ async def execute_distributed(jmx_path: str, execution_id: str = "",
         }
 
     try:
-        result = await execution_lifecycle.execute(jmx_path, execution_id, remote_engines=engines or dist_executor.get_engines())
+        result = await _execute_with_script_approval('execute_distributed', jmx_path, execution_id,
+                                                     remote_engines=engines or dist_executor.get_engines())
         return {
             "execution_id": execution_id,
             "status": result.status.value,

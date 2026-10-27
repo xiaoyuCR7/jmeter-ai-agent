@@ -1,7 +1,9 @@
 """One persisted execution lifecycle shared by HTTP, agents and MCP.
 
 JMX is copied byte-for-byte; no parsing, rebuilding or script stripping occurs.
-This is bookkeeping and task ownership, not a sandbox for untrusted JMeter code.
+This is bookkeeping and task ownership, not a sandbox: in local mode a plan with
+scripts runs only with the user's approval (``allow_scripts``); container mode
+is the isolation boundary.
 """
 import asyncio
 import hashlib
@@ -20,6 +22,7 @@ from app.models.schemas import (
 from app.services.db_store import db_store
 from app.services.storage import store
 from app.services.jmeter.executor import get_executor
+from app.services.jmeter.script_risk import ScriptApprovalRequired, scan as scan_scripts
 
 logger = logging.getLogger(__name__)
 
@@ -225,11 +228,18 @@ class ExecutionLifecycle:
             ))
 
     async def prepare(self, jmx_path, execution_id='', *, test_plan_id=None,
-                      project_id='default', test_config=None):
+                      project_id='default', test_config=None, allow_scripts=False):
+        """``allow_scripts`` is the user's approval to run a plan's scripts on this machine."""
         if self._closed:
             raise RuntimeError('Execution lifecycle is shutting down')
         execution_id = validate_id(execution_id or uuid.uuid4().hex)
         path = await self._validate_source(jmx_path)
+        # The bytes checked here are the bytes snapshotted and run.
+        content = path.read_bytes()
+        if settings.JMETER_EXECUTION_MODE == 'local' and not allow_scripts:
+            findings = scan_scripts(content)
+            if findings:
+                raise ScriptApprovalRequired(findings)
         if store.get_execution(execution_id) or await db_store.get_execution(execution_id):
             raise ValueError(f'Execution ID already exists: {execution_id}')
         if test_plan_id:
@@ -251,7 +261,6 @@ class ExecutionLifecycle:
         # Never reuse an existing output directory, even when it has no DB row.
         run_dir.mkdir(exist_ok=False)
         snapshot = run_dir / 'snapshot.jmx'
-        content = path.read_bytes()
         with snapshot.open('xb') as output:
             output.write(content)
         source_path = str(path)
@@ -408,9 +417,10 @@ class ExecutionLifecycle:
                 self._executors.pop(execution_id, None)
 
     async def execute(self, jmx_path, execution_id='', *, test_plan_id=None,
-                      project_id='default', test_config=None, **kwargs):
+                      project_id='default', test_config=None, allow_scripts=False, **kwargs):
         execution = await self.prepare(jmx_path, execution_id, test_plan_id=test_plan_id,
-                                       project_id=project_id, test_config=test_config)
+                                       project_id=project_id, test_config=test_config,
+                                       allow_scripts=allow_scripts)
         return await self._run_prepared(execution, **kwargs)
 
     async def _run_prepared(self, execution, **kwargs):
@@ -435,9 +445,10 @@ class ExecutionLifecycle:
             raise
 
     async def submit(self, jmx_path, execution_id='', *, test_plan_id=None,
-                     project_id='default', test_config=None, **kwargs):
+                     project_id='default', test_config=None, allow_scripts=False, **kwargs):
         execution = await self.prepare(jmx_path, execution_id, test_plan_id=test_plan_id,
-                                       project_id=project_id, test_config=test_config)
+                                       project_id=project_id, test_config=test_config,
+                                       allow_scripts=allow_scripts)
         task = asyncio.create_task(self._run_prepared(execution, **kwargs))
         self._tasks[execution.id] = task
         def finished(done):

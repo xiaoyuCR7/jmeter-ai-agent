@@ -44,6 +44,7 @@ from app.services.jmeter.executor import get_executor
 from app.services.jmeter.report_parser import ReportParser
 from app.services.jmeter.jmx_parser import parse_jmx
 from app.services.jmeter.jmx_builder import build_jmx
+from app.services.jmeter.script_risk import ScriptApprovalRequired
 from app.services.jmeter.component_registry import get_all_components, get_allowed_children
 from app.services.jmeter.sla_engine import SLAEngine, SLAConfig
 from app.services.jmeter.function_registry import get_all_functions
@@ -687,7 +688,8 @@ async def _run_test(execution_id: str, jmx_path: str, test_config: dict, ai_mode
 async def execute_test_plan(
     plan_id: str,
     background_tasks: BackgroundTasks,
-    ai_model: Optional[str] = Query(None, description="AI model for analysis")
+    ai_model: Optional[str] = Query(None, description="AI model for analysis"),
+    allow_scripts: bool = Query(False, description="User approved running this plan's scripts on this machine"),
 ):
     """执行测试计划"""
     if plan_id not in store.test_plans:
@@ -698,8 +700,12 @@ async def execute_test_plan(
         await _postprocess_web_execution(execution, plan.test_config.model_dump(), ai_model)
     try:
         return await execution_lifecycle.submit(
-            plan.jmx_path, test_plan_id=plan_id,
+            plan.jmx_path, test_plan_id=plan_id, allow_scripts=allow_scripts,
             postprocess=postprocess)
+    except ScriptApprovalRequired as error:
+        # The UI lists these and asks before retrying with allow_scripts=true.
+        raise HTTPException(status_code=409, detail={
+            "code": "scripts_need_approval", "message": str(error), "findings": error.findings}) from error
     except (ValueError, FileExistsError) as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
     except FileNotFoundError as error:

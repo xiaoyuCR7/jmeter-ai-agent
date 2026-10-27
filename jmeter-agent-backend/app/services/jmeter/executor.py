@@ -33,6 +33,12 @@ async def _acquire_jmeter_slot() -> asyncio.Semaphore:
 _CREATE_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
 _CREATE_NEW_PROCESS_GROUP = getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0)
 
+logger = logging.getLogger(__name__)
+
+CONTAINER_LABEL = 'jmeter-agent'  # every run container carries it, so orphans can be found
+DOCKER_ENVIRONMENT = {'DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_CONFIG', 'DOCKER_CERT_PATH', 'DOCKER_TLS_VERIFY'}
+OUTPUT_CHECK_SECONDS = 5.0
+
 
 def _is_pid_running(pid: Optional[int]) -> bool:
     """Check whether a process is still alive (False when pid unknown or gone)."""
@@ -192,7 +198,7 @@ class JMeterExecutor:
                     entry['pid'] = pid
                     if progress_callback:
                         monitor = asyncio.create_task(self._monitor_progress(execution_id, flag_file, progress_callback))
-                    await self._wait_for_completion(flag_file, settings.JMETER_TIMEOUT, pid=pid, jtl_path=jtl_path)
+                    await self._wait_within_output_limit(flag_file, pid, jtl_path, report_dir)
                     flag = ''
                     if os.path.exists(flag_file):
                         with open(flag_file, encoding='ascii') as stream:
@@ -251,7 +257,7 @@ class JMeterExecutor:
         command = list(cmd)
         entry = self._running_processes.setdefault(execution_id, {})
         if settings.JMETER_EXECUTION_MODE == 'container':
-            command = self._container_command(command, entry)
+            command = self._container_command(command, entry, execution_id)
         elif self.system == 'Windows' and command[0].lower().endswith(('.bat', '.cmd')):
             script = shutil.which(command[0]) or command[0]
             jar = os.path.join(os.path.dirname(os.path.abspath(script)), 'ApacheJMeter.jar')
@@ -299,11 +305,13 @@ class JMeterExecutor:
         # Child scripts must not inherit backend model keys, JWT secrets or DB credentials.
         allowed = {'PATH', 'JAVA_HOME', 'JRE_HOME', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT',
                    'TEMP', 'TMP', 'HOME', 'USERPROFILE', 'LANG', 'LC_ALL', 'TZ',
-                   'JVM_ARGS', 'JMETER_OPTS', 'HEAP', 'GC_ALGO', 'JMETER_COMPLETE_ARGS',
-                   'DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_CONFIG', 'DOCKER_CERT_PATH', 'DOCKER_TLS_VERIFY'}
+                   'JVM_ARGS', 'JMETER_OPTS', 'HEAP', 'GC_ALGO', 'JMETER_COMPLETE_ARGS'}
+        if settings.JMETER_EXECUTION_MODE == 'container':
+            # Only the Docker CLI needs these; a local JMeter would hand scripts the daemon.
+            allowed |= DOCKER_ENVIRONMENT
         return {key: value for key, value in os.environ.items() if key.upper() in allowed}
 
-    def _container_command(self, command, entry):
+    def _container_command(self, command, entry, execution_id=''):
         import re
         import math
         from pathlib import Path
@@ -319,16 +327,29 @@ class JMeterExecutor:
             raise ValueError('Container user and group must be non-root numeric IDs')
         if settings.JMETER_CONTAINER_MEMORY_MB < 128 or not math.isfinite(settings.JMETER_CONTAINER_CPUS) or settings.JMETER_CONTAINER_CPUS <= 0:
             raise ValueError('Container memory and CPU limits must be positive')
+        network = settings.JMETER_CONTAINER_NETWORK
+        if network and (not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', network)
+                        or network == 'host' or network.startswith('container')):
+            raise ValueError("JMETER_CONTAINER_NETWORK must name a Docker network; 'host' and container:* share namespaces")
         source = Path(entry['working_directory']).resolve(strict=True)
-        if not source.is_relative_to(Path(settings.TEST_PLANS_DIR).resolve()):
+        root = Path(settings.TEST_PLANS_DIR).resolve()
+        if not source.is_relative_to(root):
             raise ValueError('Container resources must be inside TEST_PLANS_DIR; use relative CSV/script paths')
+        if source == root:
+            # A plan at the root would expose every project's files; it gets an empty /work.
+            source = Path(command[command.index('-l') + 1]).parent / 'work'
+            source.mkdir(exist_ok=True)
         name = 'jmeter-agent-' + uuid.uuid4().hex
         argv = [docker, 'run', '--rm', '--pull=never', '--name', name,
+                '--label', f'{CONTAINER_LABEL}=true', '--label', f'{CONTAINER_LABEL}.execution={execution_id}',
+                '--init', '--ipc=none',
                 '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges',
                 '--pids-limit=256', '--memory', f'{settings.JMETER_CONTAINER_MEMORY_MB}m',
                 '--memory-swap', f'{settings.JMETER_CONTAINER_MEMORY_MB}m',
                 '--cpus', str(settings.JMETER_CONTAINER_CPUS), '--user', settings.JMETER_CONTAINER_USER,
                 '--tmpfs', '/tmp:rw,nosuid,nodev,size=256m', '--workdir', '/work']
+        if network:
+            argv += ['--network', network]
         def mount(path, target, readonly=False):
             path = str(Path(path).resolve(strict=True))
             if ',' in path:
@@ -354,6 +375,27 @@ class JMeterExecutor:
 
     async def _execute_unix_terminal(self, cmd: list, execution_id: str, flag_file: str) -> int:
         return self._start_process(cmd, execution_id, flag_file)
+
+    async def _wait_within_output_limit(self, flag_file, pid, jtl_path, report_dir):
+        """Wait for JMeter, stopping it if its output could fill the disk.
+
+        Results, logs and reports are written straight to the host in both modes.
+        """
+        waiting = asyncio.ensure_future(
+            self._wait_for_completion(flag_file, settings.JMETER_TIMEOUT, pid=pid, jtl_path=jtl_path))
+        limit_mb = settings.JMETER_MAX_OUTPUT_MB
+        try:
+            while limit_mb > 0:
+                done, _ = await asyncio.wait({waiting}, timeout=OUTPUT_CHECK_SECONDS)
+                if done:
+                    break
+                if await asyncio.to_thread(_directory_size, report_dir) > limit_mb * 1024 * 1024:
+                    raise RuntimeError(f'Run stopped: its output exceeded JMETER_MAX_OUTPUT_MB ({limit_mb} MB)')
+            return await waiting
+        finally:
+            if not waiting.done():
+                waiting.cancel()
+                await asyncio.gather(waiting, return_exceptions=True)
 
     async def _wait_for_completion(self, flag_file: str, timeout: int,
                                     pid: Optional[int] = None,
@@ -608,6 +650,45 @@ class JMeterExecutor:
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         tree.write(output_path, encoding="utf-8", xml_declaration=True)
         return output_path
+
+
+def _directory_size(path: str) -> int:
+    total = 0
+    for folder, _, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(folder, name))
+            except OSError:
+                pass  # removed while walking
+    return total
+
+
+def remove_orphan_containers() -> int:
+    """Remove run containers left by a backend that exited without cleaning up.
+
+    Called at startup, when this backend owns no runs yet; ``--rm`` only removes
+    a container after it exits, so an orphan would keep generating load.
+    """
+    if settings.JMETER_EXECUTION_MODE != 'container':
+        return 0
+    docker = shutil.which('docker')
+    if not docker:
+        return 0
+    options = dict(capture_output=True, text=True, timeout=30, env=JMeterExecutor._process_environment())
+    if platform.system() == 'Windows':
+        options['creationflags'] = _CREATE_NO_WINDOW
+    try:
+        listed = subprocess.run([docker, 'ps', '--all', '--quiet', '--filter', f'label={CONTAINER_LABEL}=true'],
+                                **options)
+        names = listed.stdout.split() if listed.returncode == 0 else []
+        if names:
+            subprocess.run([docker, 'rm', '--force', *names], **options)
+    except (OSError, subprocess.SubprocessError) as error:
+        logger.warning('Could not check for leftover JMeter containers: %s', error)
+        return 0
+    if names:
+        logger.warning('Removed %d JMeter container(s) left running by a previous backend', len(names))
+    return len(names)
 
 
 _executor_instance: Optional[JMeterExecutor] = None

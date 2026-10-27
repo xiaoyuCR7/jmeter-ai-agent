@@ -132,6 +132,8 @@ Common settings in `jmeter-agent-backend/.env`:
 | `JMETER_HOME` | JMeter `bin` directory or install root | `<project>/bin` |
 | `JMETER_TIMEOUT` | Max run time in seconds | `3600` |
 | `JMETER_HEAP_MIN` / `JMETER_HEAP_MAX` | JMeter JVM heap | `256m` / `2g` |
+| `JMETER_EXECUTION_MODE` | `local` or `container`; see Execution isolation below | `local` |
+| `JMETER_MAX_OUTPUT_MB` | Stop a run whose report directory grows past this; `0` = no limit | `10240` |
 | `RESOURCE_CPU_THRESHOLD` / `RESOURCE_MEMORY_THRESHOLD` | Queue new runs above this load-generator usage (%) | `80` / `85` |
 | `DEFAULT_AI_MODEL` | Model ID used when a request names none | first enabled model |
 | `AGENT_CONTEXT_TOKEN_BUDGET` | Token budget for a model whose context window is unknown | `16384` |
@@ -140,6 +142,24 @@ Model API keys are not read from `.env`; add models in the UI. They are stored i
 which git ignores.
 
 `HOST` must stay a loopback address: there is no login, so the server refuses to start on anything else.
+
+### Execution isolation
+
+JMeter plans can run code: JSR223 / BeanShell elements, the OS Process Sampler, and functions such as `${__groovy()}`.
+`JMETER_EXECUTION_MODE` decides where that code runs.
+
+| Mode | How JMeter runs | Use it for |
+|---|---|---|
+| `local` (default) | A child process with your privileges. Before running a plan that contains scripts, commands or an Include Controller, the app lists them and asks you (the agent asks a second time, separately). Plans the app generates contain none. | Plans you wrote or generated here |
+| `container` | Docker: read-only root filesystem, all capabilities dropped, no privilege escalation, non-root user, memory / CPU / process limits, no shared IPC, only the plan's project folder mounted (read-only) | Plans from anywhere else |
+
+Container mode needs Docker and `JMETER_CONTAINER_IMAGE`, a locally available image pinned by `@sha256:` digest (it is
+never pulled automatically). Containers can reach the network so they can generate load; to stop them reaching your
+LAN or cloud metadata endpoints, create a Docker network with restricted egress and set `JMETER_CONTAINER_NETWORK`.
+Every run container is labelled `jmeter-agent`, and the backend removes any left running when it starts.
+
+In both modes a run stops when its report directory exceeds `JMETER_MAX_OUTPUT_MB` (default 10240), and JMeter
+never sees the backend's environment variables (model keys, database settings).
 
 ### Webhook
 

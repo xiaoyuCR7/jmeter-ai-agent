@@ -128,6 +128,8 @@ Cursor、VS Code 等客户端的配置可以在「设置 → 外部助手接入�
 | `JMETER_HOME` | JMeter 的 `bin` 目录或安装根目录 | `<项目>/bin` |
 | `JMETER_TIMEOUT` | 单次执行最长时间（秒） | `3600` |
 | `JMETER_HEAP_MIN` / `JMETER_HEAP_MAX` | JMeter JVM 堆内存 | `256m` / `2g` |
+| `JMETER_EXECUTION_MODE` | `local` 或 `container`，见下方「执行隔离」 | `local` |
+| `JMETER_MAX_OUTPUT_MB` | 报告目录超过这个大小（MB）时停止执行，`0` 表示不限制 | `10240` |
 | `RESOURCE_CPU_THRESHOLD` / `RESOURCE_MEMORY_THRESHOLD` | 压测机占用超过该比例（%）时新执行排队 | `80` / `85` |
 | `DEFAULT_AI_MODEL` | 请求没有指定模型时使用的模型 ID | 第一个启用的模型 |
 | `AGENT_CONTEXT_TOKEN_BUDGET` | 上下文窗口未知的模型使用的 token 预算 | `16384` |
@@ -135,6 +137,23 @@ Cursor、VS Code 等客户端的配置可以在「设置 → 外部助手接入�
 模型的 API Key 不从 `.env` 读取，请在界面里添加。它们保存在 `jmeter-agent-backend/ai_models_config.json`，这个文件已被 git 忽略。
 
 因为没有登录，`HOST` 只能是本机回环地址，设成其它地址服务会拒绝启动。
+
+### 执行隔离
+
+JMeter 计划可以运行代码：JSR223 / BeanShell 组件、OS Process Sampler，以及 `${__groovy()}` 这类函数。
+`JMETER_EXECUTION_MODE` 决定这些代码在哪里运行。
+
+| 模式 | JMeter 怎么运行 | 适用场景 |
+|---|---|---|
+| `local`（默认） | 本机子进程，权限和你的账号相同。计划里有脚本、系统命令或 Include Controller 时，运行前会列出来请你确认（智能体发起的执行会单独再确认一次）。本应用生成的计划不含这些组件。 | 自己写的或在这里生成的计划 |
+| `container` | Docker：根文件系统只读、去掉全部 Linux 权限、禁止提权、非 root 账号、限制内存 / CPU / 进程数、不共享 IPC，只读挂载计划所在的项目目录 | 来自其它地方的计划 |
+
+容器模式需要 Docker，以及 `JMETER_CONTAINER_IMAGE`：一个本地已有、按 `@sha256:` 摘要锁定版本的镜像（不会自动拉取）。
+容器需要联网才能施压；如果不想让它访问局域网或云服务器的元数据地址，请创建一个限制了出站访问的 Docker 网络，
+并设置 `JMETER_CONTAINER_NETWORK`。每个执行容器都带有 `jmeter-agent` 标签，后端启动时会清理残留的容器。
+
+两种模式下，报告目录超过 `JMETER_MAX_OUTPUT_MB`（默认 10240）时都会停止执行；JMeter 也拿不到后端的环境变量
+（模型密钥、数据库配置等）。
 
 ### Webhook
 

@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     JMETER_CONTAINER_USER: str = '65534:65534'
     JMETER_CONTAINER_MEMORY_MB: int = 2048
     JMETER_CONTAINER_CPUS: float = 2.0
+    JMETER_CONTAINER_NETWORK: str = ''  # Docker network for runs; empty uses Docker's default bridge. Never 'host'.
     
     # Default paths (can be overridden by user config)
     TEST_PLANS_DIR_DEFAULT: str = os.path.join(BASE_DIR, "test_plans")
@@ -76,6 +77,7 @@ class Settings(BaseSettings):
 
     # JMeter
     JMETER_TIMEOUT: int = 3600  # seconds
+    JMETER_MAX_OUTPUT_MB: int = 10240  # stop a run whose report directory grows past this; 0 = no limit
 
     # Resource monitoring thresholds (CPU/memory usage %)
     # Tests will wait or be deferred when usage exceeds these thresholds

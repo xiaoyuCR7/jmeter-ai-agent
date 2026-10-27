@@ -1,4 +1,5 @@
 import axios from 'axios'
+import { withScriptApproval } from './scriptApproval'
 
 export type AgentRunRequest = {
   task: string
@@ -295,8 +296,9 @@ export const api = {
   getComponentChildren: (parent: string) => instance.get(`/jmeter/components/${parent}/children`),
   getFunctions: () => instance.get('/jmeter/functions'),
 
-  executeTest: (planId: string, aiModel?: string) =>
-    instance.post(`/test-plans/${planId}/execute`, null, { params: { ai_model: aiModel } }),
+  executeTest: (planId: string, aiModel?: string) => withScriptApproval(allowScripts =>
+    instance.post(`/test-plans/${planId}/execute`, null,
+      { params: { ai_model: aiModel, allow_scripts: allowScripts || undefined } })),
   getExecutions: (projectId?: string) => instance.get('/executions', { params: projectId ? { project_id: projectId } : {} }),
   cancelExecution: (id: string) => instance.post(`/executions/${id}/cancel`),
 
