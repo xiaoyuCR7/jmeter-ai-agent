@@ -2,6 +2,7 @@
 import hashlib
 import hmac
 import json
+import time
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -18,22 +19,26 @@ from app.services import requirements as requirement_service
 
 @pytest.fixture
 def webhook(monkeypatch):
-    """Collects delivered requests; ``replies`` scripts the receiver's status codes."""
+    """Collects delivered requests; ``replies`` scripts the receiver's status codes (or responses)."""
     received, replies = [], []
     def handle(request):
         received.append(request)
-        return httpx.Response(replies.pop(0) if replies else 200)
+        reply = replies.pop(0) if replies else 200
+        return reply if isinstance(reply, httpx.Response) else httpx.Response(reply)
+    state = SimpleNamespace(handler=handle)  # a test may swap the handler, e.g. to raise
     real_client = httpx.AsyncClient
-    monkeypatch.setattr(notifications.httpx, 'AsyncClient',
-                        lambda **kwargs: real_client(transport=httpx.MockTransport(handle), **kwargs))
+    monkeypatch.setattr(notifications.httpx, 'AsyncClient', lambda **kwargs: real_client(
+        transport=httpx.MockTransport(lambda request: state.handler(request)), **kwargs))
     monkeypatch.setattr(notifications, 'RETRY_DELAYS', (0, 0, 0))
     monkeypatch.setattr(notifications.settings, 'WEBHOOK_URL', 'https://hooks.example.test/jmeter')
     monkeypatch.setattr(notifications.settings, 'WEBHOOK_SECRET', None)
     for flag in ('WEBHOOK_ON_START', 'WEBHOOK_ON_COMPLETE', 'WEBHOOK_ON_FAILURE', 'WEBHOOK_ON_ANALYSIS'):
         monkeypatch.setattr(notifications.settings, flag, True)
+    monkeypatch.setattr(notifications.settings, 'WEBHOOK_INCLUDE_ANALYSIS', False)
     monkeypatch.setattr(requirement_service, 'get_requirements', AsyncMock(return_value=None))
-    return SimpleNamespace(received=received, replies=replies,
-                           bodies=lambda: [json.loads(r.content) for r in received])
+    state.received, state.replies = received, replies
+    state.bodies = lambda: [json.loads(r.content) for r in received]
+    return state
 
 
 def _execution(status=Status.COMPLETED, **fields):
@@ -69,12 +74,72 @@ async def test_completed_payload_carries_context_metrics_and_verdict(webhook):
 
 
 @pytest.mark.asyncio
-async def test_signature_is_hmac_of_the_raw_body(webhook, monkeypatch):
+async def test_signature_covers_the_timestamp_and_raw_body(webhook, monkeypatch):
     monkeypatch.setattr(notifications.settings, 'WEBHOOK_SECRET', 's3cret')
     await _deliver('test.started', _execution(Status.RUNNING))
     request = webhook.received[0]
-    expected = 'sha256=' + hmac.new(b's3cret', request.content, hashlib.sha256).hexdigest()
-    assert request.headers['X-JMeter-Agent-Signature'] == expected
+    timestamp = request.headers['X-JMeter-Agent-Timestamp']
+    assert abs(int(timestamp) - time.time()) < 60
+    expected = 'sha256=' + hmac.new(b's3cret', timestamp.encode() + b'.' + request.content, hashlib.sha256).hexdigest()
+    assert hmac.compare_digest(request.headers['X-JMeter-Agent-Signature'], expected)
+    # The same body under a later timestamp needs a signature only the secret holder can make.
+    replayed = 'sha256=' + hmac.new(b's3cret', b'9999999999.' + request.content, hashlib.sha256).hexdigest()
+    assert request.headers['X-JMeter-Agent-Signature'] != replayed
+
+
+@pytest.mark.asyncio
+async def test_redirects_count_as_failures_and_are_not_followed(webhook, caplog):
+    webhook.replies.append(httpx.Response(302, headers={'Location': 'https://elsewhere.example.test/'}))
+    await _deliver('test.completed', _execution())
+    assert len(webhook.received) == 1
+    assert 'not delivered' in caplog.text and 'redirects' in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_logs_name_the_host_but_never_the_tokened_url_or_raw_reply(webhook, monkeypatch, caplog):
+    monkeypatch.setattr(notifications.settings, 'WEBHOOK_URL', 'https://hooks.example.test/T0K3N?key=SECRETKEY')
+    webhook.replies.append(httpx.Response(403, content=b'denied\nFAKE LOG LINE ' + b'x' * 5000))
+    await _deliver('test.completed', _execution())
+    assert 'hooks.example.test' in caplog.text
+    assert 'T0K3N' not in caplog.text and 'SECRETKEY' not in caplog.text
+    assert 'denied FAKE LOG LINE' in caplog.text and 'x' * 300 not in caplog.text
+    def unreachable(request):
+        raise httpx.ConnectError(f'cannot reach {request.url}')
+    webhook.handler = unreachable
+    caplog.clear()
+    await _deliver('test.completed', _execution())
+    assert 'ConnectError' in caplog.text and 'T0K3N' not in caplog.text
+
+
+@pytest.mark.parametrize('message, expected', [
+    ('Error reading C:\\Users\\bob\\proj\\reports\\abc\\jmeter.log: denied\nTraceback (most recent call last)',
+     'Error reading jmeter.log: denied'),
+    ('cannot open /home/bob/plans/x.jmx (errno 2)', 'cannot open x.jmx (errno 2)'),
+    ('see https://example.com/a/b for help', 'see https://example.com/a/b for help'),
+    ('JMeter exited 1', 'JMeter exited 1'),
+])
+def test_errors_sent_out_lose_local_paths_and_extra_lines(message, expected):
+    assert notifications.safe_error(message) == expected
+
+
+def test_long_errors_are_clipped():
+    assert len(notifications.safe_error('x' * 5000)) == notifications.ERROR_LIMIT
+
+
+@pytest.mark.parametrize('url, secret, expected', [
+    (None, None, []),
+    ('https://hooks.example.test/x', 's', []),
+    ('http://127.0.0.1:9000/hook', 's', []),
+    ('https://hooks.example.test/x', None, ['WEBHOOK_SECRET is not set']),
+    ('http://hooks.example.test/x', 's', ['plain http']),
+    ('ftp://hooks.example.test/x', 's', ['not an http(s) URL']),
+])
+def test_risky_webhook_settings_are_flagged(monkeypatch, url, secret, expected):
+    monkeypatch.setattr(notifications.settings, 'WEBHOOK_URL', url)
+    monkeypatch.setattr(notifications.settings, 'WEBHOOK_SECRET', secret)
+    warnings = notifications.config_warnings()
+    assert len(warnings) == len(expected)
+    assert all(fragment in warning for fragment, warning in zip(expected, warnings))
 
 
 @pytest.mark.asyncio
@@ -110,15 +175,17 @@ async def test_event_switches_and_missing_url_suppress_delivery(webhook, monkeyp
 
 
 @pytest.mark.asyncio
-async def test_analysis_event_reports_the_analysis_and_its_verdict(webhook):
-    analysis = ReportAnalysis(analysis_status='failed', overall_assessment='AI analysis failed: timeout',
-                              conclusion='AI 分析未完成', requirements_verdict={'verdict': 'fail', 'passed': 1,
-                                                                            'failed': 1, 'missing': 0})
+async def test_analysis_event_sends_the_full_assessment_only_when_enabled(webhook, monkeypatch):
+    analysis = ReportAnalysis(analysis_status='completed', overall_assessment='POST /internal/admin is slow',
+                              conclusion='不达标', requirements_verdict={'verdict': 'fail', 'passed': 1,
+                                                                       'failed': 1, 'missing': 0})
     await _deliver('analysis.completed', _execution(summary=_summary(), ai_analysis=analysis))
-    [body] = webhook.bodies()
-    assert body['analysis'] == {'status': 'failed', 'overall_assessment': 'AI analysis failed: timeout',
-                                'conclusion': 'AI 分析未完成'}
-    assert body['requirements']['verdict'] == 'fail'
+    monkeypatch.setattr(notifications.settings, 'WEBHOOK_INCLUDE_ANALYSIS', True)
+    await _deliver('analysis.completed', _execution(summary=_summary(), ai_analysis=analysis))
+    default, full = webhook.bodies()
+    assert default['analysis'] == {'status': 'completed', 'conclusion': '不达标'}
+    assert full['analysis']['overall_assessment'] == 'POST /internal/admin is slow'
+    assert default['requirements']['verdict'] == 'fail'
 
 
 @pytest.mark.asyncio

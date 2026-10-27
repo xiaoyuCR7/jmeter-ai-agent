@@ -152,9 +152,20 @@ Set `WEBHOOK_URL` to receive a POST for every run, however it was started (UI, a
 | `analysis.completed` | Post-run AI analysis finished or failed | `WEBHOOK_ON_ANALYSIS` |
 
 The JSON body carries the execution, project and plan IDs, plan name, status, duration, key metrics, the requirements
-verdict and any error. `X-JMeter-Agent-Delivery` is a delivery ID that stays the same across retries; use it to drop
-duplicates. With `WEBHOOK_SECRET` set, verify `X-JMeter-Agent-Signature`, which is `sha256=` plus the hex HMAC-SHA256
-of the raw body. Network errors, 408, 429 and 5xx are retried 3 times (after 1 s, 5 s, 15 s); other 4xx are not.
+verdict and any error. Errors are cut to their first line with local paths reduced to file names. `analysis.completed`
+sends the analysis status and conclusion; set `WEBHOOK_INCLUDE_ANALYSIS=true` to also send the full assessment, which
+may quote your endpoints.
+
+Use an `https` URL and set `WEBHOOK_SECRET`; the server logs a warning at startup otherwise. A receiver should:
+
+1. Compute HMAC-SHA256 with the secret over `<X-JMeter-Agent-Timestamp>.<raw body>` and compare `sha256=<hex>`
+   with `X-JMeter-Agent-Signature` in constant time (e.g. Python `hmac.compare_digest`).
+2. Reject requests whose `X-JMeter-Agent-Timestamp` (Unix seconds) is more than 5 minutes old.
+3. Drop `X-JMeter-Agent-Delivery` IDs it has already seen; the ID stays the same across retries.
+
+Only 2xx counts as delivered. Network errors, 408, 429 and 5xx are retried 3 times (after 1 s, 5 s, 15 s); redirects
+and other 4xx are not, so point `WEBHOOK_URL` at the final address. Logs name only the receiver's host, never the URL,
+because webhook URLs often contain a token.
 
 <details>
 <summary><b>Key API endpoints</b></summary>

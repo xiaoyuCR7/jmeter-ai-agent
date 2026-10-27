@@ -146,9 +146,19 @@ Cursor、VS Code 等客户端的配置可以在「设置 → 外部助手接入�
 | `test.completed` / `test.failed` / `test.cancelled` | 执行结束，在 AI 分析之前发送 | `WEBHOOK_ON_COMPLETE` / `WEBHOOK_ON_FAILURE`（同时管失败和取消） |
 | `analysis.completed` | 执行后的 AI 分析完成或失败 | `WEBHOOK_ON_ANALYSIS` |
 
-JSON 内容包括执行、项目、计划的 ID，计划名称，状态，时长，关键指标，需求判定结果和错误信息。`X-JMeter-Agent-Delivery`
-是投递 ID，重试时不变，可用来去重。设置了 `WEBHOOK_SECRET` 时，请校验 `X-JMeter-Agent-Signature`：它是 `sha256=`
-加上请求原始内容的 HMAC-SHA256（十六进制）。网络错误、408、429 和 5xx 会重试 3 次（间隔 1 秒、5 秒、15 秒），其它 4xx 不重试。
+JSON 内容包括执行、项目、计划的 ID，计划名称，状态，时长，关键指标，需求判定结果和错误信息。错误信息只保留第一行，
+本机路径只留文件名。`analysis.completed` 默认只发分析状态和结论；设置 `WEBHOOK_INCLUDE_ANALYSIS=true` 才会附上完整评估，
+其中可能提到你的接口细节。
+
+请使用 `https` 地址并设置 `WEBHOOK_SECRET`，否则服务启动时会记一条警告。接收方应当：
+
+1. 用密钥对 `<X-JMeter-Agent-Timestamp>.<请求原始内容>` 计算 HMAC-SHA256，与 `X-JMeter-Agent-Signature` 中的
+   `sha256=<十六进制>` 做常量时间比较（例如 Python 的 `hmac.compare_digest`）。
+2. 拒绝 `X-JMeter-Agent-Timestamp`（Unix 秒）超过 5 分钟的请求。
+3. 丢弃已经处理过的 `X-JMeter-Agent-Delivery` 投递 ID，重试时这个 ID 不变。
+
+只有 2xx 算发送成功。网络错误、408、429 和 5xx 会重试 3 次（间隔 1 秒、5 秒、15 秒）；跳转和其它 4xx 不重试，
+所以 `WEBHOOK_URL` 要填最终地址。日志里只记录接收方的主机名，不记录完整地址，因为 Webhook 地址里常带有 token。
 
 <details>
 <summary><b>主要接口</b></summary>

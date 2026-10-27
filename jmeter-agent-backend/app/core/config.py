@@ -112,6 +112,7 @@ class Settings(BaseSettings):
     WEBHOOK_ON_COMPLETE: bool = True             # test.completed
     WEBHOOK_ON_FAILURE: bool = True              # test.failed and test.cancelled
     WEBHOOK_ON_ANALYSIS: bool = True             # analysis.completed (post-run AI analysis)
+    WEBHOOK_INCLUDE_ANALYSIS: bool = False       # also send the AI's full assessment, not just its conclusion
 
     # JMeter JVM configuration
     JMETER_HEAP_MIN: str = "256m"                # -Xms initial heap

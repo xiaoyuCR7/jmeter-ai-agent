@@ -15,12 +15,15 @@ Webhook payload format (POST JSON):
   "start_time": "...", "end_time": "...", "duration_seconds": 60.2,
   "summary": { ... key metrics ... },
   "requirements": {"verdict": "pass" | "fail" | "incomplete" | "none", "passed": 3, "failed": 1, "missing": 0},
-  "error": "...",
-  "analysis": { ... }            # analysis.completed only
+  "error": "...",                # first line only, local paths reduced to file names
+  "analysis": {"status": "...", "conclusion": "..."}   # analysis.completed only; the full
+                                 # assessment too with WEBHOOK_INCLUDE_ANALYSIS
 }
 
-With WEBHOOK_SECRET set, X-JMeter-Agent-Signature is "sha256=" followed by the hex
-HMAC-SHA256 of the raw request body, keyed with the secret.
+Every request carries X-JMeter-Agent-Timestamp (Unix seconds). With WEBHOOK_SECRET set,
+X-JMeter-Agent-Signature is "sha256=" followed by the hex HMAC-SHA256, keyed with the
+secret, of "<timestamp>." + the raw request body. Receivers should compare it in constant
+time, reject timestamps more than 5 minutes old and drop delivery IDs already seen.
 """
 
 import asyncio
@@ -28,8 +31,11 @@ import hashlib
 import hmac
 import json
 import logging
+import re
+import time
 import uuid
 from typing import Optional
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -42,6 +48,12 @@ logger = logging.getLogger(__name__)
 FINISHED_EVENTS = {'completed': 'test.completed', 'failed': 'test.failed', 'cancelled': 'test.cancelled'}
 # Seconds to wait before each retry; network errors, 408, 429 and 5xx are retried.
 RETRY_DELAYS = (1.0, 5.0, 15.0)
+
+ERROR_LIMIT = 300
+CONCLUSION_LIMIT = 500
+# Windows drive paths and POSIX absolute paths, so receivers do not learn the host's layout.
+_LOCAL_PATH = re.compile(r'(?<!\w)[A-Za-z]:[\\/][^\s\'"<>|]*|(?<![\w.:/])/(?:[^\s/\'"<>|]+/)+[^\s/\'"<>|]*')
+LOOPBACK_HOSTS = {'localhost', '127.0.0.1', '::1'}
 
 _pending: set[asyncio.Task] = set()
 
@@ -82,6 +94,17 @@ async def _requirements_verdict(execution) -> Optional[dict]:
     return {'verdict': result.verdict, 'passed': result.passed, 'failed': result.failed, 'missing': result.missing}
 
 
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit - 1] + '…'
+
+
+def safe_error(message: str) -> str:
+    """First line of an error, local paths reduced to their file names."""
+    lines = [line.strip() for line in str(message).splitlines() if line.strip()]
+    first = lines[0] if lines else ''
+    return _clip(_LOCAL_PATH.sub(lambda m: re.split(r'[\\/]', m.group(0).rstrip('\\/'))[-1], first), ERROR_LIMIT)
+
+
 async def build_payload(event: str, execution) -> dict:
     plan = store.get_test_plan(execution.test_plan_id) if execution.test_plan_id else None
     payload = {
@@ -102,21 +125,42 @@ async def build_payload(event: str, execution) -> dict:
         payload['summary'] = _key_metrics(execution.summary.model_dump())
         payload['requirements'] = await _requirements_verdict(execution)
     if execution.error_message:
-        payload['error'] = execution.error_message
+        payload['error'] = safe_error(execution.error_message)
     if event == 'analysis.completed' and execution.ai_analysis:
         analysis = execution.ai_analysis
-        payload['analysis'] = {
-            'status': analysis.analysis_status,
-            'overall_assessment': analysis.overall_assessment,
-            'conclusion': analysis.conclusion,
-        }
+        # Model-written text can quote endpoints and internals; send it in full only when asked.
+        payload['analysis'] = {'status': analysis.analysis_status,
+                               'conclusion': _clip(analysis.conclusion, CONCLUSION_LIMIT)}
+        if settings.WEBHOOK_INCLUDE_ANALYSIS:
+            payload['analysis']['overall_assessment'] = analysis.overall_assessment
         if analysis.requirements_verdict:
             payload['requirements'] = analysis.requirements_verdict
     return payload
 
 
-def sign(body: bytes, secret: str) -> str:
-    return 'sha256=' + hmac.new(secret.encode('utf-8'), body, hashlib.sha256).hexdigest()
+def sign(timestamp: str, body: bytes, secret: str) -> str:
+    message = timestamp.encode('ascii') + b'.' + body
+    return 'sha256=' + hmac.new(secret.encode('utf-8'), message, hashlib.sha256).hexdigest()
+
+
+def _host(url: str) -> str:
+    """Webhook URLs often carry their token in the path or query; logs name only the host."""
+    return urlsplit(url).hostname or 'webhook'
+
+
+def _log_safe(text: str) -> str:
+    return _clip(' '.join(text.split()), 200)
+
+
+async def _post(client, url: str, body: bytes, headers: dict) -> tuple[int, str]:
+    """POST and read at most 200 bytes of the reply; only the status matters."""
+    async with client.stream('POST', url, content=body, headers=headers) as response:
+        snippet = b''
+        async for chunk in response.aiter_bytes():
+            snippet += chunk
+            if len(snippet) >= 200:
+                break
+        return response.status_code, snippet[:200].decode('utf-8', errors='replace')
 
 
 async def _deliver(event: str, execution):
@@ -126,29 +170,35 @@ async def _deliver(event: str, execution):
         logger.exception('Could not build %s webhook for %s', event, execution.id)
         return
     body = json.dumps(payload, ensure_ascii=False, default=str).encode('utf-8')
-    headers = {'Content-Type': 'application/json', 'X-JMeter-Agent-Event': event,
-               'X-JMeter-Agent-Delivery': payload['delivery_id']}
-    if settings.WEBHOOK_SECRET:
-        headers['X-JMeter-Agent-Signature'] = sign(body, settings.WEBHOOK_SECRET)
+    url, host = settings.WEBHOOK_URL, _host(settings.WEBHOOK_URL)
     problem = ''
-    async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(10.0), follow_redirects=False) as client:
         for attempt in range(len(RETRY_DELAYS) + 1):
             if attempt:
-                logger.warning('Webhook %s for %s failed (%s); retry %d in %ss',
-                               event, execution.id, problem, attempt, RETRY_DELAYS[attempt - 1])
+                logger.warning('Webhook %s for %s to %s failed (%s); retry %d in %ss',
+                               event, execution.id, host, problem, attempt, RETRY_DELAYS[attempt - 1])
                 await asyncio.sleep(RETRY_DELAYS[attempt - 1])
+            # Signed afresh on every attempt, so a retry is never rejected as stale.
+            timestamp = str(int(time.time()))
+            headers = {'Content-Type': 'application/json', 'X-JMeter-Agent-Event': event,
+                       'X-JMeter-Agent-Delivery': payload['delivery_id'], 'X-JMeter-Agent-Timestamp': timestamp}
+            if settings.WEBHOOK_SECRET:
+                headers['X-JMeter-Agent-Signature'] = sign(timestamp, body, settings.WEBHOOK_SECRET)
             try:
-                response = await client.post(settings.WEBHOOK_URL, content=body, headers=headers)
+                status, reply = await _post(client, url, body, headers)
             except httpx.HTTPError as error:
-                problem = f'{type(error).__name__}: {error}'
+                problem = type(error).__name__  # its message may repeat the URL and its token
                 continue
-            if response.status_code < 400:
+            if 200 <= status < 300:
                 logger.info('Webhook fired: %s for %s', event, execution.id)
                 return
-            problem = f'HTTP {response.status_code}: {response.text[:200]}'
-            if response.status_code < 500 and response.status_code not in (408, 429):
+            if 300 <= status < 400:
+                problem = f'HTTP {status}: the URL redirects; set WEBHOOK_URL to the final address'
+                break
+            problem = f'HTTP {status}: {_log_safe(reply)}'
+            if status < 500 and status not in (408, 429):
                 break  # the receiver rejected it; resending the same body will not help
-    logger.error('Webhook %s for %s not delivered: %s', event, execution.id, problem)
+    logger.error('Webhook %s for %s to %s not delivered: %s', event, execution.id, host, problem)
 
 
 def _send(event: str, execution):
@@ -174,7 +224,26 @@ async def _on_analysis(execution):
 LISTENERS = (('started', _on_started), ('finished', _on_finished), ('analysis_completed', _on_analysis))
 
 
+def config_warnings() -> list[str]:
+    url = settings.WEBHOOK_URL
+    if not url:
+        return []
+    warnings = []
+    parts = urlsplit(url)
+    host = parts.hostname or ''
+    local = host in LOOPBACK_HOSTS or host.endswith('.localhost')
+    if not settings.WEBHOOK_SECRET:
+        warnings.append('WEBHOOK_SECRET is not set: receivers cannot verify that webhooks come from this app')
+    if parts.scheme not in ('http', 'https'):
+        warnings.append('WEBHOOK_URL is not an http(s) URL; deliveries will fail')
+    elif parts.scheme == 'http' and not local:
+        warnings.append(f'WEBHOOK_URL sends events to {host} over plain http; use https')
+    return warnings
+
+
 def register(lifecycle):
+    for warning in config_warnings():
+        logger.warning(warning)
     for event, handler in LISTENERS:
         lifecycle.on(event, handler)
 
