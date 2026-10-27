@@ -10,12 +10,13 @@ const english = () => {
   try { return localStorage.getItem('jmeter-agent-lang') === 'en' } catch { return false }
 }
 
+export const findingLabel = (item: ScriptFinding) => item.name === item.kind ? item.kind : `${item.name}（${item.kind}）`
+
 // Local runs execute a plan's scripts with the user's own privileges, so the backend refuses
 // them (409 scripts_need_approval) until the user has seen exactly what will run.
 export async function confirmScripts(findings: ScriptFinding[]): Promise<boolean> {
   const en = english()
-  const items = findings.slice(0, 15).map(item =>
-    h('li', item.name === item.kind ? item.kind : `${item.name}（${item.kind}）`))
+  const items = findings.slice(0, 15).map(item => h('li', findingLabel(item)))
   if (findings.length > 15) items.push(h('li', en ? `…and ${findings.length - 15} more` : `……另有 ${findings.length - 15} 项`))
   const message = h('div', [
     h('p', en
