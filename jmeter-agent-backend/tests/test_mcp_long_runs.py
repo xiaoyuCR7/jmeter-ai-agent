@@ -161,3 +161,12 @@ async def test_clients_are_told_about_approvals_and_background_runs():
     response = await MCPServer().handle_request(json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': params}))
     instructions = response['result']['instructions']
     assert 'approve' in instructions and 'get_execution_status' in instructions
+
+
+@pytest.mark.asyncio
+async def test_status_lists_each_tools_risk_and_full_description(server):
+    server.register_all_agent_tools()
+    status = await mcp_routes.mcp_status()
+    tools = {tool['name']: tool for tool in status['tools']}
+    assert tools['delete_file']['risk'] == 'write' and tools['read_file']['risk'] == 'read'
+    assert tools['execute_test']['description'].endswith('execution_id.')

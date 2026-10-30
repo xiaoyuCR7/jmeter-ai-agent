@@ -60,7 +60,7 @@ async def mcp_status():
         "resources_count": len(mcp_server._resources),
         "prompts_count": len(mcp_server._prompts),
         "tools": [
-            {"name": t.name, "description": t.description[:100]}
+            {"name": t.name, "description": t.description, "risk": t.risk}
             for t in mcp_server._tools.values()
         ],
         "resources": [

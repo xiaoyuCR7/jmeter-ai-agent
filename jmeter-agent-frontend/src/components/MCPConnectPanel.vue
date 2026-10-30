@@ -1,155 +1,146 @@
 <template>
   <div class="mcp-page">
-    <div class="page-desc">{{ t('mcpConnect.description') }}</div>
-
-    <!-- Server Status -->
-    <el-row :gutter="16" class="stats-row">
-      <el-col :xs="24" :sm="12" :md="6">
-        <el-card class="stat-card">
-          <div class="stat-val">{{ status?.tools_count || 0 }}</div>
-          <div class="stat-label">{{ t('mcpConnect.stat.tools') }}</div>
-        </el-card>
-      </el-col>
-      <el-col :xs="24" :sm="12" :md="6">
-        <el-card class="stat-card">
-          <div class="stat-val">{{ status?.resources_count || 0 }}</div>
-          <div class="stat-label">{{ t('mcpConnect.stat.resources') }}</div>
-        </el-card>
-      </el-col>
-      <el-col :xs="24" :sm="12" :md="6">
-        <el-card class="stat-card">
-          <div class="stat-val">{{ status?.prompts_count || 0 }}</div>
-          <div class="stat-label">{{ t('mcpConnect.stat.prompts') }}</div>
-        </el-card>
-      </el-col>
-      <el-col :xs="24" :sm="12" :md="6">
-        <el-card class="stat-card">
-          <div class="stat-val" :class="{ online: connected, offline: !connected }">{{ connected ? t('mcpConnect.status.online') : t('mcpConnect.status.offline') }}</div>
-          <div class="stat-label">{{ t('mcpConnect.stat.status') }}</div>
-        </el-card>
-      </el-col>
-    </el-row>
-
-    <!-- Connection Config -->
-    <el-card class="config-card">
-      <template #header><span><el-icon class="header-icon"><Connection /></el-icon> {{ t('mcpConnect.config') }}</span><el-tag size="small" type="success" style="margin-left:8px">Streamable HTTP</el-tag></template>
-
-      <el-alert type="info" :closable="false" style="margin-bottom:16px">
-        <template #title>{{ currentLang === 'en' ? 'Streamable HTTP endpoint for current clients; older SSE-only clients can use /api/v1/mcp/sse. The configs below include your local access token, so keep them private. Start with the analyze-execution prompt or the get_execution_evidence tool.' : 'Streamable HTTP 端点，适用于当前主流客户端；只支持 SSE 的旧客户端可用 /api/v1/mcp/sse。下面的配置包含本地访问令牌，请勿外传。分析时可直接使用 analyze-execution 提示词或 get_execution_evidence 工具。' }}</template>
-      </el-alert>
-
-      <!-- AI Tool Tabs -->
-      <el-tabs v-model="activeTool" type="border-card">
-        <!-- Claude Code -->
-        <el-tab-pane :label="t('mcpConnect.tools.claude')" name="claude">
-          <div class="tab-content">
-            <p>{{ currentLang === 'en' ? 'Run once in a terminal:' : '在终端执行一次：' }}</p>
-            <div class="code-block">
-              <div class="code-header"><span>CLI</span><el-button class="copy-btn" text size="small" @click="copyConfig('claude-cli')"><el-icon><CopyDocument/></el-icon> {{ t('mcpConnect.copy') }}</el-button></div>
-<pre><code>{{ getConfig('claude-cli') }}</code></pre>
-            </div>
-            <p>{{ currentLang === 'en' ? 'Or add this configuration to .mcp.json in the project root:' : '或在项目根目录的 .mcp.json 中添加以下配置：' }}</p>
-            <div class="code-block">
-              <div class="code-header"><span>.mcp.json</span><el-button class="copy-btn" text size="small" @click="copyConfig('claude')"><el-icon><CopyDocument/></el-icon> {{ t('mcpConnect.copy') }}</el-button></div>
-<pre><code>{{ getConfig('claude') }}</code></pre>
-            </div>
-            <p class="hint">{{ t('mcpConnect.claude.hint') }}</p>
-          </div>
-        </el-tab-pane>
-
-        <!-- Cursor -->
-        <el-tab-pane :label="t('mcpConnect.tools.cursor')" name="cursor">
-          <div class="tab-content">
-            <p>{{ t('mcpConnect.cursor.instruction') }}</p>
-            <div class="code-block">
-              <div class="code-header"><span>.cursor/mcp.json</span><el-button class="copy-btn" text size="small" @click="copyConfig('cursor')"><el-icon><CopyDocument/></el-icon> {{ t('mcpConnect.copy') }}</el-button></div>
-<pre><code>{{ getConfig('cursor') }}</code></pre>
-            </div>
-            <p class="hint">{{ t('mcpConnect.cursor.hint') }}</p>
-          </div>
-        </el-tab-pane>
-
-        <!-- VS Code / Copilot -->
-        <el-tab-pane :label="t('mcpConnect.tools.vscode')" name="vscode">
-          <div class="tab-content">
-            <p>{{ currentLang === 'en' ? 'Add this configuration to .vscode/mcp.json:' : '在 .vscode/mcp.json 中添加以下配置：' }}</p>
-            <div class="code-block">
-              <div class="code-header"><span>.vscode/mcp.json</span><el-button class="copy-btn" text size="small" @click="copyConfig('vscode')"><el-icon><CopyDocument/></el-icon> {{ t('mcpConnect.copy') }}</el-button></div>
-<pre><code>{{ getConfig('vscode') }}</code></pre>
-            </div>
-          </div>
-        </el-tab-pane>
-
-        <!-- Trae IDE -->
-        <el-tab-pane :label="t('mcpConnect.tools.trae')" name="trae">
-          <div class="tab-content">
-            <p>{{ t('mcpConnect.trae.instruction') }}</p>
-            <div class="code-block">
-              <div class="code-header"><span>mcp.json</span><el-button class="copy-btn" text size="small" @click="copyConfig('trae')"><el-icon><CopyDocument/></el-icon> {{ t('mcpConnect.copy') }}</el-button></div>
-<pre><code>{{ getConfig('trae') }}</code></pre>
-            </div>
-            <p class="hint">{{ t('mcpConnect.trae.hint') }}</p>
-          </div>
-        </el-tab-pane>
-
-        <!-- Generic / cURL -->
-        <el-tab-pane :label="t('mcpConnect.tools.generic')" name="generic">
-          <div class="tab-content">
-            <p>{{ t('mcpConnect.generic.instruction') }}</p>
-            <div class="code-block">
-              <div class="code-header"><span>{{ t('mcpConnect.curlTest') }}</span><el-button class="copy-btn" text size="small" @click="copyConfig('generic')"><el-icon><CopyDocument/></el-icon> {{ t('mcpConnect.copy') }}</el-button></div>
-<pre><code>{{ getConfig('generic') }}</code></pre>
-            </div>
-          </div>
-        </el-tab-pane>
-      </el-tabs>
-
-      <!-- Quick Copy URL -->
-      <div class="url-bar">
-        <span class="url-label">{{ t('mcpConnect.urlLabel') }}</span>
-        <el-input class="url-input" :model-value="mcpUrl" readonly size="small"/>
-        <el-button class="url-btn" size="small" @click="copyUrl">{{ t('mcpConnect.copyUrl') }}</el-button>
-        <el-button class="url-btn" size="small" type="primary" @click="testConnection" :loading="testing">{{ t('mcpConnect.testConnection') }}</el-button>
+    <header class="server">
+      <div class="server-main">
+        <h3 class="server-title">
+          <span class="dot" :class="serverState" aria-hidden="true"></span>{{ t(`mcpConnect.state.${serverState}`) }}
+        </h3>
+        <p v-if="status" class="hint">{{ t('mcpConnect.summary', {
+          tools: status.tools_count, resources: status.resources_count, prompts: status.prompts_count }) }}</p>
+        <p v-else-if="serverState === 'offline'" class="hint">{{ t('mcpConnect.offlineHelp') }}</p>
       </div>
-    </el-card>
+      <el-button :loading="testing" @click="testConnection">{{ t('mcpConnect.testConnection') }}</el-button>
+    </header>
 
-    <!-- Tool Catalog -->
-    <el-card v-if="status?.tools?.length" class="tools-card">
-      <template #header><span><el-icon class="header-icon"><Tools /></el-icon> {{ t('mcpConnect.toolCatalog', { count: status.tools.length }) }}</span></template>
-      <el-table :data="status.tools" size="small" max-height="500" stripe>
-        <el-table-column prop="name" :label="t('mcpConnect.table.name')" width="220" sortable/>
-        <el-table-column prop="description" :label="t('mcpConnect.table.description')" min-width="300" show-overflow-tooltip/>
-      </el-table>
-    </el-card>
+    <section v-if="serverState === 'online'" class="panel setup">
+      <h3>{{ t('mcpConnect.chooseClient') }}</h3>
+      <div class="client-picker">
+        <button v-for="client in clients" :key="client.key" type="button" class="client"
+                :class="{ active: client.key === activeTool }" :aria-pressed="client.key === activeTool"
+                @click="activeTool = client.key">{{ client.label }}</button>
+      </div>
+
+      <div v-for="block in currentClient.blocks" :key="block.tool" class="step">
+        <p class="step-hint">{{ block.hint }}</p>
+        <div class="code-block">
+          <div class="code-head">
+            <span class="file">{{ block.file }}</span>
+            <button type="button" class="code-action" @click="copy(block.tool, getConfig(block.tool))">
+              <el-icon><Check v-if="copied === block.tool" /><CopyDocument v-else /></el-icon>
+              {{ copied === block.tool ? t('mcpConnect.copied') : t('mcpConnect.copy') }}
+            </button>
+          </div>
+          <pre><code>{{ shown(getConfig(block.tool)) }}</code></pre>
+        </div>
+      </div>
+      <p v-if="currentClient.after" class="after">{{ currentClient.after }}</p>
+
+      <div class="token-note">
+        <p>{{ t('mcpConnect.tokenNote') }}</p>
+        <button type="button" class="code-action" @click="showToken = !showToken">
+          <el-icon><Hide v-if="showToken" /><View v-else /></el-icon>
+          {{ t(showToken ? 'mcpConnect.hideToken' : 'mcpConnect.showToken') }}
+        </button>
+      </div>
+    </section>
+
+    <section v-if="serverState === 'online'" class="endpoint">
+      <span class="endpoint-label">{{ t('mcpConnect.urlLabel') }}</span>
+      <code>{{ mcpUrl }}</code>
+      <button type="button" class="code-action" @click="copy('url', mcpUrl)">
+        <el-icon><Check v-if="copied === 'url'" /><CopyDocument v-else /></el-icon>
+        {{ copied === 'url' ? t('mcpConnect.copied') : t('mcpConnect.copyUrl') }}
+      </button>
+    </section>
+
+    <section v-if="serverState === 'online'" class="after-setup">
+      <h3>{{ t('mcpConnect.usageTitle') }}</h3>
+      <ul>
+        <li>{{ t('mcpConnect.usage.approval') }}</li>
+        <li>{{ t('mcpConnect.usage.background') }}</li>
+        <li>{{ t('mcpConnect.usage.analysis') }}</li>
+        <li>{{ t('mcpConnect.usage.sse') }}</li>
+      </ul>
+    </section>
+
+    <details v-if="status?.tools?.length" class="catalog">
+      <summary>{{ t('mcpConnect.allTools', { count: status.tools.length }) }}</summary>
+      <el-input v-model="toolQuery" class="tool-search" clearable :placeholder="t('mcpConnect.searchTools')" :prefix-icon="Search" />
+      <div v-for="group in toolGroups" :key="group.title" class="tool-group">
+        <h4>{{ group.title }}<span class="count num">{{ group.tools.length }}</span></h4>
+        <dl>
+          <div v-for="tool in group.tools" :key="tool.name" class="tool">
+            <dt>{{ tool.name }}</dt>
+            <dd>{{ tool.description }}</dd>
+          </div>
+        </dl>
+      </div>
+      <p v-if="!toolGroups.length" class="hint">{{ t('mcpConnect.noTools') }}</p>
+    </details>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { api } from '@/api'
 import { ElMessage } from 'element-plus'
-import { Connection, CopyDocument, Tools } from '@element-plus/icons-vue'
+import { Check, CopyDocument, Hide, Search, View } from '@element-plus/icons-vue'
 import { useI18n } from '@/composables/useI18n'
 
-const { t, currentLang } = useI18n()
+const { t } = useI18n()
 
 const status = ref<any>(null)
-const connected = ref(false)
+const serverState = ref<'checking' | 'online' | 'offline'>('checking')
 const testing = ref(false)
 const activeTool = ref('claude')
+const showToken = ref(false)
+const copied = ref('')
+const toolQuery = ref('')
+let copiedTimer: ReturnType<typeof setTimeout> | undefined
 
-const origin = computed(() => location.origin)
-const mcpUrl = computed(() => `${origin.value}/api/v1/mcp`)
+const mcpUrl = computed(() => `${location.origin}/api/v1/mcp`)
 const accessToken = ref('')
+
+const clients = computed(() => [
+  { key: 'claude', label: t('mcpConnect.tools.claude'), after: t('mcpConnect.claude.hint'), blocks: [
+    { tool: 'claude-cli', file: t('mcpConnect.terminal'), hint: t('mcpConnect.claude.cli') },
+    { tool: 'claude', file: '.mcp.json', hint: t('mcpConnect.claude.file') },
+  ] },
+  { key: 'cursor', label: t('mcpConnect.tools.cursor'), after: t('mcpConnect.cursor.hint'), blocks: [
+    { tool: 'cursor', file: '.cursor/mcp.json', hint: t('mcpConnect.cursor.instruction') },
+  ] },
+  { key: 'vscode', label: t('mcpConnect.tools.vscode'), after: '', blocks: [
+    { tool: 'vscode', file: '.vscode/mcp.json', hint: t('mcpConnect.vscode.instruction') },
+  ] },
+  { key: 'trae', label: t('mcpConnect.tools.trae'), after: t('mcpConnect.trae.hint'), blocks: [
+    { tool: 'trae', file: 'mcp.json', hint: t('mcpConnect.trae.instruction') },
+  ] },
+  { key: 'generic', label: t('mcpConnect.tools.generic'), after: '', blocks: [
+    { tool: 'generic', file: t('mcpConnect.terminal'), hint: t('mcpConnect.generic.instruction') },
+  ] },
+])
+const currentClient = computed(() => clients.value.find(client => client.key === activeTool.value) || clients.value[0])
+
+const toolGroups = computed(() => {
+  const query = toolQuery.value.trim().toLowerCase()
+  const tools: any[] = (status.value?.tools || []).filter((tool: any) =>
+    !query || `${tool.name} ${tool.description}`.toLowerCase().includes(query))
+  const needsApproval = (tool: any) => tool.risk === 'write' || tool.risk === 'execute'
+  return [
+    { title: t('mcpConnect.needsApproval'), tools: tools.filter(needsApproval) },
+    { title: t('mcpConnect.runsDirectly'), tools: tools.filter(tool => !needsApproval(tool)) },
+  ].filter(group => group.tools.length)
+})
 
 async function loadStatus() {
   try {
     accessToken.value = (await api.instance.get('/session/token')).data.token
     const res = await api.instance.get('/mcp/status')
     status.value = res.data
-    connected.value = true
+    serverState.value = 'online'
   } catch {
-    connected.value = false
+    status.value = null
+    serverState.value = 'offline'
   }
 }
 
@@ -171,26 +162,15 @@ curl -s -X POST "${mcpUrl.value}" -H "Authorization: Bearer ${accessToken.value}
   return JSON.stringify({ [tool === 'vscode' ? 'servers' : 'mcpServers']: { 'jmeter-agent': entry } }, null, 2)
 }
 
-async function copyConfig(tool: string) {
-  try {
-    await navigator.clipboard.writeText(getConfig(tool))
-    ElMessage.success(t('mcpConnect.message.copySuccess'))
-  } catch {
-    // Fallback
-    const ta = document.createElement('textarea')
-    ta.value = getConfig(tool)
-    document.body.appendChild(ta)
-    ta.select()
-    document.execCommand('copy')
-    document.body.removeChild(ta)
-    ElMessage.success(t('mcpConnect.message.copySuccess'))
-  }
-}
+// The page may be on a shared screen; only what is copied carries the real token.
+const shown = (text: string) => showToken.value || !accessToken.value ? text : text.split(accessToken.value).join('•'.repeat(12))
 
-async function copyUrl() {
+async function copy(key: string, text: string) {
   try {
-    await navigator.clipboard.writeText(mcpUrl.value)
-    ElMessage.success(t('mcpConnect.message.urlCopied'))
+    await navigator.clipboard.writeText(text)
+    copied.value = key
+    clearTimeout(copiedTimer)
+    copiedTimer = setTimeout(() => { copied.value = '' }, 1800)
   } catch {
     ElMessage.warning(t('mcpConnect.message.copyFailed'))
   }
@@ -206,10 +186,10 @@ async function testConnection() {
     if (init.data.error) throw new Error(init.data.error.message)
     const ping = await api.instance.post('/mcp', { jsonrpc: '2.0', id: 'probe', method: 'ping' })
     if (ping.data.error) throw new Error(ping.data.error.message)
-    connected.value = true
+    await loadStatus()
     ElMessage.success(t('mcpConnect.message.connectionSuccess', init.data.result.serverInfo))
   } catch (error) {
-    connected.value = false
+    serverState.value = 'offline'
     ElMessage.error(t('mcpConnect.message.connectionFailed', { message: error instanceof Error ? error.message : '' }))
   } finally {
     testing.value = false
@@ -217,109 +197,217 @@ async function testConnection() {
 }
 
 onMounted(loadStatus)
+onUnmounted(() => clearTimeout(copiedTimer))
 </script>
 
 <style scoped lang="scss">
 .mcp-page {
-  max-width: 960px;
-  margin: 0 auto;
+  --code-font: var(--app-font-mono);
+  min-width: 0;
 
-  @media (max-width: 768px) {
-    padding: 0 16px;
-    box-sizing: border-box;
+  h3 { margin: 0; font-size: 15px; font-weight: 600; color: var(--app-text); }
+}
+
+.server {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 4px 0 20px;
+}
+
+.server-main { min-width: 0; }
+
+.server-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px !important;
+}
+
+.dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--app-border-strong);
+
+  &.online { background: var(--app-success); box-shadow: 0 0 0 3px var(--app-success-soft); }
+  &.offline { background: var(--app-danger); box-shadow: 0 0 0 3px var(--app-danger-soft); }
+}
+
+.server .hint { margin-top: 4px; font-size: 13px; padding-left: 17px; }
+
+.setup { padding: 20px; }
+
+.client-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 12px 0 20px;
+  padding: 3px;
+  background: var(--app-surface-muted);
+  border-radius: var(--app-radius-lg);
+}
+
+.client {
+  padding: 6px 14px;
+  border: 0;
+  border-radius: var(--app-radius);
+  background: none;
+  color: var(--app-text-secondary);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+
+  &:hover { color: var(--app-text); }
+
+  &.active {
+    background: var(--app-surface);
+    color: var(--app-primary);
+    font-weight: 600;
+    box-shadow: var(--app-shadow);
   }
+}
 
-  .page-desc { color: var(--app-text-muted); margin-bottom: 20px; font-size: 14px; }
+.client:focus-visible, .code-action:focus-visible, .catalog summary:focus-visible {
+  outline: 2px solid var(--app-primary);
+  outline-offset: 2px;
+}
 
-  .header-icon {
-    font-size: 18px;
-    vertical-align: middle;
-    margin-right: 2px;
+.step + .step { margin-top: 18px; }
+.step-hint { margin: 0 0 8px; font-size: 13px; color: var(--app-text-secondary); line-height: 1.6; }
+
+.code-block {
+  border: 1px solid var(--app-border);
+  border-radius: var(--app-radius-lg);
+  background: var(--app-surface-muted);
+  overflow: hidden;
+
+  pre { margin: 0; padding: 12px 14px; max-height: 280px; overflow: auto; }
+
+  code {
+    font-family: var(--code-font);
+    font-size: 12.5px;
+    line-height: 1.65;
+    color: var(--app-text);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+}
+
+.code-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 5px 6px 5px 14px;
+  border-bottom: 1px solid var(--app-border);
+}
+
+.file { font-size: 12px; color: var(--app-text-muted); min-width: 0; overflow-wrap: anywhere; }
+
+.code-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: var(--app-radius);
+  background: none;
+  color: var(--app-text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+
+  &:hover { background: var(--app-hover); color: var(--app-primary); }
+}
+
+.after { margin: 14px 0 0; font-size: 13px; color: var(--app-text-secondary); line-height: 1.6; }
+
+.token-note {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--app-border);
+
+  p { margin: 0; font-size: 13px; color: var(--app-text-muted); line-height: 1.6; }
+}
+
+.endpoint {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  padding: 16px 20px;
+
+  code { font-family: var(--code-font); font-size: 12.5px; color: var(--app-text); overflow-wrap: anywhere; min-width: 0; }
+}
+
+.endpoint-label { font-size: 13px; color: var(--app-text-muted); }
+
+.after-setup {
+  padding: 8px 20px 4px;
+
+  ul { margin: 10px 0 0; padding-left: 18px; }
+
+  li {
+    max-width: 70ch;
+    margin-bottom: 6px;
+    font-size: 13px;
+    line-height: 1.65;
     color: var(--app-text-secondary);
   }
+}
 
-  .stats-row { margin-bottom: 20px; }
-  .stat-card { text-align: center; border-radius: var(--app-radius-lg);
-    .stat-val { font-size: 28px; font-weight: 700; color: var(--app-text);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      &.online { color: #16A34A; } &.offline { color: #DC2626; }
-    }
-    .stat-label { font-size: 12px; color: var(--app-text-muted); margin-top: 4px; }
+.catalog {
+  margin-top: 16px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--app-border);
+
+  summary {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--app-text);
+    cursor: pointer;
+    border-radius: var(--app-radius);
   }
+}
 
-  .config-card { margin-bottom: 20px; border-radius: var(--app-radius-lg);
-    .tab-content { padding: 4px 0;
-      p { font-size: 13px; color: var(--app-text-secondary); margin: 8px 0; }
-      .hint { font-size: 12px; color: var(--app-text-muted); margin-top: 12px;
-        code { background: var(--app-surface); padding: 1px 5px; border-radius: var(--app-radius); font-size: 11px; }
-      }
-    }
+.tool-search { max-width: 320px; margin-top: 14px; }
 
-    .el-tabs {
-      :deep(.el-tabs__nav) {
-        flex-wrap: wrap;
-      }
+.tool-group {
+  margin-top: 20px;
 
-      @media (max-width: 768px) {
-        :deep(.el-tabs__item) {
-          padding: 0 12px;
-        }
-      }
-    }
-  }
+  h4 { margin: 0; font-size: 13px; font-weight: 600; color: var(--app-text-secondary); }
+  .count { margin-left: 8px; font-weight: 400; color: var(--app-text-muted); }
+  dl { margin: 6px 0 0; }
+}
 
-  .code-block {
-    background: #1e1e2e; border-radius: var(--app-radius-lg); overflow: hidden; margin: 8px 0;
-    .code-header { display: flex; justify-content: space-between; align-items: center;
-      padding: 8px 14px; background: #2d2d3d; color: #cdd6f4; font-size: 12px;
-      .copy-btn { width: auto; flex-shrink: 0; }
-    }
-    pre { margin: 0; padding: 14px; overflow-x: auto;
-      code { color: #a6e3a1; font-size: 12px; line-height: 1.6; font-family: 'JetBrains Mono', 'Fira Code', monospace; }
-    }
-  }
+.tool {
+  display: grid;
+  grid-template-columns: minmax(170px, 230px) minmax(0, 1fr);
+  gap: 16px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--app-border);
 
-  .url-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 16px; padding: 12px;
-    background: var(--app-surface); border-radius: var(--app-radius-lg); border: 1px solid var(--app-border);
-    .url-label { font-size: 13px; font-weight: 600; white-space: nowrap; color: var(--app-text-secondary); flex-shrink: 0; }
-    .url-input { flex: 1; min-width: 120px; max-width: 100%; }
-    .url-btn { width: auto; flex-shrink: 0; }
-  }
+  &:last-child { border-bottom: 0; }
 
-  .tools-card { margin-bottom: 20px; border-radius: var(--app-radius-lg); }
+  dt { font-family: var(--code-font); font-size: 12.5px; color: var(--app-text); overflow-wrap: anywhere; }
+  dd { margin: 0; font-size: 13px; line-height: 1.55; color: var(--app-text-secondary); }
+}
 
-  @media (max-width: 768px) {
-    .el-tabs {
-      :deep(.el-tabs__item) {
-        padding: 0 8px;
-        font-size: 12px;
-      }
-
-      :deep(.el-tabs__nav-wrap::after) {
-        display: none;
-      }
-    }
-
-    .url-bar {
-      flex-direction: column;
-      align-items: stretch;
-      gap: 10px;
-
-      .url-label {
-        white-space: normal;
-      }
-
-      .url-input {
-        min-width: 0;
-      }
-
-      .url-btn {
-        width: 100%;
-        justify-content: center;
-      }
-    }
-  }
+@media (max-width: 640px) {
+  .server { align-items: flex-start; }
+  .setup { padding: 16px; }
+  .endpoint, .after-setup, .catalog { padding-left: 4px; padding-right: 4px; }
+  .token-note { align-items: flex-start; flex-direction: column; gap: 6px; }
+  .tool { grid-template-columns: minmax(0, 1fr); gap: 2px; }
 }
 </style>
