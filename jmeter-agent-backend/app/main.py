@@ -30,6 +30,11 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理 - 替代 on_startup/on_shutdown"""
     from app.core.config import validate_deployment_security
     validate_deployment_security()
+    from app.core import local_access
+    # On the console only: this link is a credential and must stay out of log files.
+    print(f'Open JMeter Agent: {local_access.access_url()}', flush=True)
+    if os.path.exists(frontend_dist):
+        print(f'Built UI: {local_access.access_url(f"http://localhost:{settings.PORT}")}', flush=True)
     # 启动时执行
     logger.info("Initializing database...")
     from app.models.db import init_db
@@ -102,9 +107,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Local single-user tool: no authentication. Origin checks still stop other
-# websites in the same browser from driving the local API.
-from app.middleware.local_guard import OriginGuardMiddleware, TrustedHostMiddleware
+# Local single-user tool: no accounts. The access token proves a caller is the user; Origin
+# checks still stop other websites in the same browser from driving the local API.
+from app.middleware.local_guard import (
+    LocalAccessMiddleware, OriginGuardMiddleware, ReportSandboxMiddleware, TrustedHostMiddleware,
+)
+app.add_middleware(LocalAccessMiddleware)
+app.add_middleware(ReportSandboxMiddleware)
 app.add_middleware(OriginGuardMiddleware)
 
 app.add_middleware(

@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { withScriptApproval } from './scriptApproval'
+import { baseURL, requestAccess } from './session'
 
 export type AgentRunRequest = {
   task: string
@@ -174,7 +175,6 @@ export interface ExecutionEvidence {
   server_metrics: ServerMetricsEvidence | null
 }
 
-const baseURL = import.meta.env.VITE_API_URL || '/api/v1'
 
 const instance = axios.create({
   baseURL,
@@ -216,6 +216,7 @@ instance.interceptors.request.use((config) => {
 instance.interceptors.response.use(
   (response) => response,
   async (error) => {
+    if (error.response?.data?.code === 'local_access_required') requestAccess()
     const config = error.config
     if (!config) {
       return Promise.reject(error)
@@ -296,9 +297,9 @@ export const api = {
   getComponentChildren: (parent: string) => instance.get(`/jmeter/components/${parent}/children`),
   getFunctions: () => instance.get('/jmeter/functions'),
 
-  executeTest: (planId: string, aiModel?: string) => withScriptApproval(allowScripts =>
+  executeTest: (planId: string, aiModel?: string) => withScriptApproval(approvedSha256 =>
     instance.post(`/test-plans/${planId}/execute`, null,
-      { params: { ai_model: aiModel, allow_scripts: allowScripts || undefined } })),
+      { params: { ai_model: aiModel, approved_sha256: approvedSha256 } })),
   getExecutions: (projectId?: string) => instance.get('/executions', { params: projectId ? { project_id: projectId } : {} }),
   cancelExecution: (id: string) => instance.post(`/executions/${id}/cancel`),
 
@@ -310,6 +311,9 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Accept-Language': lang },
       body: JSON.stringify({ ...data, lang })
+    }).then((response) => {
+      if (response.status === 401) requestAccess()
+      return response
     })
   },
 

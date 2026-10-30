@@ -50,6 +50,7 @@ class MCPTool:
     description: str
     inputSchema: dict
     handler: Callable
+    risk: str = 'read'
 
 
 @dataclass
@@ -71,7 +72,6 @@ class MCPPrompt:
 class MCPSession:
     """One legacy SSE connection; never a business-event subscriber."""
     id: str
-    owner: str
     queue: asyncio.Queue
     phase: str = "new"
     pending: dict = field(default_factory=dict)
@@ -102,8 +102,7 @@ class MCPServer:
         # Mount at /mcp/ in FastAPI
     """
 
-    MAX_SESSIONS = 128
-    MAX_OWNER_SESSIONS = 4
+    MAX_SESSIONS = 4
     MAX_PENDING_REQUESTS = 32
     MAX_SESSION_REQUESTS = 4096
     RESPONSE_QUEUE_SIZE = 64
@@ -114,21 +113,21 @@ class MCPServer:
         self.version = version
         self._tools: Dict[str, MCPTool] = {}
         from app.services.ai.agent.tool_registry import ToolRegistry
-        self._tool_registry = ToolRegistry()
+        self._tool_registry = ToolRegistry(source='mcp')
         self._resources: Dict[str, MCPResource] = {}
         self._prompts: Dict[str, MCPPrompt] = {}
         self._sessions: Dict[str, MCPSession] = {}
 
     # ── Registration ────────────────────────────────────
 
-    def register_tool(self, name: str, description: str, schema: dict, handler: Callable, require_confirmation=False):
+    def register_tool(self, name: str, description: str, schema: dict, handler: Callable, risk='read'):
         from app.services.ai.agent.tool_registry import Tool
         if name in self._tools:
             return
-        definition = Tool(name, description, schema, handler, require_confirmation=require_confirmation)
+        definition = Tool(name, description, schema, handler, risk=risk)
         self._tool_registry.register(definition)
         self._tools[name] = MCPTool(
-            name=name, description=description, inputSchema=definition.parameters, handler=handler,
+            name=name, description=description, inputSchema=definition.parameters, handler=handler, risk=risk,
         )
 
     def register_resource(self, uri: str, name: str, description: str, mime: str = "application/json"):
@@ -151,7 +150,7 @@ class MCPServer:
                 description=tool.description,
                 schema=tool.parameters if hasattr(tool, 'parameters') else {},
                 handler=tool.handler,
-                require_confirmation=tool.require_confirmation,
+                risk=tool.risk,
             )
 
     def register_all_resources(self):
@@ -245,17 +244,16 @@ class MCPServer:
             logger.exception("MCP dispatch error: %s", method)
             return self._error_response(req_id, -32603, "Internal error")
 
-    def create_session(self, owner: str) -> MCPSession:
-        if (len(self._sessions) >= self.MAX_SESSIONS
-                or sum(s.owner == owner for s in self._sessions.values()) >= self.MAX_OWNER_SESSIONS):
+    def create_session(self) -> MCPSession:
+        if len(self._sessions) >= self.MAX_SESSIONS:
             raise MCPTransportError(429, "Too many MCP sessions")
-        session = MCPSession(secrets.token_urlsafe(32), owner, asyncio.Queue(self.RESPONSE_QUEUE_SIZE), server=self)
+        session = MCPSession(secrets.token_urlsafe(32), asyncio.Queue(self.RESPONSE_QUEUE_SIZE), server=self)
         self._sessions[session.id] = session
         return session
 
-    def get_session(self, session_id: str, owner: str) -> MCPSession:
+    def get_session(self, session_id: str) -> MCPSession:
         session = self._sessions.get(session_id)
-        if not session or session.closed or session.owner != owner:
+        if not session or session.closed:
             raise MCPTransportError(404, "MCP session not found")
         return session
 
@@ -395,6 +393,10 @@ class MCPServer:
                 "inputSchema": tool.inputSchema or {
                     "type": "object",
                     "properties": {},
+                },
+                "annotations": {
+                    "readOnlyHint": tool.risk == 'read',
+                    "destructiveHint": tool.risk in ('write', 'execute'),
                 },
             })
         return {"tools": tools}

@@ -19,9 +19,6 @@ from app.services.mcp_server import mcp_server, MCPTransportError, SUPPORTED_PRO
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["mcp"])
 
-# Single local user: every MCP session has the same owner.
-LOCAL_OWNER = "local"
-
 
 class _MCPStreamingResponse(StreamingResponse):
     """Own the session even if ASGI send fails while the generator is suspended."""
@@ -105,7 +102,6 @@ async def mcp_streamable_http_stream():
 @router.post("/mcp/messages")
 async def mcp_messages(request: Request):
     """Accept one session message. Missing sessions are not a custom HTTP transport."""
-    owner = LOCAL_OWNER
     session_id = request.query_params.get("session_id")
     if not session_id:
         raise HTTPException(400, "Connect to /api/v1/mcp/sse first")
@@ -115,7 +111,7 @@ async def mcp_messages(request: Request):
             body.extend(chunk)
             if len(body) > 1024 * 1024:
                 raise HTTPException(413, "MCP message exceeds 1 MiB")
-        session = mcp_server.get_session(session_id, owner)
+        session = mcp_server.get_session(session_id)
         mcp_server.submit(session, bytes(body))
     except MCPTransportError as error:
         raise HTTPException(error.status_code, error.detail) from error
@@ -128,7 +124,7 @@ async def mcp_sse(request: Request):
     server = mcp_server
     try:
         # Admission must happen before response headers, so limits return HTTP 429.
-        session = server.create_session(LOCAL_OWNER)
+        session = server.create_session()
     except MCPTransportError as error:
         raise HTTPException(error.status_code, error.detail) from error
 

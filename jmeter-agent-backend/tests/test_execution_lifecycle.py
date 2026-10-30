@@ -28,7 +28,7 @@ async def env(tmp_path, monkeypatch):
     monkeypatch.setattr(executor_module.subprocess, 'Popen', forbid_real_executor)
     monkeypatch.setattr(lifecycle_module, 'get_executor', forbid_real_executor)
     # The sample keeps a JSR223 script to prove byte-for-byte snapshots; the script gate has its own tests.
-    monkeypatch.setattr(lifecycle_module, 'scan_scripts', lambda content: [])
+    monkeypatch.setattr(lifecycle_module, 'scan_scripts', lambda content, base_dir=None: [])
     engine = create_async_engine('sqlite+aiosqlite:///' + str(tmp_path / 'state.db'))
     monkeypatch.setattr(db, '_engine', engine)
     monkeypatch.setattr(db, '_async_session_factory', async_sessionmaker(engine, expire_on_commit=False))
@@ -538,7 +538,11 @@ async def test_local_runs_with_scripts_need_explicit_approval(env, monkeypatch):
     assert refused.value.findings == [{'name': 'JSR223Sampler', 'kind': 'JSR223Sampler'}]
     assert store.get_execution('scripts-refused') is None
     assert not (env.root / 'reports' / 'scripts-refused').exists()  # nothing created before approval
-    assert (await lifecycle.prepare(str(env.path), 'scripts-approved', allow_scripts=True)).status == Status.PENDING
+    # The approval covers these bytes only: an edited plan is asked about again.
+    with pytest.raises(script_risk.ScriptApprovalRequired):
+        await lifecycle.prepare(str(env.path), 'scripts-stale', approved_sha256='0' * 64)
+    assert (await lifecycle.prepare(str(env.path), 'scripts-approved',
+                                    approved_sha256=refused.value.sha256)).status == Status.PENDING
     monkeypatch.setattr(settings, 'JMETER_EXECUTION_MODE', 'container')
     assert (await lifecycle.prepare(str(env.path), 'scripts-in-container')).status == Status.PENDING
     await lifecycle.shutdown()

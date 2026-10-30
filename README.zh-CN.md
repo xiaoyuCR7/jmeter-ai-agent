@@ -97,11 +97,13 @@ cd jmeter-ai-agent
 start.bat         # Windows
 ```
 
+启动脚本会通过带有本地访问令牌的链接打开应用。只有第一次访问需要它，之后浏览器会保存 Cookie。这不是登录，详见[本地访问](#本地访问)。
+
 或手动启动：
 
 ```bash
 cd jmeter-agent-backend && pip install -r requirements.txt && python -m app.main   # http://127.0.0.1:8000
-cd jmeter-agent-frontend && npm install && npm run dev                             # http://localhost:3000
+cd jmeter-agent-frontend && npm install && npm run dev                             # 打开后端打印的链接
 ```
 
 **3. 添加模型**：在「设置 → AI 模型配置」里选择 DeepSeek、通义千问、OpenAI、Claude 或任意 OpenAI 兼容接口，填入 API Key。
@@ -113,10 +115,10 @@ cd jmeter-agent-frontend && npm install && npm run dev                          
 ## 在 Claude Code、Cursor 等助手里使用
 
 ```bash
-claude mcp add --transport http jmeter-agent http://127.0.0.1:8000/api/v1/mcp
+claude mcp add --transport http jmeter-agent http://127.0.0.1:8000/api/v1/mcp --header "Authorization: Bearer <令牌>"
 ```
 
-Cursor、VS Code 等客户端的配置可以在「设置 → 外部助手接入（MCP）」里一键复制。分析时让助手使用 `analyze-execution` 提示词，或先调用 `get_execution_evidence`，它拿到的数据和报告页完全一致。只支持 SSE 的旧客户端可以用 `/api/v1/mcp/sse`。
+令牌就是访问链接里的那一段，也保存在 `jmeter-agent-backend/.local_access_token`。Cursor、VS Code 等客户端的配置可以在「设置 → 外部助手接入（MCP）」里一键复制，已经带好令牌。分析时让助手使用 `analyze-execution` 提示词，或先调用 `get_execution_evidence`，它拿到的数据和报告页完全一致。只支持 SSE 的旧客户端可以用 `/api/v1/mcp/sse`。
 
 ## 配置
 
@@ -136,16 +138,27 @@ Cursor、VS Code 等客户端的配置可以在「设置 → 外部助手接入�
 
 模型的 API Key 不从 `.env` 读取，请在界面里添加。它们保存在 `jmeter-agent-backend/ai_models_config.json`，这个文件已被 git 忽略。
 
-因为没有登录，`HOST` 只能是本机回环地址，设成其它地址服务会拒绝启动。
+因为没有登录，`HOST` 只能是本机回环地址，设成其它地址服务会拒绝启动，来自其它机器的连接也会被拒绝。
+
+### 本地访问
+
+接口、实时推送和报告文件都需要本地访问令牌，否则本机任何能发 HTTP 的程序都能调用它们，包括测试计划自己的 HTTP 取样器。
+后端首次启动时生成令牌，保存在 `jmeter-agent-backend/.local_access_token`（已被 git 忽略），并打印访问链接。
+Cookie 丢了或换了浏览器，重新打开这个链接，或在应用提示时粘贴它即可。MCP 客户端和脚本使用 `Authorization: Bearer <令牌>`。
+删除这个文件并重启可以更换令牌，之后所有浏览器和 MCP 客户端都要用新令牌。
+
+报告内容来自被测系统，所以报告页运行在浏览器沙箱里。智能体工具分为 `read`、`draft`、`write`、`execute` 四级：后两级无论由本应用的智能体还是
+MCP 客户端调用，都要等你确认；分析智能体只能使用 `read` 工具。
 
 ### 执行隔离
 
-JMeter 计划可以运行代码：JSR223 / BeanShell 组件、OS Process Sampler，以及 `${__groovy()}` 这类函数。
-`JMETER_EXECUTION_MODE` 决定这些代码在哪里运行。
+JMeter 计划能做的远不止发送压力：可以通过 JSR223 / BeanShell 组件、OS Process Sampler 和 `${__groovy()}` 这类函数运行代码，
+也可以完全不用脚本，通过 `${__FileToString()}`、`${__StringToFile()}`、CSV 数据文件、HTTP 文件上传或监听器输出路径读写任意文件。
+`JMETER_EXECUTION_MODE` 决定这些操作在哪里发生。
 
 | 模式 | JMeter 怎么运行 | 适用场景 |
 |---|---|---|
-| `local`（默认） | 本机子进程，权限和你的账号相同。计划里有脚本、系统命令或 Include Controller 时，运行前会列出来请你确认（智能体发起的执行会单独再确认一次）。本应用生成的计划不含这些组件。 | 自己写的或在这里生成的计划 |
+| `local`（默认） | 本机子进程，权限和你的账号相同。计划里有脚本、系统命令、Java 取样器、Include Controller、文件函数，或指向计划目录和应用数据目录之外的文件路径时，运行前会列出来请你确认（智能体发起的执行会单独再确认一次）。确认只对这份内容有效，计划改动后会重新询问。本应用生成的计划不含这些内容。 | 自己写的或在这里生成的计划 |
 | `container` | Docker：根文件系统只读、去掉全部 Linux 权限、禁止提权、非 root 账号、限制内存 / CPU / 进程数、不共享 IPC，只读挂载计划所在的项目目录 | 来自其它地方的计划 |
 
 容器模式需要 Docker，以及 `JMETER_CONTAINER_IMAGE`：一个本地已有、按 `@sha256:` 摘要锁定版本的镜像（不会自动拉取）。

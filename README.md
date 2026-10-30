@@ -99,11 +99,14 @@ JMeter is only needed to execute load tests; editing plans and running the unit 
 start.bat         # Windows
 ```
 
+The script opens the app through a link carrying your local access token. Only that first visit needs it: the browser
+then keeps a cookie. There is no login; see [Local access](#local-access).
+
 Or by hand:
 
 ```bash
 cd jmeter-agent-backend && pip install -r requirements.txt && python -m app.main   # http://127.0.0.1:8000
-cd jmeter-agent-frontend && npm install && npm run dev                             # http://localhost:3000
+cd jmeter-agent-frontend && npm install && npm run dev                             # open the link the backend prints
 ```
 
 **3. Add a model** in **Settings → AI models**: pick DeepSeek, Qwen, OpenAI, Claude or any OpenAI-compatible endpoint and paste
@@ -115,10 +118,11 @@ API docs are served at http://127.0.0.1:8000/api/docs.
 ## Use it from Claude Code, Cursor and friends
 
 ```bash
-claude mcp add --transport http jmeter-agent http://127.0.0.1:8000/api/v1/mcp
+claude mcp add --transport http jmeter-agent http://127.0.0.1:8000/api/v1/mcp --header "Authorization: Bearer <token>"
 ```
 
-Ready-to-copy configs for Cursor, VS Code and others are under **Settings → Assistants (MCP)**. Ask the assistant to use the
+The token is the one in your access link, also stored in `jmeter-agent-backend/.local_access_token`. Ready-to-copy
+configs that already include it, for Cursor, VS Code and others, are under **Settings → Assistants (MCP)**. Ask the assistant to use the
 `analyze-execution` prompt, or to call `get_execution_evidence` first — it gets exactly what the report page shows.
 Older SSE-only clients can use `/api/v1/mcp/sse`.
 
@@ -141,16 +145,31 @@ Common settings in `jmeter-agent-backend/.env`:
 Model API keys are not read from `.env`; add models in the UI. They are stored in `jmeter-agent-backend/ai_models_config.json`,
 which git ignores.
 
-`HOST` must stay a loopback address: there is no login, so the server refuses to start on anything else.
+`HOST` must stay a loopback address: there is no login, so the server refuses to start on anything else, and it
+refuses any connection that does not come from this machine.
+
+### Local access
+
+The API, live updates and stored reports need the local access token, because anything on this machine that speaks HTTP
+could otherwise call them, including a test plan's own HTTP samplers. The backend creates the token on first start in
+`jmeter-agent-backend/.local_access_token` (git ignores it) and prints the access link. Lost the cookie, or using another
+browser? Open that link again, or paste it when the app asks. MCP clients and scripts send `Authorization: Bearer <token>`.
+Delete the file and restart to replace the token; every browser and MCP client then needs the new one.
+
+Stored reports are served in a browser sandbox, since they contain data from the systems under test. Agent tools are
+graded `read`, `draft`, `write` or `execute`: the last two wait for your confirmation, whoever called them (this app's
+agents or an MCP client), and the analysis agent only gets `read` tools.
 
 ### Execution isolation
 
-JMeter plans can run code: JSR223 / BeanShell elements, the OS Process Sampler, and functions such as `${__groovy()}`.
-`JMETER_EXECUTION_MODE` decides where that code runs.
+JMeter plans can do far more than send load: run code through JSR223 / BeanShell elements, the OS Process Sampler and
+functions such as `${__groovy()}`, and read or write any file with no script at all, through `${__FileToString()}`,
+`${__StringToFile()}`, CSV Data Set, HTTP file uploads or listener output paths. `JMETER_EXECUTION_MODE` decides where
+all of that happens.
 
 | Mode | How JMeter runs | Use it for |
 |---|---|---|
-| `local` (default) | A child process with your privileges. Before running a plan that contains scripts, commands or an Include Controller, the app lists them and asks you (the agent asks a second time, separately). Plans the app generates contain none. | Plans you wrote or generated here |
+| `local` (default) | A child process with your privileges. Before running a plan with scripts, commands, Java samplers, an Include Controller, file functions, or file paths outside the plan's folder and the app's data folders, the app lists them and asks you (the agent asks a second time, separately). The approval covers those exact bytes: a plan edited afterwards is asked about again. Plans the app generates contain none. | Plans you wrote or generated here |
 | `container` | Docker: read-only root filesystem, all capabilities dropped, no privilege escalation, non-root user, memory / CPU / process limits, no shared IPC, only the plan's project folder mounted (read-only) | Plans from anywhere else |
 
 Container mode needs Docker and `JMETER_CONTAINER_IMAGE`, a locally available image pinned by `@sha256:` digest (it is

@@ -230,7 +230,7 @@ file_tools = [
             "required": ["path", "content"],
         },
         handler=write_file,
-        require_confirmation=True,
+        risk='write',
     ),
     Tool(
         name="list_directory",
@@ -256,7 +256,7 @@ file_tools = [
             "required": ["path"],
         },
         handler=delete_file,
-        require_confirmation=True,
+        risk='write',
     ),
     Tool(
         name="file_exists",

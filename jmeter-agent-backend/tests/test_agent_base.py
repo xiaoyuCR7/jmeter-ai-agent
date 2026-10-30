@@ -324,7 +324,7 @@ def test_unrecoverable_errors_take_precedence_over_retry_and_input_patterns(mess
 async def test_system_tool_failure_stops_current_batch_and_later_react_rounds(prior_success, failure):
     from app.services.ai.adapters.base import message_groups
     registry = ToolRegistry()
-    registry.register(Tool('action', 'action', {}, AsyncMock(), require_confirmation=True))
+    registry.register(Tool('action', 'action', {}, AsyncMock(), risk='write'))
     calls = []
     async def execute(name, args):
         calls.append(args['phase'])
@@ -924,7 +924,7 @@ async def test_oversized_tool_batch_is_rejected_before_any_side_effect():
 async def test_dangerous_tool_timeout_is_not_automatically_retried(monkeypatch):
     from app.services.ai.agent import base as base_mod
     registry = ToolRegistry()
-    registry.register(Tool('danger', 'danger', {}, AsyncMock(), require_confirmation=True))
+    registry.register(Tool('danger', 'danger', {}, AsyncMock(), risk='write'))
     registry.execute = AsyncMock(side_effect=asyncio.TimeoutError)
     agent = make_agent(FakeAdapter(), registry)
     result = await agent._execute_tool_with_timeout('danger', {})

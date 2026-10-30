@@ -21,11 +21,12 @@ _report_parser = ReportParser()
 _scheduler = TestScheduler()
 
 
-async def _execute_with_script_approval(tool_name: str, jmx_path: str, *args, **kwargs):
+async def execute_with_script_approval(tool_name: str, jmx_path: str, *args, **kwargs):
     """Run through the lifecycle; a plan with scripts needs a second, explicit user approval.
 
-    Approving the tool call alone does not show the scripts, so the user is asked again
-    with the list of what will run on this machine. The model can never grant this itself.
+    Approving the tool call alone does not show what the plan does, so the user is asked
+    again with the list. The approval covers exactly the bytes that were listed; the model
+    can never grant it itself.
     """
     try:
         return await execution_lifecycle.execute(jmx_path, *args, **kwargs)
@@ -34,7 +35,8 @@ async def _execute_with_script_approval(tool_name: str, jmx_path: str, *args, **
         if not await confirmations.request(tool_name, {'jmx_path': jmx_path,
                                                        'runs_scripts_on_this_machine': error.findings}):
             raise ValueError(f'{error} The user did not approve it; do not retry automatically.') from error
-    return await execution_lifecycle.execute(jmx_path, *args, allow_scripts=True, **kwargs)
+        approved = error.sha256
+    return await execution_lifecycle.execute(jmx_path, *args, approved_sha256=approved, **kwargs)
 
 
 async def execute_test(jmx_path: str, execution_id: str = "",
@@ -83,7 +85,7 @@ async def execute_test(jmx_path: str, execution_id: str = "",
         resource_info.update(post_test_cpu=snapshot.cpu_percent, post_test_memory=snapshot.memory_percent)
 
     try:
-        result = await _execute_with_script_approval(
+        result = await execute_with_script_approval(
             'execute_test', jmx_path, execution_id, before_execute=before_execute, postprocess=postprocess)
     except (ValueError, FileNotFoundError, FileExistsError) as error:
         return {"error": str(error), "execution_id": execution_id}
@@ -219,7 +221,7 @@ async def execute_distributed(jmx_path: str, execution_id: str = "",
         }
 
     try:
-        result = await _execute_with_script_approval('execute_distributed', jmx_path, execution_id,
+        result = await execute_with_script_approval('execute_distributed', jmx_path, execution_id,
                                                      remote_engines=engines or dist_executor.get_engines())
         return {
             "execution_id": execution_id,
@@ -255,7 +257,7 @@ jmeter_tools = [
             "required": ["jmx_path"],
         },
         handler=execute_test,
-        require_confirmation=True,
+        risk='execute',
     ),
     Tool(
         name="parse_jtl_report",
@@ -305,6 +307,7 @@ jmeter_tools = [
             "required": ["execution_id"],
         },
         handler=cancel_execution,
+        risk='write',
     ),
     Tool(
         name="list_report_dir",
@@ -327,7 +330,7 @@ jmeter_tools = [
             "required": ["jmx_path"],
         },
         handler=execute_distributed,
-        require_confirmation=True,
+        risk='execute',
     ),
     Tool(
         name="get_remote_engines",

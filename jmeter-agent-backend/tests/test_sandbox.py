@@ -28,13 +28,68 @@ def test_scan_finds_script_elements_functions_and_includes_but_skips_disabled():
         {'name': 'Shared steps', 'kind': 'IncludeController'},
         {'name': '${__groovy(...)}', 'kind': '__groovy'},
     ]
-    assert 'Run shell (SystemSampler)' in str(script_risk.ScriptApprovalRequired(findings))
+    assert 'Run shell (SystemSampler)' in str(script_risk.ScriptApprovalRequired(findings, 'digest'))
 
 
 def test_plain_http_plans_and_unparseable_files():
     plain = b'<jmeterTestPlan><hashTree><HTTPSamplerProxy testclass="HTTPSamplerProxy" testname="${__Random(1,9,)}"/></hashTree></jmeterTestPlan>'
     assert script_risk.scan(plain) == []
     assert script_risk.scan(b'<not xml')[0]['kind'] == 'unparsed'
+
+
+def plan_with(body: str) -> bytes:
+    return f'<jmeterTestPlan><hashTree>{body}</hashTree></jmeterTestPlan>'.encode('utf-8')
+
+
+@pytest.mark.parametrize('body, kind', [
+    # Decoded by the XML parser before JMeter evaluates it, so a byte search never sees these.
+    ('<stringProp name="x">$&#123;__groovy(1)}</stringProp>', '__groovy'),
+    ('<stringProp name="x"><![CDATA[${__groovy(1)}]]></stringProp>', '__groovy'),
+    # Read and write files with no script at all.
+    ('<stringProp name="x">${__FileToString(/etc/passwd)}</stringProp>', '__FileToString'),
+    ('<stringProp name="x">${__StringToFile(/tmp/a,b)}</stringProp>', '__StringToFile'),
+    ('<stringProp name="x">${__CSVRead(/etc/passwd,0)}</stringProp>', '__CSVRead'),
+    # __eval runs a function assembled from variables at run time.
+    ('<stringProp name="x">${__eval(${a}${b})}</stringProp>', '__eval'),
+    ('<JavaSampler testclass="JavaSampler" testname="Java"/>', 'JavaSampler'),
+    ('<JUnitSampler testclass="JUnitSampler" testname="JUnit"/>', 'JUnitSampler'),
+    # JMeter accepts fully qualified class names as well as its aliases.
+    ('<x testclass="org.apache.jmeter.protocol.java.sampler.JSR223Sampler" testname="s"/>', 'JSR223Sampler'),
+    ('<TestPlan testclass="TestPlan"><stringProp name="TestPlan.user_define_classpath">/tmp/evil.jar</stringProp></TestPlan>',
+     'TestPlan.user_define_classpath'),
+])
+def test_scan_sees_what_jmeter_will_evaluate(body, kind):
+    assert kind in [item['kind'] for item in script_risk.scan(plan_with(body))]
+
+
+@pytest.mark.parametrize('element', [
+    '<CSVDataSet testclass="CSVDataSet"><stringProp name="filename">{path}</stringProp></CSVDataSet>',
+    '<HTTPSamplerProxy testclass="HTTPSamplerProxy"><elementProp elementType="HTTPFileArg">'
+    '<stringProp name="File.path">{path}</stringProp></elementProp></HTTPSamplerProxy>',
+    '<ResultCollector testclass="ResultCollector"><stringProp name="filename">{path}</stringProp></ResultCollector>',
+    '<ResultSaver testclass="ResultSaver"><stringProp name="FileSaver.base_filename">{path}</stringProp></ResultSaver>',
+])
+@pytest.mark.parametrize('path, flagged', [
+    ('C:/Users/me/.ssh/id_rsa', True), ('/etc/passwd', True), ('../../secrets.csv', True),
+    ('..\\secrets.csv', True), ('${path}', True), ('users.csv', False), ('data/users.csv', False),
+])
+def test_file_paths_must_stay_in_the_plan_folder(tmp_path, monkeypatch, element, path, flagged):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, 'TEST_PLANS_DIR_DEFAULT', str(tmp_path))
+    content = plan_with(element.replace('{path}', path))
+    assert bool(script_risk.scan(content, str(tmp_path))) is flagged
+
+
+def test_files_in_the_app_folders_and_harmless_properties_pass(tmp_path, monkeypatch):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, 'TEST_PLANS_DIR_DEFAULT', str(tmp_path / 'plans'))
+    monkeypatch.setattr(settings, 'BASE_DIR', str(tmp_path))
+    inside = str(tmp_path / 'test_data' / 'project' / 'users.csv')
+    content = plan_with(f'<CSVDataSet testclass="CSVDataSet"><stringProp name="filename">{inside}</stringProp>'
+                        '<stringProp name="fileEncoding">UTF-8</stringProp></CSVDataSet>'
+                        '<ResultCollector testclass="ResultCollector"><stringProp name="filename"></stringProp></ResultCollector>'
+                        '<elementProp elementType="HTTPFileArg"><stringProp name="File.mimetype">text/csv</stringProp></elementProp>')
+    assert script_risk.scan(content) == []
 
 
 def test_generated_plans_have_no_scripts():
@@ -57,16 +112,16 @@ async def test_agent_runs_scripts_only_after_a_second_explicit_approval(monkeypa
     from app.services import confirmations as confirmation_module
     finding = [{'name': 'Run shell', 'kind': 'SystemSampler'}]
     done = SimpleNamespace(id='x')
-    execute = AsyncMock(side_effect=[script_risk.ScriptApprovalRequired(finding), done])
+    execute = AsyncMock(side_effect=[script_risk.ScriptApprovalRequired(finding, 'digest'), done])
     monkeypatch.setattr(tools.execution_lifecycle, 'execute', execute)
     request = AsyncMock(return_value=approved)
     monkeypatch.setattr(confirmation_module.confirmations, 'request', request)
     if approved:
-        assert await tools._execute_with_script_approval('execute_test', 'plan.jmx', 'run') is done
-        assert execute.await_args.kwargs['allow_scripts'] is True
+        assert await tools.execute_with_script_approval('execute_test', 'plan.jmx', 'run') is done
+        assert execute.await_args.kwargs['approved_sha256'] == 'digest'
     else:
         with pytest.raises(ValueError, match='did not approve'):
-            await tools._execute_with_script_approval('execute_test', 'plan.jmx', 'run')
+            await tools.execute_with_script_approval('execute_test', 'plan.jmx', 'run')
         assert execute.await_count == 1
     request.assert_awaited_once_with('execute_test', {'jmx_path': 'plan.jmx', 'runs_scripts_on_this_machine': finding})
 
@@ -78,16 +133,16 @@ async def test_web_run_returns_the_scripts_for_the_ui_to_confirm(monkeypatch):
     finding = [{'name': 'Parse token', 'kind': 'JSR223PostProcessor'}]
     plan = SimpleNamespace(jmx_path='plan.jmx', test_config=SimpleNamespace(model_dump=lambda: {}))
     monkeypatch.setitem(routes.store.test_plans, 'scripted', plan)
-    submit = AsyncMock(side_effect=script_risk.ScriptApprovalRequired(finding))
+    submit = AsyncMock(side_effect=script_risk.ScriptApprovalRequired(finding, 'digest'))
     monkeypatch.setattr(routes.execution_lifecycle, 'submit', submit)
     with pytest.raises(HTTPException) as refused:
-        await routes.execute_test_plan('scripted', None, None, False)
+        await routes.execute_test_plan('scripted', None, None, None)
     assert refused.value.status_code == 409
     assert refused.value.detail['code'] == 'scripts_need_approval' and refused.value.detail['findings'] == finding
     submit.side_effect = None
     submit.return_value = 'started'
-    assert await routes.execute_test_plan('scripted', None, None, True) == 'started'
-    assert submit.await_args.kwargs['allow_scripts'] is True
+    assert await routes.execute_test_plan('scripted', None, None, 'digest') == 'started'
+    assert submit.await_args.kwargs['approved_sha256'] == 'digest'
 
 
 # ── Container launcher ─────────────────────────────────────────

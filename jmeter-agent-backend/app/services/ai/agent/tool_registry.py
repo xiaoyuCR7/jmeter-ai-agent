@@ -4,7 +4,7 @@ import time
 import copy
 import json
 from jsonschema import Draft202012Validator
-from typing import Any, Optional, Callable, Awaitable
+from typing import Any, Literal, Optional, Callable, Awaitable
 from dataclasses import dataclass, field
 
 from app.services.ai.agent.types import ToolResult, ToolHandler, ErrorCategory, classify_error
@@ -17,12 +17,18 @@ class Tool:
     description: str
     parameters: dict  # JSON Schema for the parameters
     handler: ToolHandler
-    require_confirmation: bool = False  # ask user before executing
+    # read: no lasting effect. draft: adds something new, overwrites nothing.
+    # write and execute: change or run existing things, so the user is asked first.
+    risk: Literal['read', 'draft', 'write', 'execute'] = 'read'
 
     def __post_init__(self):
         self.parameters = copy.deepcopy(self.parameters)
         self.parameters.setdefault('type', 'object')
         self.parameters.setdefault('additionalProperties', False)
+
+    @property
+    def require_confirmation(self) -> bool:
+        return self.risk in ('write', 'execute')
 
     def to_openai_schema(self) -> dict:
         """Convert to OpenAI function-calling format."""
@@ -47,7 +53,8 @@ class Tool:
 class ToolRegistry:
     """Registry of tools available to agents."""
 
-    def __init__(self):
+    def __init__(self, source: str = 'agent'):
+        self.source = source  # who is calling, shown to the user with each confirmation
         self._tools: dict[str, Tool] = {}
         self._validators = {}
 
@@ -140,8 +147,9 @@ class ToolRegistry:
                 return ToolResult(success=False, tool_name=name, error=error,
                                   error_category=ErrorCategory.INPUT_ERROR)
             args = json.loads(json.dumps(args, allow_nan=False))
+            from app.services.confirmations import confirmation_source, confirmations
+            confirmation_source.set(self.source)  # also covers approvals a handler asks for itself
             if tool.require_confirmation:
-                from app.services.confirmations import confirmations
                 if not await confirmations.request(name, args):
                     return ToolResult(success=False, tool_name=name,
                                       error="User confirmation denied, expired, or unavailable; do not retry automatically",

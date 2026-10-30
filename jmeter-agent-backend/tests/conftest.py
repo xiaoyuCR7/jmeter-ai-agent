@@ -22,10 +22,20 @@ os.environ.update({
     'RAG_LANCEDB_PATH': str(_DATA / 'rag_lancedb'),
 })
 
-from app.core import config  # noqa: E402  (must follow the environment above)
+import pytest  # noqa: E402
+
+from app.core import config, local_access  # noqa: E402  (must follow the environment above)
 
 # A user's paths_config.json would otherwise override the plan and report folders.
 config.PATHS_CONFIG_FILE = str(_DATA / 'paths_config.json')
+
+
+@pytest.fixture(autouse=True)
+def _trusted_caller(request, monkeypatch):
+    """Tests call the app directly; test_local_access.py is where the access checks are tested."""
+    if request.module.__name__ != 'test_local_access':
+        monkeypatch.setattr(local_access, 'is_authorized', lambda scope: True)
+        monkeypatch.setattr(local_access, 'is_loopback_client', lambda scope: True)
 
 
 def pytest_sessionfinish(session, exitstatus):

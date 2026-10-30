@@ -1,4 +1,4 @@
-"""Dangerous calls must wait for the owning user's server-side decision."""
+"""Dangerous calls must wait for the user's server-side decision."""
 import asyncio
 from unittest.mock import AsyncMock
 
@@ -19,10 +19,10 @@ async def test_invalid_or_undeclared_arguments_never_reach_handler(args):
 
 
 @pytest.mark.asyncio
-async def test_dangerous_tool_without_authenticated_owner_is_denied():
+async def test_dangerous_tool_without_a_decision_is_denied():
     handler = AsyncMock(return_value={})
     registry = ToolRegistry()
-    registry.register(Tool('danger', 'danger', {}, handler, require_confirmation=True))
+    registry.register(Tool('danger', 'danger', {}, handler, risk='write'))
     assert not (await registry.execute('danger', {})).success
     handler.assert_not_awaited()
 
@@ -81,7 +81,7 @@ def test_file_path_resolves_links_before_checking_root(tmp_path, monkeypatch):
         file._resolve_path(str(root / 'link'))
 
 
-def test_composite_execution_tools_require_owner_confirmation():
+def test_composite_execution_tools_require_confirmation():
     from app.services.ai.agent.tools.resource import resource_tools
     tools = {tool.name: tool for tool in resource_tools}
     assert tools['selfheal_test'].require_confirmation
@@ -145,3 +145,73 @@ async def test_registered_execution_cannot_claim_a_different_jtl_as_its_evidence
     with pytest.raises(ValueError, match='registered execution'):
         await object.__new__(AnalysisAgent)._build_fact_sheet(
             str(tmp_path / 'different.jtl'), 'registered', None, 'api', 'v1', 'load')
+
+
+def test_every_built_in_tool_has_a_deliberate_risk():
+    """Pinned so a new tool that changes something cannot arrive as a default 'read'."""
+    from app.services.ai.agent.tools import get_all_builtin_tools
+    levels = {}
+    for tool in get_all_builtin_tools():
+        levels.setdefault(tool.risk, set()).add(tool.name)
+    assert levels['execute'] == {'execute_test', 'execute_distributed', 'import_openapi_spec', 'selfheal_test'}
+    assert levels['write'] == {'update_jmx', 'update_project_env', 'cancel_execution', 'write_file', 'delete_file',
+                               'save_performance_requirements', 'promote_execution_to_baseline'}
+    assert levels['draft'] == {'create_jmx', 'clone_jmx', 'import_jmx', 'create_project',
+                               'start_resource_monitoring', 'stop_resource_monitoring'}
+    assert all(tool.require_confirmation == (tool.risk in ('write', 'execute')) for tool in get_all_builtin_tools())
+
+
+def test_analysis_agent_can_only_read():
+    from unittest.mock import Mock
+    from app.services.ai.agents.analysis_agent import AnalysisAgent
+    agent = AnalysisAgent(adapter=Mock(), retriever=Mock(), archiver=Mock())
+    assert {tool.risk for tool in agent.tools.list_tools()} == {'read'}
+    assert 'read_file' in agent.tools and 'write_file' not in agent.tools and 'execute_test' not in agent.tools
+
+
+@pytest.mark.asyncio
+async def test_mcp_clients_are_told_each_tools_risk():
+    import json
+    from app.services.mcp_server import MCPServer
+    server = MCPServer()
+    server.register_all_agent_tools()
+    response = await server.handle_request(json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'}))
+    hints = {tool['name']: tool['annotations'] for tool in response['result']['tools']}
+    assert hints['read_file'] == {'readOnlyHint': True, 'destructiveHint': False}
+    assert hints['create_jmx'] == {'readOnlyHint': False, 'destructiveHint': False}
+    assert hints['delete_file'] == {'readOnlyHint': False, 'destructiveHint': True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('source', ['agent', 'mcp'])
+async def test_confirmations_show_who_is_asking_and_for_which_project(source, monkeypatch):
+    from app.services.confirmations import confirmations
+    from app.services.storage import store
+    from types import SimpleNamespace
+    monkeypatch.setattr(store, 'get_project', lambda project_id: SimpleNamespace(name='Checkout'))
+    registry = ToolRegistry(source=source)
+    registry.register(Tool('danger', 'danger', {'properties': {'project_id': {'type': 'string'}}},
+                           AsyncMock(return_value={}), risk='write'))
+    call = asyncio.create_task(registry.execute('danger', {'project_id': 'perm-project'}))
+    while not confirmations.list_pending():
+        await asyncio.sleep(0)
+    [request] = confirmations.list_pending()
+    assert request['source'] == source and request['project'] == 'Checkout'
+    confirmations.decide(request['id'], False)
+    assert not (await call).success
+
+
+@pytest.mark.asyncio
+async def test_selfheal_rerun_asks_for_approval_instead_of_failing(monkeypatch):
+    from app.services.ai.agent.tools import jmeter
+    from app.services.ai.agents import selfheal_agent
+    from app.services.jmeter.script_risk import ScriptApprovalRequired
+    import inspect
+    assert 'execute_with_script_approval' in inspect.getsource(selfheal_agent)
+    finding = [{'name': 'Shell', 'kind': 'SystemSampler'}]
+    execute = AsyncMock(side_effect=[ScriptApprovalRequired(finding, 'digest'), 'finished'])
+    monkeypatch.setattr(jmeter.execution_lifecycle, 'execute', execute)
+    from app.services.confirmations import confirmations
+    monkeypatch.setattr(confirmations, 'request', AsyncMock(return_value=True))
+    assert await jmeter.execute_with_script_approval('selfheal_test', 'a.jmx', 'run') == 'finished'
+    assert execute.await_args.kwargs['approved_sha256'] == 'digest'

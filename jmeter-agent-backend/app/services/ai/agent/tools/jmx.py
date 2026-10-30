@@ -531,6 +531,7 @@ jmx_tools = [
             "required": ["test_name", "endpoints", "base_url"],
         },
         handler=create_jmx,
+        risk='draft',
     ),
     Tool(
         name="parse_jmx_tree",
@@ -593,6 +594,7 @@ jmx_tools = [
             "required": ["jmx_path"],
         },
         handler=update_jmx,
+        risk='write',
     ),
     Tool(
         name="clone_jmx",
@@ -606,6 +608,7 @@ jmx_tools = [
             "required": ["jmx_path"],
         },
         handler=clone_jmx,
+        risk='draft',
     ),
     Tool(
         name="import_jmx",
@@ -620,5 +623,6 @@ jmx_tools = [
             "required": ["source_path"],
         },
         handler=import_jmx,
+        risk='draft',
     ),
 ]

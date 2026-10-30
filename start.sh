@@ -36,6 +36,7 @@ fi
 
 echo "[1/2] Starting backend service on port $PORT..."
 cd "$SCRIPT_DIR/jmeter-agent-backend" || exit 1
+ACCESS_URL="$(python3 -m app.core.local_access | tail -n 1)"
 python3 -m app.main &
 BACKEND_PID=$!
 
@@ -47,13 +48,18 @@ FRONTEND_PID=$!
 echo ""
 echo "=========================================="
 echo "Services started successfully!"
-echo "Frontend: http://localhost:3000"
+echo "Open:     $ACCESS_URL"
 echo "Backend:  http://localhost:$PORT"
 echo "API Docs: http://localhost:$PORT/api/docs"
 echo "=========================================="
 echo ""
 echo "Note: Press Ctrl+C to stop all services."
 echo ""
+
+if command -v xdg-open >/dev/null 2>&1; then OPENER=xdg-open
+elif command -v open >/dev/null 2>&1; then OPENER=open
+fi
+if [ -n "$OPENER" ]; then (sleep 5; "$OPENER" "$ACCESS_URL" >/dev/null 2>&1) & fi
 
 # Wait for both processes
 wait $BACKEND_PID

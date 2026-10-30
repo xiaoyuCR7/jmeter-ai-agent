@@ -30,6 +30,7 @@ if %errorlevel% gtr 0 (
 
 echo [1/2] Starting backend service on port %PORT%...
 cd /d "%BASE_DIR%\jmeter-agent-backend"
+for /f "delims=" %%u in ('python -m app.core.local_access') do set "ACCESS_URL=%%u"
 start "JMeter Agent Backend" cmd /k "python -m app.main"
 
 echo [2/2] Starting frontend dev server...
@@ -39,10 +40,13 @@ start "JMeter Agent Frontend" cmd /k "npm run dev"
 echo.
 echo ==========================================
 echo Services started successfully!
-echo Frontend: http://localhost:3000
+echo Open:     !ACCESS_URL!
 echo Backend:  http://localhost:%PORT%
 echo API Docs: http://localhost:%PORT%/api/docs
 echo ==========================================
+echo.
+timeout /t 5 /nobreak >nul
+start "" "!ACCESS_URL!"
 echo.
 echo Note: Closing this window will NOT stop the services.
 echo       Please close the backend/frontend windows manually.

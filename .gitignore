@@ -38,6 +38,7 @@ rag_lancedb/
 *.pfx
 # 运行时模型配置文件（界面配置模型时生成，可能含 API Key）
 /jmeter-agent-backend/ai_models_config.json
+/jmeter-agent-backend/.local_access_token
 
 # ============================================================
 # 数据库与临时数据

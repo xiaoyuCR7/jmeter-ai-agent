@@ -294,7 +294,7 @@ async def test_session_cancellation_removes_task_even_before_first_run(server):
 @pytest.mark.asyncio
 async def test_sse_capacity_is_http_429_before_stream_headers(server, monkeypatch):
     from app.api.mcp_routes import mcp_sse
-    monkeypatch.setattr(server, 'MAX_OWNER_SESSIONS', 1)
+    monkeypatch.setattr(server, 'MAX_SESSIONS', 1)
     stream, _, _ = await connect()
     try:
         with pytest.raises(HTTPException) as exc:

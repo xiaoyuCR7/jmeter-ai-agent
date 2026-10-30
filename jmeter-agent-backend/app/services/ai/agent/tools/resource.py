@@ -343,6 +343,7 @@ resource_tools = [
             },
         },
         handler=start_resource_monitoring,
+        risk='draft',
     ),
     Tool(
         name="stop_resource_monitoring",
@@ -355,6 +356,7 @@ resource_tools = [
             "properties": {},
         },
         handler=stop_resource_monitoring,
+        risk='draft',
     ),
     Tool(
         name="get_resource_history",
@@ -417,7 +419,7 @@ resource_tools = [
             "required": ["url"],
         },
         handler=import_openapi_spec,
-        require_confirmation=True,
+        risk='execute',
     ),
     Tool(
         name="selfheal_test",
@@ -432,7 +434,7 @@ resource_tools = [
             "required": ["jmx_path", "failed_execution_id"],
         },
         handler=selfheal_test,
-        require_confirmation=True,
+        risk='execute',
     ),
     Tool(
         name="detect_anomalies",

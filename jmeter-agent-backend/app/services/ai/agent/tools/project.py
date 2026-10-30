@@ -196,6 +196,7 @@ project_tools = [
             "required": ["name"],
         },
         handler=create_project,
+        risk='draft',
     ),
     Tool(
         name="list_projects",
@@ -232,5 +233,6 @@ project_tools = [
             "required": ["project_id"],
         },
         handler=update_project_env,
+        risk='write',
     ),
 ]

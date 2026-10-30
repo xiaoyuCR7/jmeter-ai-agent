@@ -35,7 +35,7 @@
       <template #header><span><el-icon class="header-icon"><Connection /></el-icon> {{ t('mcpConnect.config') }}</span><el-tag size="small" type="success" style="margin-left:8px">Streamable HTTP</el-tag></template>
 
       <el-alert type="info" :closable="false" style="margin-bottom:16px">
-        <template #title>{{ currentLang === 'en' ? 'Streamable HTTP endpoint for current clients; older SSE-only clients can use /api/v1/mcp/sse. No access token is needed: the server only listens on this machine. Start with the analyze-execution prompt or the get_execution_evidence tool.' : 'Streamable HTTP 端点，适用于当前主流客户端；只支持 SSE 的旧客户端可用 /api/v1/mcp/sse。无需访问令牌，服务仅监听本机。分析时可直接使用 analyze-execution 提示词或 get_execution_evidence 工具。' }}</template>
+        <template #title>{{ currentLang === 'en' ? 'Streamable HTTP endpoint for current clients; older SSE-only clients can use /api/v1/mcp/sse. The configs below include your local access token, so keep them private. Start with the analyze-execution prompt or the get_execution_evidence tool.' : 'Streamable HTTP 端点，适用于当前主流客户端；只支持 SSE 的旧客户端可用 /api/v1/mcp/sse。下面的配置包含本地访问令牌，请勿外传。分析时可直接使用 analyze-execution 提示词或 get_execution_evidence 工具。' }}</template>
       </el-alert>
 
       <!-- AI Tool Tabs -->
@@ -140,9 +140,11 @@ const activeTool = ref('claude')
 
 const origin = computed(() => location.origin)
 const mcpUrl = computed(() => `${origin.value}/api/v1/mcp`)
+const accessToken = ref('')
 
 async function loadStatus() {
   try {
+    accessToken.value = (await api.instance.get('/session/token')).data.token
     const res = await api.instance.get('/mcp/status')
     status.value = res.data
     connected.value = true
@@ -153,16 +155,19 @@ async function loadStatus() {
 
 function getConfig(tool: string): string {
   if (tool === 'claude-cli') {
-    return `claude mcp add --transport http jmeter-agent ${mcpUrl.value}`
+    return `claude mcp add --transport http jmeter-agent ${mcpUrl.value} --header "Authorization: Bearer ${accessToken.value}"`
   }
   if (tool === 'generic') {
-    return `curl -s -X POST "${mcpUrl.value}" -H "Content-Type: application/json" \\
+    return `curl -s -X POST "${mcpUrl.value}" -H "Authorization: Bearer ${accessToken.value}" -H "Content-Type: application/json" \\
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1.0"}}}'
 
-curl -s -X POST "${mcpUrl.value}" -H "Content-Type: application/json" \\
+curl -s -X POST "${mcpUrl.value}" -H "Authorization: Bearer ${accessToken.value}" -H "Content-Type: application/json" \\
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'`
   }
-  const entry = { ...(tool === 'cursor' ? {} : { type: 'http' }), url: mcpUrl.value }
+  const entry = {
+    ...(tool === 'cursor' ? {} : { type: 'http' }), url: mcpUrl.value,
+    headers: { Authorization: `Bearer ${accessToken.value}` },
+  }
   return JSON.stringify({ [tool === 'vscode' ? 'servers' : 'mcpServers']: { 'jmeter-agent': entry } }, null, 2)
 }
 

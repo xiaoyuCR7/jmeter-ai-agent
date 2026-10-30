@@ -239,10 +239,10 @@ class SelfHealAgent:
 
         if auto_re_run:
             try:
-                from app.services.execution_lifecycle import execution_lifecycle
+                from app.services.ai.agent.tools.jmeter import execute_with_script_approval
                 import uuid
-                exec_result = await execution_lifecycle.execute(
-                    jmx_path, f"selfheal_{str(uuid.uuid4())[:6]}"
+                exec_result = await execute_with_script_approval(
+                    'selfheal_test', jmx_path, f"selfheal_{str(uuid.uuid4())[:6]}"
                 )
                 summary = getattr(exec_result, 'summary', None)
                 result.re_run_success = bool(exec_result.status.value == 'completed' and summary

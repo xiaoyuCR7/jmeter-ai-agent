@@ -349,7 +349,7 @@ function downloadJTL() {
 }
 
 function openHtmlReport() {
-  window.open(`/reports/${report.value.execution_id}/html/index.html`, '_blank')
+  window.open(`/reports/${report.value.execution_id}/html/index.html`, '_blank', 'noopener')
 }
 
 async function downloadAnalysis() {

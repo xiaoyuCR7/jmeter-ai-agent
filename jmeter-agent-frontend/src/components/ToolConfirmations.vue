@@ -1,11 +1,15 @@
 <template>
   <el-dialog :model-value="pending.length > 0" title="确认 Agent 操作 / Confirm agent action"
              :close-on-click-modal="false" :close-on-press-escape="false" :show-close="false" width="min(680px, 95vw)">
+    <p v-if="pending[0]" class="origin">
+      <span class="label">来源 / From</span>{{ sourceLabel }}
+      <template v-if="pending[0].project"><span class="label project">项目 / Project</span>{{ pending[0].project }}</template>
+    </p>
     <template v-if="scripts">
       <el-alert type="warning" :closable="false" show-icon
-                title="这个计划会在本机以你的权限运行脚本或命令 / This plan runs scripts or commands on this machine with your privileges" />
-      <p class="lead">它们可以读取你的文件、运行程序。只有确认计划来源可信时才允许；容器执行模式可以隔离这类脚本。<br>
-        They can read your files and run programs. Allow only if you trust where the plan came from; container mode isolates them.</p>
+                title="这个计划会在本机以你的权限运行脚本或命令，或访问应用目录之外的文件 / This plan runs scripts or commands, or reaches files outside the app, with your privileges" />
+      <p class="lead">只有确认计划来源可信时才允许；容器执行模式可以隔离这些操作。<br>
+        Allow only if you trust where the plan came from; container mode isolates it.</p>
       <p><span class="label">计划 / Plan</span><code :title="pending[0].arguments.jmx_path">{{ planName }}</code></p>
       <p class="label">将运行 / Will run</p>
       <ul class="findings">
@@ -37,6 +41,8 @@ const scripts = computed<ScriptFinding[] | null>(() => {
   const findings = pending.value[0]?.arguments?.runs_scripts_on_this_machine
   return Array.isArray(findings) ? findings : null
 })
+const sourceLabel = computed(() => pending.value[0]?.source === 'mcp'
+  ? '外部 MCP 客户端 / External MCP client' : '本应用的 Agent / This app\'s agent')
 const planName = computed(() => String(pending.value[0]?.arguments?.jmx_path || '').split(/[\\/]/).pop())
 const busy = ref(false)
 const error = ref('')
@@ -70,5 +76,6 @@ pre { max-height: 45vh; overflow: auto; white-space: pre-wrap; overflow-wrap: an
 p { margin-bottom: 12px; }
 .lead { margin-top: 12px; color: var(--app-text-secondary); line-height: 1.6; }
 .label { font-weight: 600; margin-right: 8px; }
+.label.project { margin-left: 20px; }
 .findings { max-height: 35vh; overflow: auto; margin: 0 0 12px; padding-left: 20px; line-height: 1.8; }
 </style>

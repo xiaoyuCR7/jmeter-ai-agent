@@ -123,8 +123,9 @@ class AnalysisAgent(BaseAgent):
         **kwargs,  # accept session_id etc. from agent framework
     ):
         if tools is None:
+            # Analysis reads evidence; nothing it finds in a report may change or run anything.
             tools = ToolRegistry()
-            tools.register_many(get_all_builtin_tools())
+            tools.register_many([t for t in get_all_builtin_tools() if t.risk == 'read'])
 
         super().__init__(
             name="AnalysisAgent",

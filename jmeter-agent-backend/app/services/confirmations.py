@@ -1,12 +1,30 @@
 """Short-lived, one-shot user decisions for exact agent tool invocations.
 
-Tools marked ``require_confirmation`` wait here until the user approves or
+Tools with a ``write`` or ``execute`` risk wait here until the user approves or
 denies them in the UI, or until the request times out (treated as denied).
 """
 import asyncio
+import contextvars
 import copy
 import time
 import uuid
+from pathlib import Path
+
+# Set by the ToolRegistry running the call: 'agent' (this app's agents) or 'mcp' (an outside client).
+confirmation_source = contextvars.ContextVar('confirmation_source', default='agent')
+
+
+def _project_of(arguments: dict) -> str | None:
+    """The project a call acts on, so the user can tell which one is being asked about."""
+    from app.services.storage import store
+    project_id = arguments.get('project_id')
+    jmx_path = arguments.get('jmx_path')
+    if not project_id and isinstance(jmx_path, str):
+        target = Path(jmx_path).resolve()
+        project_id = next((plan.project_id for plan in store.test_plans.values()
+                           if Path(plan.jmx_path).resolve() == target), None)
+    project = store.get_project(project_id) if isinstance(project_id, str) else None
+    return project.name if project else project_id
 
 
 class ConfirmationManager:
@@ -22,6 +40,7 @@ class ConfirmationManager:
         future = asyncio.get_running_loop().create_future()
         self._pending[request_id] = {
             'id': request_id, 'tool': tool_name, 'arguments': copy.deepcopy(arguments),
+            'source': confirmation_source.get(), 'project': _project_of(arguments),
             'expires_at': time.time() + self.timeout_seconds, 'future': future,
         }
         try:

@@ -121,7 +121,7 @@ evidence_tools = [
             'project_id': {'type': 'string'}, 'requirements': _REQUIREMENTS_SCHEMA,
         }, 'required': ['project_id', 'requirements']},
         handler=save_performance_requirements,
-        require_confirmation=True,
+        risk='write',
     ),
     Tool(
         name='get_execution_evidence',
@@ -136,6 +136,6 @@ evidence_tools = [
         description='Make a finished run the active baseline of its test plan; future runs are compared with it.',
         parameters={'type': 'object', 'properties': {'execution_id': {'type': 'string'}}, 'required': ['execution_id']},
         handler=promote_execution_to_baseline,
-        require_confirmation=True,
+        risk='write',
     ),
 ]

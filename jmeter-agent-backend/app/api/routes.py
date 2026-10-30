@@ -9,7 +9,7 @@ from contextlib import aclosing
 from datetime import datetime
 from typing import Optional, Any
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Query, Depends
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Query, Depends, Response
 from fastapi.responses import FileResponse
 from fastapi.responses import StreamingResponse
 
@@ -17,7 +17,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+from app.core import local_access
 from app.core.config import settings
+from app.middleware.local_guard import REPORT_POLICY
 from app.services.db_store import db_store
 from app.models.schemas import (
     GenerateTestPlanRequest, TestPlanInfo, ExecuteTestRequest,
@@ -689,7 +691,7 @@ async def execute_test_plan(
     plan_id: str,
     background_tasks: BackgroundTasks,
     ai_model: Optional[str] = Query(None, description="AI model for analysis"),
-    allow_scripts: bool = Query(False, description="User approved running this plan's scripts on this machine"),
+    approved_sha256: Optional[str] = Query(None, description="The plan content the user approved to run on this machine"),
 ):
     """执行测试计划"""
     if plan_id not in store.test_plans:
@@ -700,12 +702,13 @@ async def execute_test_plan(
         await _postprocess_web_execution(execution, plan.test_config.model_dump(), ai_model)
     try:
         return await execution_lifecycle.submit(
-            plan.jmx_path, test_plan_id=plan_id, allow_scripts=allow_scripts,
+            plan.jmx_path, test_plan_id=plan_id, approved_sha256=approved_sha256,
             postprocess=postprocess)
     except ScriptApprovalRequired as error:
-        # The UI lists these and asks before retrying with allow_scripts=true.
+        # The UI lists these and asks before retrying with this exact content's hash.
         raise HTTPException(status_code=409, detail={
-            "code": "scripts_need_approval", "message": str(error), "findings": error.findings}) from error
+            "code": "scripts_need_approval", "message": str(error), "findings": error.findings,
+            "sha256": error.sha256}) from error
     except (ValueError, FileExistsError) as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
     except FileNotFoundError as error:
@@ -887,7 +890,7 @@ async def get_html_report(execution_id: str):
     if not html_path or not os.path.exists(html_path):
         raise HTTPException(status_code=404, detail="HTML report not found")
     
-    return FileResponse(html_path)
+    return FileResponse(html_path, headers={'Content-Security-Policy': REPORT_POLICY})
 
 
 @router.get("/executions/{execution_id}/dashboard-data")
@@ -1743,7 +1746,25 @@ async def get_allowed_doc_types():
     }
 
 
-# ===== System Info =====
+# ===== Local access =====
+
+@router.post("/session")
+async def create_session(request: dict, response: Response):
+    """Trade the access token from the start link for a cookie that scripts on the page cannot read."""
+    token = request.get("token")
+    if not isinstance(token, str) or not local_access.token_matches(token):
+        raise HTTPException(401, "Invalid access token")
+    response.set_cookie(local_access.COOKIE_NAME, token, max_age=local_access.COOKIE_MAX_AGE,
+                        httponly=True, samesite="strict", path="/")
+    return {"accepted": True}
+
+
+@router.get("/session/token")
+async def session_token():
+    """For the MCP setup page: already signed-in callers only, as this path is not exempt."""
+    return {"token": local_access.get_token()}
+
+
 # ===== Agent tool confirmations =====
 
 @router.get("/confirmations")
