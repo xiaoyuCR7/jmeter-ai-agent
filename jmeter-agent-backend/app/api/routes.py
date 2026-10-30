@@ -1786,20 +1786,29 @@ async def decide_confirmation(confirmation_id: str, decision: dict):
     return {"accepted": True}
 
 
+def _local_jmeter():
+    """Folder and path of the JMeter this app will really run, which may differ from JMETER_HOME."""
+    try:
+        path = get_executor().jmeter_path
+    except FileNotFoundError:
+        return None, None
+    path = shutil.which(path) or path  # found on PATH: only the bare name is known
+    return os.path.dirname(path), path
+
+
 @router.get("/system/info")
 async def system_info():
     """获取系统信息"""
     import platform
-    jmeter_path = None
-    try:
-        jmeter_path = get_executor().jmeter_path
-    except:
-        pass
-    
+    in_container = settings.JMETER_EXECUTION_MODE == 'container'
+    jmeter_home, jmeter_path = (None, None) if in_container else _local_jmeter()
+
     return {
         "platform": platform.system(),
         "python_version": platform.python_version(),
-        "jmeter_home": settings.JMETER_HOME,
+        "execution_mode": settings.JMETER_EXECUTION_MODE,
+        "jmeter_image": settings.JMETER_CONTAINER_IMAGE if in_container else None,
+        "jmeter_home": jmeter_home,
         "jmeter_executable": jmeter_path,
         "test_plans_dir": settings.TEST_PLANS_DIR,
         "reports_dir": settings.REPORTS_DIR,

@@ -174,8 +174,15 @@ from app.api.mcp_routes import router as mcp_router
 app.include_router(mcp_router, prefix="/api/v1")
 
 # Static files for reports
+class ReportFiles(StaticFiles):
+    """Follow the reports folder, which can be changed in settings while the app runs."""
+    def lookup_path(self, path):
+        self.all_directories = [settings.REPORTS_DIR]
+        return super().lookup_path(path)
+
+
 os.makedirs(settings.REPORTS_DIR, exist_ok=True)
-app.mount("/reports", StaticFiles(directory=settings.REPORTS_DIR), name="reports")
+app.mount("/reports", ReportFiles(directory=settings.REPORTS_DIR), name="reports")
 
 # Frontend static files
 frontend_dist = os.path.join(os.path.dirname(settings.BASE_DIR), "jmeter-agent-frontend", "dist")

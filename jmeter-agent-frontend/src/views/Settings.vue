@@ -81,13 +81,23 @@
               <span class="value">{{ systemInfo.python_version }}</span>
             </div>
             <div class="info-item">
-              <span class="label">{{ t('settings.info.jmeterHome') }}</span>
-              <span class="value">{{ systemInfo.jmeter_home }}</span>
+              <span class="label">{{ t('settings.info.executionMode') }}</span>
+              <span class="value">{{ t(systemInfo.execution_mode === 'container' ? 'settings.info.modeContainer' : 'settings.info.modeLocal') }}</span>
             </div>
-            <div class="info-item">
-              <span class="label">{{ t('settings.info.jmeterExecutable') }}</span>
-              <span class="value">{{ systemInfo.jmeter_executable || t('settings.info.notFound') }}</span>
+            <div v-if="systemInfo.execution_mode === 'container'" class="info-item">
+              <span class="label">{{ t('settings.info.jmeterImage') }}</span>
+              <span class="value">{{ systemInfo.jmeter_image || t('settings.info.notConfigured') }}</span>
             </div>
+            <template v-else>
+              <div class="info-item">
+                <span class="label">{{ t('settings.info.jmeterHome') }}</span>
+                <span class="value">{{ systemInfo.jmeter_home || t('settings.info.notFound') }}</span>
+              </div>
+              <div class="info-item">
+                <span class="label">{{ t('settings.info.jmeterExecutable') }}</span>
+                <span class="value">{{ systemInfo.jmeter_executable || t('settings.info.notFound') }}</span>
+              </div>
+            </template>
             <div class="info-item">
               <span class="label">{{ t('settings.info.testPlansDir') }}</span>
               <div v-if="editingPaths" class="value-edit">
@@ -363,7 +373,21 @@ const savePaths = async () => {
     ElMessage.error(t('settings.message.fillPaths'))
     return
   }
-  
+
+  const changed = pathsForm.test_plans_dir !== systemInfo.value?.test_plans_dir
+    || pathsForm.reports_dir !== systemInfo.value?.reports_dir
+  if (changed) {
+    try {
+      await ElMessageBox.confirm(t('settings.message.pathsChangeWarning'), t('settings.message.pathsChangeTitle'), {
+        type: 'warning',
+        confirmButtonText: t('settings.save'),
+        cancelButtonText: t('settings.cancel'),
+      })
+    } catch {
+      return
+    }
+  }
+
   savingPaths.value = true
   try {
     await api.updatePathsConfig({

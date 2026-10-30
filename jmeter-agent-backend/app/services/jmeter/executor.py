@@ -98,12 +98,14 @@ class JMeterExecutor:
             candidates = [
                 os.path.join(settings.JMETER_HOME, "jmeter.bat"),
                 os.path.join(settings.JMETER_HOME, "jmeter.cmd"),
+                os.path.join(settings.JMETER_HOME, "bin", "jmeter.bat"),  # JMETER_HOME is the install root
                 os.path.join(os.path.dirname(settings.JMETER_HOME), "bin", "jmeter.bat"),
             ]
         else:
             candidates = [
                 os.path.join(settings.JMETER_HOME, "jmeter"),
                 os.path.join(settings.JMETER_HOME, "jmeter.sh"),
+                os.path.join(settings.JMETER_HOME, "bin", "jmeter"),  # JMETER_HOME is the install root
                 os.path.join(os.path.dirname(settings.JMETER_HOME), "bin", "jmeter"),
             ]
         
