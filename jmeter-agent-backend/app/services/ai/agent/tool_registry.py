@@ -7,7 +7,18 @@ from jsonschema import Draft202012Validator
 from typing import Any, Literal, Optional, Callable, Awaitable
 from dataclasses import dataclass, field
 
+from app.core.config import settings
+
 from app.services.ai.agent.types import ToolResult, ToolHandler, ErrorCategory, classify_error
+
+
+# Room for confirmations and report parsing around a run.
+LONG_RUN_MARGIN_SECONDS = 900
+DECLINED = {
+    'denied': "The user denied this call; do not retry automatically",
+    'unanswered': ("Nobody answered the confirmation in the JMeter Agent window. "
+                   "Ask the user to open it, then try again"),
+}
 
 
 @dataclass
@@ -20,6 +31,7 @@ class Tool:
     # read: no lasting effect. draft: adds something new, overwrites nothing.
     # write and execute: change or run existing things, so the user is asked first.
     risk: Literal['read', 'draft', 'write', 'execute'] = 'read'
+    long_running: bool = False  # may wait for a whole test run
 
     def __post_init__(self):
         self.parameters = copy.deepcopy(self.parameters)
@@ -29,6 +41,12 @@ class Tool:
     @property
     def require_confirmation(self) -> bool:
         return self.risk in ('write', 'execute')
+
+    @property
+    def timeout_seconds(self) -> float:
+        if not self.long_running:
+            return settings.AGENT_TOOL_TIMEOUT_SECONDS
+        return settings.JMETER_TIMEOUT + settings.RESOURCE_MAX_WAIT_SECONDS + LONG_RUN_MARGIN_SECONDS
 
     def to_openai_schema(self) -> dict:
         """Convert to OpenAI function-calling format."""
@@ -150,9 +168,9 @@ class ToolRegistry:
             from app.services.confirmations import confirmation_source, confirmations
             confirmation_source.set(self.source)  # also covers approvals a handler asks for itself
             if tool.require_confirmation:
-                if not await confirmations.request(name, args):
-                    return ToolResult(success=False, tool_name=name,
-                                      error="User confirmation denied, expired, or unavailable; do not retry automatically",
+                decision = await confirmations.ask(name, args)
+                if decision != 'approved':
+                    return ToolResult(success=False, tool_name=name, error=DECLINED[decision],
                                       error_category=ErrorCategory.CANCELLED)
             result = await tool.handler(**args)
             duration = (time.time() - start) * 1000

@@ -126,6 +126,11 @@ configs that already include it, for Cursor, VS Code and others, are under **Set
 `analyze-execution` prompt, or to call `get_execution_evidence` first — it gets exactly what the report page shows.
 Older SSE-only clients can use `/api/v1/mcp/sse`.
 
+Over MCP, `execute_test` and `execute_distributed` return as soon as the run has started, so a client's request timeout
+never stops a load test; poll `get_execution_status` for the result. Tools that change or run something wait up to two
+minutes for your approval in the JMeter Agent window, so keep it open. If the client cancels or disconnects first, the
+request and its pending approval are dropped.
+
 ## Configuration
 
 Common settings in `jmeter-agent-backend/.env`:

@@ -120,6 +120,9 @@ claude mcp add --transport http jmeter-agent http://127.0.0.1:8000/api/v1/mcp --
 
 令牌就是访问链接里的那一段，也保存在 `jmeter-agent-backend/.local_access_token`。Cursor、VS Code 等客户端的配置可以在「设置 → 外部助手接入（MCP）」里一键复制，已经带好令牌。分析时让助手使用 `analyze-execution` 提示词，或先调用 `get_execution_evidence`，它拿到的数据和报告页完全一致。只支持 SSE 的旧客户端可以用 `/api/v1/mcp/sse`。
 
+通过 MCP 调用时，`execute_test` 和 `execute_distributed` 在执行启动后立即返回，客户端的请求超时不会中止压测，结果用 `get_execution_status` 查询。
+会修改或运行内容的工具最多等待两分钟，由你在 JMeter Agent 窗口里批准，请保持窗口打开。客户端在此之前取消或断开，这次请求和待确认项都会撤销。
+
 ## 配置
 
 `jmeter-agent-backend/.env` 中的常用配置：

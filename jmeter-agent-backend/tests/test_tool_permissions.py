@@ -19,11 +19,14 @@ async def test_invalid_or_undeclared_arguments_never_reach_handler(args):
 
 
 @pytest.mark.asyncio
-async def test_dangerous_tool_without_a_decision_is_denied():
+async def test_dangerous_tool_without_a_decision_is_denied(monkeypatch):
+    from app.services.confirmations import confirmations
+    monkeypatch.setattr(confirmations, 'timeout_seconds', 0.01)
     handler = AsyncMock(return_value={})
     registry = ToolRegistry()
     registry.register(Tool('danger', 'danger', {}, handler, risk='write'))
-    assert not (await registry.execute('danger', {})).success
+    result = await registry.execute('danger', {})
+    assert not result.success and 'Nobody answered' in result.error
     handler.assert_not_awaited()
 
 
@@ -36,7 +39,7 @@ async def test_mcp_uses_same_parameter_and_business_failure_contract():
     server.register_tool('test', 'test', {'type': 'object', 'properties': {}}, handler)
     invalid = await server.handle_request(json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
                                                      'params': {'name': 'test', 'arguments': {'bypass': True}}}))
-    assert invalid['error']['code'] == -32602
+    assert invalid['result']['isError'] and 'bypass' in invalid['result']['content'][0]['text']
     handler.assert_not_awaited()
     failed = await server.handle_request(json.dumps({'jsonrpc': '2.0', 'id': 2, 'method': 'tools/call',
                                                     'params': {'name': 'test', 'arguments': {}}}))
@@ -153,6 +156,7 @@ def test_every_built_in_tool_has_a_deliberate_risk():
     levels = {}
     for tool in get_all_builtin_tools():
         levels.setdefault(tool.risk, set()).add(tool.name)
+    assert 'get_execution_status' in levels['read']
     assert levels['execute'] == {'execute_test', 'execute_distributed', 'import_openapi_spec', 'selfheal_test'}
     assert levels['write'] == {'update_jmx', 'update_project_env', 'cancel_execution', 'write_file', 'delete_file',
                                'save_performance_requirements', 'promote_execution_to_baseline'}
@@ -198,7 +202,8 @@ async def test_confirmations_show_who_is_asking_and_for_which_project(source, mo
     [request] = confirmations.list_pending()
     assert request['source'] == source and request['project'] == 'Checkout'
     confirmations.decide(request['id'], False)
-    assert not (await call).success
+    result = await call
+    assert not result.success and 'denied' in result.error
 
 
 @pytest.mark.asyncio

@@ -836,7 +836,8 @@ If replan is false, omit new_steps. Keep response under 200 chars."""
         """
         from app.services.ai.agent.types import ToolResult
 
-        timeout = settings.AGENT_TOOL_TIMEOUT_SECONDS
+        tool = self.tools.get(tool_name)
+        timeout = tool.timeout_seconds if tool else settings.AGENT_TOOL_TIMEOUT_SECONDS
         start = time.time()
 
         try:

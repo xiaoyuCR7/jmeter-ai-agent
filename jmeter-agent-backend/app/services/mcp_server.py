@@ -17,31 +17,6 @@ from dataclasses import dataclass, field
 logger = logging.getLogger(__name__)
 
 
-# ── JSON-RPC 2.0 Types ───────────────────────────────────
-
-@dataclass
-class JSONRPCRequest:
-    jsonrpc: str = "2.0"
-    id: Optional[str] = None
-    method: str = ""
-    params: Optional[dict] = None
-
-
-@dataclass
-class JSONRPCResponse:
-    jsonrpc: str = "2.0"
-    id: Optional[str] = None
-    result: Optional[Any] = None
-    error: Optional[dict] = None
-
-
-@dataclass
-class JSONRPCNotification:
-    jsonrpc: str = "2.0"
-    method: str = ""
-    params: Optional[dict] = None
-
-
 # ── Tool / Resource / Prompt Definitions ──────────────────
 
 @dataclass
@@ -49,7 +24,6 @@ class MCPTool:
     name: str
     description: str
     inputSchema: dict
-    handler: Callable
     risk: str = 'read'
 
 
@@ -78,8 +52,6 @@ class MCPSession:
     seen_ids: set = field(default_factory=set)
     closed: bool = False
     server: Any = None
-    route_identity: Any = None
-    route_generation: Optional[str] = None
 
 
 # Newest first; an unknown client version gets the newest one we speak.
@@ -98,8 +70,8 @@ class MCPServer:
 
     Usage:
         server = MCPServer()
-        server.register_tools_from_agent_tools()
-        # Mount at /mcp/ in FastAPI
+        server.register_all_agent_tools()
+        # app/api/mcp_routes.py carries the requests
     """
 
     MAX_SESSIONS = 4
@@ -117,17 +89,19 @@ class MCPServer:
         self._resources: Dict[str, MCPResource] = {}
         self._prompts: Dict[str, MCPPrompt] = {}
         self._sessions: Dict[str, MCPSession] = {}
+        self._http_requests: Dict[tuple, asyncio.Task] = {}
 
     # ── Registration ────────────────────────────────────
 
-    def register_tool(self, name: str, description: str, schema: dict, handler: Callable, risk='read'):
+    def register_tool(self, name: str, description: str, schema: dict, handler: Callable, risk='read',
+                      long_running=False):
         from app.services.ai.agent.tool_registry import Tool
         if name in self._tools:
             return
-        definition = Tool(name, description, schema, handler, risk=risk)
+        definition = Tool(name, description, schema, handler, risk=risk, long_running=long_running)
         self._tool_registry.register(definition)
         self._tools[name] = MCPTool(
-            name=name, description=description, inputSchema=definition.parameters, handler=handler, risk=risk,
+            name=name, description=description, inputSchema=definition.parameters, risk=risk,
         )
 
     def register_resource(self, uri: str, name: str, description: str, mime: str = "application/json"):
@@ -143,14 +117,17 @@ class MCPServer:
     def register_all_agent_tools(self):
         """Register every built-in agent tool as an MCP tool."""
         from app.services.ai.agent.tools import get_all_builtin_tools
-        tools = get_all_builtin_tools()
-        for tool in tools:
+        from app.services.ai.agent.tools.jmeter import background_tools
+        started_in_background = {tool.name: tool for tool in background_tools}
+        for tool in get_all_builtin_tools():
+            tool = started_in_background.get(tool.name, tool)
             self.register_tool(
                 name=tool.name,
                 description=tool.description,
                 schema=tool.parameters if hasattr(tool, 'parameters') else {},
                 handler=tool.handler,
                 risk=tool.risk,
+                long_running=tool.long_running,
             )
 
     def register_all_resources(self):
@@ -223,15 +200,34 @@ class MCPServer:
             return None, error if "id" in body else None
         return body, None
 
-    async def handle_request(self, raw_body: str) -> Optional[dict]:
-        """Dispatch one JSON-RPC message (Streamable HTTP, and the internal path for tests)."""
+    async def handle_request(self, raw_body: str, http_session: str = "") -> Optional[dict]:
+        """Dispatch one JSON-RPC message (Streamable HTTP, and the internal path for tests).
+
+        ``http_session`` is the client's Mcp-Session-Id, which keeps two clients' request IDs apart.
+        """
         body, error = self._parse_request(raw_body)
         if body is None:
             return error
         if "id" not in body:
             # Notifications cannot invoke tools or create request responses.
+            if body["method"] == "notifications/cancelled":
+                request_id = body.get("params", {}).get("requestId")
+                task = self._http_requests.get((http_session, request_id)) if type(request_id) in (str, int) else None
+                if task:
+                    task.cancel()
             return None
-        return await self._execute_request(body)
+        key = (http_session, body["id"])
+        if key in self._http_requests:
+            return self._error_response(body["id"], -32600, "Request ID already in progress")
+        task = asyncio.create_task(self._execute_request(body))
+        self._http_requests[key] = task
+        task.add_done_callback(lambda finished: self._http_requests.pop(key, None))
+        try:
+            return await task
+        except asyncio.CancelledError:
+            if asyncio.current_task().cancelling():
+                raise  # the caller left; awaiting the task has already cancelled it
+            return self._error_response(body["id"], -32800, "Request cancelled")
 
     async def _execute_request(self, body: dict) -> dict:
         req_id, method = body["id"], body["method"]
@@ -315,7 +311,7 @@ class MCPServer:
         async def run():
             try:
                 try:
-                    result = await asyncio.wait_for(self._execute_request(body), self.REQUEST_TIMEOUT_SECONDS)
+                    result = await asyncio.wait_for(self._execute_request(body), self._request_timeout(body))
                 except asyncio.TimeoutError:
                     result = self._error_response(req_id, -32000, "Request timed out")
                 if not session.closed:
@@ -329,6 +325,12 @@ class MCPServer:
         session.pending[req_id] = task
         # A task cancelled before its coroutine starts never enters run's finally.
         task.add_done_callback(lambda finished: session.pending.pop(req_id, None))
+
+    def _request_timeout(self, body: dict) -> float:
+        """A request is bounded, but never shorter than the work its tool is known to do."""
+        name = body.get("params", {}).get("name") if body["method"] == "tools/call" else None
+        tool = self._tool_registry.get(name) if isinstance(name, str) else None
+        return tool.timeout_seconds if tool and tool.long_running else self.REQUEST_TIMEOUT_SECONDS
 
     async def _dispatch(self, method: str, params: dict, req_id: str) -> Any:
         """Route JSON-RPC method to handler."""
@@ -375,6 +377,10 @@ class MCPServer:
                 "Workflow: extract/save performance requirements from a test document, generate and validate a "
                 "JMeter plan from them, execute it, then call get_execution_evidence before analysing: it returns "
                 "per-requirement verdicts, baseline/previous-run comparison and Prometheus server metrics.\n"
+                "execute_test and execute_distributed return once the run has started; poll "
+                "get_execution_status until it finishes.\n"
+                "Tools that change or run something wait for the user to approve them in the JMeter Agent "
+                "window, for up to two minutes. Tell the user to keep that window open.\n"
                 "Never invent numbers that are not in the evidence."
             ),
         }
@@ -411,31 +417,15 @@ class MCPServer:
         if not tool:
             raise MCPError(-32602, f"Unknown tool: {tool_name}")
 
+        # Reported in the result, not as a protocol error, so the model sees it and can correct itself.
         argument_error = self._tool_registry.validate_arguments(tool_name, arguments)
         if argument_error:
-            raise MCPError(-32602, argument_error)
+            return {"content": [{"type": "text", "text": argument_error}], "isError": True}
 
-        try:
-            outcome = await self._tool_registry.execute(tool_name, arguments)
-            result = outcome.data if outcome.success else {'error': outcome.error, 'data': outcome.data}
-            # Format result for MCP
-            if isinstance(result, dict):
-                content = json.dumps(result, ensure_ascii=False, default=str)
-            else:
-                content = str(result)
-            return {
-                "content": [
-                    {"type": "text", "text": content}
-                ],
-                "isError": not outcome.success,
-            }
-        except Exception as e:
-            return {
-                "content": [
-                    {"type": "text", "text": json.dumps({"error": str(e)})}
-                ],
-                "isError": True,
-            }
+        outcome = await self._tool_registry.execute(tool_name, arguments)
+        result = outcome.data if outcome.success else {'error': outcome.error, 'data': outcome.data}
+        content = json.dumps(result, ensure_ascii=False, default=str) if isinstance(result, dict) else str(result)
+        return {"content": [{"type": "text", "text": content}], "isError": not outcome.success}
 
     # ── Resources ────────────────────────────────────────
 
@@ -509,6 +499,10 @@ class MCPServer:
         prompt = self._prompts.get(name)
         if not prompt:
             raise MCPError(-32602, f"Unknown prompt: {name}")
+        missing = [argument["name"] for argument in prompt.arguments
+                   if argument.get("required") and not arguments.get(argument["name"])]
+        if missing:
+            raise MCPError(-32602, f"Missing required prompt arguments: {', '.join(missing)}")
 
         # Build the prompt message from the template
         if name == "workflow-from-api-doc":

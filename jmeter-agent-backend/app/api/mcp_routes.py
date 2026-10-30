@@ -9,6 +9,7 @@ replies arrive only on that SSE connection.
 import json
 import asyncio
 import logging
+import secrets
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse, Response
 import anyio
@@ -79,18 +80,41 @@ async def mcp_status():
     }
 
 
+async def _client_left(request: Request):
+    while not await request.is_disconnected():
+        await asyncio.sleep(0.25)
+
+
 @router.post("/mcp")
 async def mcp_streamable_http(request: Request):
     """Streamable HTTP: one JSON-RPC message in, one JSON response out (202 for notifications)."""
+    version = request.headers.get("mcp-protocol-version")
+    if version and version not in SUPPORTED_PROTOCOL_VERSIONS:
+        raise HTTPException(400, f"Unsupported MCP protocol version: {version}")
     body = bytearray()
     async for chunk in request.stream():
         body.extend(chunk)
         if len(body) > 1024 * 1024:
             raise HTTPException(413, "MCP message exceeds 1 MiB")
-    response = await mcp_server.handle_request(bytes(body))
+    work = asyncio.create_task(mcp_server.handle_request(bytes(body), request.headers.get("mcp-session-id", "")))
+    left = asyncio.create_task(_client_left(request))
+    try:
+        # Work nobody is waiting for must not continue, such as a confirmation left on the user's screen.
+        await asyncio.wait({work, left}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        left.cancel()
+        if not work.done():
+            work.cancel()
+    if work.cancelled() or not work.done():
+        await asyncio.gather(work, return_exceptions=True)
+        return Response(status_code=204)
+    response = work.result()
     if response is None:
         return Response(status_code=202)
-    return JSONResponse(response)
+    # Stateless apart from telling clients apart: the ID only scopes cancellation, so it is not checked.
+    initialized = "protocolVersion" in response.get("result", {})
+    headers = {"Mcp-Session-Id": secrets.token_urlsafe(16)} if initialized else None
+    return JSONResponse(response, headers=headers)
 
 
 @router.get("/mcp")

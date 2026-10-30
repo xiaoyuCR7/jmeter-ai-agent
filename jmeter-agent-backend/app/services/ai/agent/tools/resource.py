@@ -420,6 +420,7 @@ resource_tools = [
         },
         handler=import_openapi_spec,
         risk='execute',
+        long_running=True,
     ),
     Tool(
         name="selfheal_test",
@@ -435,6 +436,7 @@ resource_tools = [
         },
         handler=selfheal_test,
         risk='execute',
+        long_running=True,
     ),
     Tool(
         name="detect_anomalies",

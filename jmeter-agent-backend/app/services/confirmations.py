@@ -34,8 +34,12 @@ class ConfirmationManager:
         self._pending = {}
 
     async def request(self, tool_name: str, arguments: dict) -> bool:
+        return await self.ask(tool_name, arguments) == 'approved'
+
+    async def ask(self, tool_name: str, arguments: dict) -> str:
+        """'approved', 'denied', or 'unanswered' when no decision came in time."""
         if len(self._pending) >= self.max_pending:
-            return False
+            return 'unanswered'
         request_id = uuid.uuid4().hex
         future = asyncio.get_running_loop().create_future()
         self._pending[request_id] = {
@@ -44,9 +48,10 @@ class ConfirmationManager:
             'expires_at': time.time() + self.timeout_seconds, 'future': future,
         }
         try:
-            return await asyncio.wait_for(future, timeout=self.timeout_seconds)
+            approved = await asyncio.wait_for(future, timeout=self.timeout_seconds)
+            return 'approved' if approved else 'denied'
         except asyncio.TimeoutError:
-            return False
+            return 'unanswered'
         finally:
             self._pending.pop(request_id, None)
 
