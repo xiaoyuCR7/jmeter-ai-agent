@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 CACHE_FILE = 'server_metrics.json'
 MAX_SERIES_PER_QUERY = 8
 MAX_POINTS = 240
+# Below 8 points even r = 0.7 can easily come from chance (p > 0.05).
+MIN_CORRELATION_POINTS = 8
+STRONG_CORRELATION = 0.7
 
 
 class MetricQuery(BaseModel):
@@ -224,21 +227,22 @@ def _percentile(values: list[float], p: float) -> float:
     return data[low] if low == high else data[low] * (high - k) + data[high] * (k - low)
 
 
-def _timeline_buckets(summary: DetailedTestSummary) -> dict[int, tuple[float, float]]:
-    """Map each 30 s segment start offset to (avg response time, error rate)."""
-    buckets = {}
+def _timeline_buckets(summary: DetailedTestSummary) -> tuple[dict[int, tuple[float, float]], int]:
+    """Map each segment's start offset to (avg response time, error rate), plus the segment width."""
+    buckets, width = {}, 30
     for segment in summary.timeline_segments:
         try:
-            start = int(segment.time_range.split('-')[0])
-        except (ValueError, IndexError):
+            start, end = (int(part) for part in segment.time_range.rstrip('s').split('-'))
+        except ValueError:
             continue
         buckets[start] = (segment.avg_response_time, segment.error_rate)
-    return buckets
+        width = max(end - start, 1)
+    return buckets, width
 
 
 def analyze(raw: dict, summary: DetailedTestSummary) -> dict:
     test_start, test_end = raw['test_start'], raw['test_end']
-    buckets = _timeline_buckets(summary)
+    buckets, width = _timeline_buckets(summary)
     rows, findings, chart = [], [], []
     for metric in raw.get('metrics', []):
         if metric.get('error'):
@@ -259,17 +263,21 @@ def analyze(raw: dict, summary: DetailedTestSummary) -> dict:
                 'avg': round(sum(values) / len(values), 2), 'max': round(peak_v, 2),
                 'p95': round(_percentile(values, 0.95), 2), 'peak_at_s': int(peak_t - test_start),
                 'saturation': metric.get('saturation'), 'above_saturation_pct': None, 'corr_response_time': None,
+                'corr_points': 0, 'corr_strong': False,
             }
             if metric.get('saturation') is not None:
                 row['above_saturation_pct'] = round(
                     sum(v >= metric['saturation'] for v in values) / len(values) * 100, 1)
-            # Average the metric inside each 30 s JMeter segment, then correlate.
+            # Average the metric inside each JMeter segment, then correlate.
             per_bucket = {}
             for t, v in inside:
-                per_bucket.setdefault(int((t - test_start) // 30) * 30, []).append(v)
+                per_bucket.setdefault(int((t - test_start) // width) * width, []).append(v)
             common = sorted(set(per_bucket) & set(buckets))
             row['corr_response_time'] = _pearson([sum(per_bucket[b]) / len(per_bucket[b]) for b in common],
                                                  [buckets[b][0] for b in common])
+            row['corr_points'] = len(common)
+            row['corr_strong'] = (row['corr_response_time'] is not None and len(common) >= MIN_CORRELATION_POINTS
+                                  and row['corr_response_time'] >= STRONG_CORRELATION)
             rows.append(row)
             chart.append({'name': metric['name'], 'unit': metric.get('unit', ''), 'series': series['labels'],
                           'points': [[round(t - test_start), round(v, 3)] for t, v in series['points']]})
@@ -277,8 +285,8 @@ def analyze(raw: dict, summary: DetailedTestSummary) -> dict:
             if row['above_saturation_pct']:
                 findings.append(f"{label} 有 {row['above_saturation_pct']}% 的时间达到饱和阈值 "
                                 f"{metric['saturation']}{row['unit']}（峰值 {row['max']}{row['unit']}，第 {row['peak_at_s']}s）")
-            if row['corr_response_time'] is not None and row['corr_response_time'] >= 0.7:
-                findings.append(f"{label} 与响应时间强正相关（r={row['corr_response_time']}）")
+            if row['corr_strong']:
+                findings.append(f"{label} 与响应时间强正相关（r={row['corr_response_time']}，{row['corr_points']} 个时间段）")
     return {'status': 'ok', 'collected_at': raw.get('collected_at'), 'prometheus_url': raw.get('prometheus_url'),
             'step': raw.get('step'), 'metrics': rows, 'findings': findings, 'chart': chart}
 
@@ -333,10 +341,13 @@ def format_for_prompt(evidence: Optional[dict]) -> str:
         if row.get('above_saturation_pct') is not None:
             extra.append(f"≥{row['saturation']}{unit} 的时间占 {row['above_saturation_pct']}%")
         if row.get('corr_response_time') is not None:
-            extra.append(f"与响应时间相关系数 {row['corr_response_time']}")
+            points = row.get('corr_points', 0)
+            extra.append(f"与响应时间相关系数 {row['corr_response_time']}（{points} 个时间段"
+                         + ('' if points >= MIN_CORRELATION_POINTS else '，点数太少，不可作为证据') + '）')
         lines.append(f"- {row['name']}[{row['series']}]：平均 {row['avg']}{unit}，P95 {row['p95']}{unit}，"
                      f"峰值 {row['max']}{unit}（第 {row['peak_at_s']}s）" + ('；' + '；'.join(extra) if extra else ''))
     if evidence.get('findings'):
         lines.append('关键信号：' + '；'.join(evidence['findings']))
-    lines.append('根因判断须引用上述服务端指标；指标与现象不一致时要明确指出。')
+    lines.append('根因判断须引用上述服务端指标；指标与现象不一致时要明确指出。'
+                 '相关不等于因果：爬坡时负载和响应时间会一起上升，要结合时间点判断。')
     return '\n'.join(lines)

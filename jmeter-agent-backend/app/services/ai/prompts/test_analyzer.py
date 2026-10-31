@@ -11,6 +11,9 @@ or production readiness. A single run cannot establish maximum capacity or prove
 Label causal explanations and capacity estimates as hypotheses, state their evidence limits and
 suggest a discriminating measurement or experiment. HTTP status alone does not prove root cause.
 Distinguish configured target load from achieved load and process completion from passing SLA.
+Before explaining a slow period, read per-transaction rows, timing and the slowest samples: Connect is
+connection setup, Latency is time to first byte. Do not blame warm-up or the server for what they contradict.
+Say each finding once, in the field where it belongs; do not restate requirement results in every field.
 Preserve the requested JSON fields; use empty lists or an explicit insufficient-evidence statement
 where data is missing. Output JSON only."""
 
@@ -33,11 +36,13 @@ def build_analysis_prompt(summary_data: dict, test_config: dict, test_type: str,
         row = segments[i]
         timeline.append({'time_range': str(row.get('time_range', 'unknown'))[:160], **{
             key: finite(row.get(key)) for key in ('avg_response_time', 'max_response_time',
-                                                 'throughput', 'error_rate', 'request_count')}})
+                                                 'throughput', 'error_rate', 'request_count', 'active_threads',
+                                                 'avg_connect_time', 'avg_latency')}})
 
     errors = summary_data.get('error_details') or []
     error_data = [{'error_type': str(row.get('error_type', 'unknown'))[:160],
                    'count': finite(row.get('count')), 'percentage': finite(row.get('percentage')),
+                   'labels': {str(name)[:160]: finite(count) for name, count in (row.get('labels') or {}).items()},
                    'sample': str((row.get('sample_messages') or [''])[0])[:1000]}
                   for row in errors[:10]]
     data = {
@@ -60,8 +65,8 @@ def build_analysis_prompt(summary_data: dict, test_config: dict, test_type: str,
             + json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
             + (('\n\n以下证据由程序确定性计算（需求判定、基线对比、服务端指标），结论必须与之一致，'
                 '不得改判需求是否达标：\n' + evidence_text) if evidence_text else '')
-            + '\n输出 JSON 字段：overall_assessment（字符串），key_findings（字符串列表），'
-            'specific_issues（字符串列表），timeline_analysis（字符串），resource_bottlenecks（字符串列表），'
-            'performance_bottlenecks（字符串列表），error_analysis（字符串列表），recommendations（字符串列表），'
-            'improvement_plan（字符串列表），risk_areas（字符串列表），conclusion（字符串）。'
-            '建议给出验证步骤，不虚构参数调整值。')
+            + '\n输出 JSON 字段：overall_assessment（字符串，两三句总评），key_findings（字符串列表，只放结论性发现），'
+            'timeline_analysis（字符串，只讲随时间的变化），performance_bottlenecks（字符串列表，定位到接口或环节，'
+            '资源瓶颈也放这里），error_analysis（字符串列表），recommendations（字符串列表，按优先级排序，'
+            '每条给出验证步骤，不虚构参数调整值），risk_areas（字符串列表），conclusion（字符串，一两句）。'
+            '同一事实只在一个字段里写一次。')

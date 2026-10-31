@@ -244,6 +244,8 @@ class ErrorDetail(BaseModel):
     count: int = Field(..., description="错误次数")
     percentage: float = Field(..., description="占总请求百分比")
     sample_messages: List[str] = Field(default_factory=list, description="错误示例消息")
+    labels: Dict[str, int] = Field(default_factory=dict, description="出现该错误最多的接口及次数")
+    labels: Dict[str, int] = Field(default_factory=dict, description="出现该错误最多的接口及次数")
 
 
 class TimelineSegment(BaseModel):
@@ -253,6 +255,12 @@ class TimelineSegment(BaseModel):
     throughput: float = Field(..., description="该时间段吞吐量(req/s)")
     error_rate: float = Field(..., description="该时间段错误率(%)")
     request_count: int = Field(..., description="该时间段请求数")
+    active_threads: Optional[int] = Field(None, description="该时间段内的最大活跃线程数")
+    avg_connect_time: Optional[float] = Field(None, description="该时间段平均建连耗时(ms)")
+    avg_latency: Optional[float] = Field(None, description="该时间段平均首字节耗时(ms)")
+    active_threads: Optional[int] = Field(None, description="该时间段内的最大活跃线程数")
+    avg_connect_time: Optional[float] = Field(None, description="该时间段平均建连耗时(ms)")
+    avg_latency: Optional[float] = Field(None, description="该时间段平均首字节耗时(ms)")
 
 
 class PerformanceTrend(BaseModel):
@@ -277,6 +285,8 @@ class DetailedTestSummary(BaseModel):
     performance_trend: Optional[PerformanceTrend] = Field(None, description="性能趋势分析")
     response_time_distribution: Dict[str, Any] = Field(default_factory=dict, description="响应时间分布")
     per_label: Optional[Dict[str, Dict[str, Any]]] = Field(None, description="按接口标签(采样器名称)的详细统计")
+    success: Optional[Dict[str, Any]] = Field(None, description="只按成功样本计算的时延和吞吐")
+    diagnostics: Optional[Dict[str, Any]] = Field(None, description="负载、稳定段、耗时拆解和最慢样本")
 
 
 class TestSummary(BaseModel):
@@ -293,7 +303,8 @@ class TestSummary(BaseModel):
 
 class ReportAnalysis(BaseModel):
     analysis_status: Literal["completed", "invalid", "failed"] = "completed"
-    evidence_status: Literal["unverified"] = "unverified"
+    evidence_status: Literal["unverified", "verified", "mismatch"] = "unverified"
+    fact_check: Optional[Dict[str, Any]] = Field(None, description="AI 文本中的数字与实测值的核对结果")
     overall_assessment: str = Field(..., description="整体性能评估总结")
     key_findings: List[str] = Field(default_factory=list, description="关键发现列表")
     specific_issues: List[str] = Field(default_factory=list, description="具体问题定位，如'并发数达到500时响应时间突增到5s'")

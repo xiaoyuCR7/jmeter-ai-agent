@@ -80,16 +80,19 @@ class RegressionEngine:
         )
     """
 
-    # Metrics to compare and their "worse" direction
+    # Metrics to compare and their "worse" direction. A single sample sets min and max,
+    # so they are shown for context and can never make a run a regression.
     METRICS = [
         ("avg_response_time", "higher_is_worse"),
         ("p95_response_time", "higher_is_worse"),
         ("p99_response_time", "higher_is_worse"),
-        ("max_response_time", "higher_is_worse"),
-        ("min_response_time", "higher_is_worse"),  # higher min = worse headroom
+        ("max_response_time", "informational"),
+        ("min_response_time", "informational"),
         ("error_rate", "higher_is_worse"),
         ("throughput", "lower_is_worse"),
     ]
+    # 0.1% -> 0.2% doubles the rate without meaning anything; errors need to move in points.
+    ERROR_RATE_MIN_POINTS = 1.0
 
     def __init__(self, regression_threshold_pct: float = 20.0):
         """
@@ -144,6 +147,8 @@ class RegressionEngine:
                 if tgt_val > base_val:
                     direction = DeltaDirection.WORSE
                     is_regression = delta_pct is None or delta_pct > self.regression_threshold_pct
+                    if metric_name == "error_rate":
+                        is_regression = is_regression and delta_abs >= self.ERROR_RATE_MIN_POINTS
                 elif tgt_val < base_val:
                     direction = DeltaDirection.BETTER
                     is_regression = False
@@ -161,7 +166,8 @@ class RegressionEngine:
                     direction = DeltaDirection.STABLE
                     is_regression = False
             else:
-                direction = DeltaDirection.STABLE
+                direction = (DeltaDirection.WORSE if tgt_val > base_val else
+                             DeltaDirection.BETTER if tgt_val < base_val else DeltaDirection.STABLE)
                 is_regression = False
 
             delta = MetricDelta(
@@ -177,7 +183,7 @@ class RegressionEngine:
             deltas.append(delta)
             if is_regression:
                 regressions.append(delta)
-            elif direction == DeltaDirection.BETTER:
+            elif direction == DeltaDirection.BETTER and direction_rule != "informational":
                 improvements.append(delta)
 
         # Overall verdict

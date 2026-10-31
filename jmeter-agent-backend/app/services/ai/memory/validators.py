@@ -6,7 +6,7 @@ must be re-derivable from the FactSheet. If it cannot be re-derived, it is rejec
 
 import re
 import logging
-from typing import Optional
+from typing import Iterable, Optional
 from dataclasses import dataclass, field
 
 from app.models.schemas import FactSheet, MetricClaim, ValidationResult
@@ -19,27 +19,30 @@ DEFAULT_TOLERANCE = 0.05  # 5% relative or absolute
 ABSOLUTE_TOLERANCE_MS = 50  # 50ms absolute for response times
 
 
+# Only these may stand between a metric and its value. "P99 恶化了 30%" or "P95、P99 分别为" are
+# not statements of the metric's value, and an open gap would read them as if they were.
+_GAP = r"(?:\s|[:：=≈（(]|响应时间|耗时|延迟|实测|实际|整体|总体|约为|大约|大概|约|为|是|达到|高达|达|仅)*"
+_TIME = _GAP + r"(\d+(?:\.\d+)?)\s*(ms|毫秒|s|秒)?(?!\s*(?:[%％倍]|\d|\.\d))"
+_RATE = _GAP + r"(\d+(?:\.\d+)?)\s*(req/s|rps|tps|请求/秒)?(?!\s*(?:[%％倍]|\d|\.\d))"
+_PERCENT = _GAP + r"(\d+(?:\.\d+)?)\s*(%|％|percent)?(?!\s*(?:倍|\d|\.\d))"
+
+
 class MetricClaimExtractor:
     """Extract numeric metric claims from analysis text."""
 
     # metric_name_pattern -> (canonical_name, unit)
-    # Patterns are permissive: allow Chinese words between the metric name and number.
     METRIC_PATTERNS = [
-        # Percentiles
-        (r"p99[^\d]{0,20}(?:约|大约|大概|约为|为|是)?\s*(\d+(?:\.\d+)?)\s*(ms|毫秒|s|秒)?", "p99", "ms"),
-        (r"p95[^\d]{0,20}(?:约|大约|大概|约为|为|是)?\s*(\d+(?:\.\d+)?)\s*(ms|毫秒|s|秒)?", "p95", "ms"),
-        (r"p90[^\d]{0,20}(?:约|大约|大概|约为|为|是)?\s*(\d+(?:\.\d+)?)\s*(ms|毫秒|s|秒)?", "p90", "ms"),
-        (r"p50[^\d]{0,20}(?:约|大约|大概|约为|为|是)?\s*(\d+(?:\.\d+)?)\s*(ms|毫秒|s|秒)?", "p50", "ms"),
-        # Aggregates
-        (r"平均响应时间[^\d]{0,20}(?:约|大约|大概|约为|为|是)?\s*(\d+(?:\.\d+)?)\s*(ms|毫秒|s|秒)?", "avg_response_time", "ms"),
-        (r"最大响应时间[^\d]{0,20}(?:约|大约|大概|约为|为|是)?\s*(\d+(?:\.\d+)?)\s*(ms|毫秒|s|秒)?", "max_response_time", "ms"),
-        (r"平均延迟[^\d]{0,20}(?:约|大约|大概|约为|为|是)?\s*(\d+(?:\.\d+)?)\s*(ms|毫秒|s|秒)?", "avg_response_time", "ms"),
-        (r"吞吐量[^\d]{0,20}(?:约|大约|大概|约为|为|是)?\s*(\d+(?:\.\d+)?)\s*(req/s|rps|tps|请求/秒)?", "throughput", "req/s"),
-        (r"TPS[^\d]{0,20}(?:约|大约|大概|约为|为|是)?\s*(\d+(?:\.\d+)?)", "throughput", "req/s"),
-        (r"RPS[^\d]{0,20}(?:约|大约|大概|约为|为|是)?\s*(\d+(?:\.\d+)?)", "throughput", "req/s"),
-        (r"错误率[^\d]{0,20}(?:约|大约|大概|约为|为|是)?\s*(\d+(?:\.\d+)?)\s*%?", "error_rate", "%"),
-        (r"错误率[^\d]{0,20}(?:约|大约|大概|约为|为|是)?\s*(\d+(?:\.\d+)?)\s*percent", "error_rate", "%"),
-        (r"总请求数[^\d]{0,20}(?:约|大约|大概|约为|为|是)?\s*(\d+)", "total_requests", ""),
+        (r"(?<![a-z])p99" + _TIME, "p99", "ms"),
+        (r"(?<![a-z])p95" + _TIME, "p95", "ms"),
+        (r"(?<![a-z])p90" + _TIME, "p90", "ms"),
+        (r"(?<![a-z])p50" + _TIME, "p50", "ms"),
+        (r"平均(?:响应时间|延迟|耗时)" + _TIME, "avg_response_time", "ms"),
+        (r"最大(?:响应时间|延迟|耗时)" + _TIME, "max_response_time", "ms"),
+        (r"吞吐量?" + _RATE, "throughput", "req/s"),
+        (r"(?<![a-z])TPS" + _RATE, "throughput", "req/s"),
+        (r"(?<![a-z])RPS" + _RATE, "throughput", "req/s"),
+        (r"错误率" + _PERCENT, "error_rate", "%"),
+        (r"总请求数?" + _GAP + r"(\d+)(?![\d.%％倍])", "total_requests", ""),
     ]
 
     def extract(self, text: str) -> list[MetricClaim]:
@@ -80,7 +83,7 @@ class MetricClaimExtractor:
             return "s"
         if u in ("req/s", "rps", "tps", "请求/秒"):
             return "req/s"
-        if u in ("%", "percent"):
+        if u in ("%", "％", "percent"):
             return "%"
         return u
 
@@ -108,8 +111,21 @@ class FactValidator:
             return fact.throughput
         if metric_name in fact.percentiles:
             return fact.percentiles[metric_name]
-        # Try per-label aggregate? For now, return None and mark as missing.
         return None
+
+    @staticmethod
+    def _also_measured(fact: FactSheet, metric_name: str) -> list[float]:
+        """The same metric at other scopes: per transaction, per time segment, steady window, successes only."""
+        key = {"p99": "p99_response_time", "p95": "p95_response_time", "p90": "p90_response_time",
+               "p50": "p50_response_time", "total_requests": "count"}.get(metric_name, metric_name)
+        scopes = list((fact.per_label or {}).values())
+        scopes += [stats.get("success") or {} for stats in (fact.per_label or {}).values()]
+        summary = fact.raw_summary
+        if summary is not None:
+            steady = (summary.diagnostics or {}).get("steady") or {}
+            scopes += [summary.success or {}, steady, *(steady.get("labels") or {}).values()]
+        scopes += [segment.model_dump() | {"count": segment.request_count} for segment in fact.timeline_segments]
+        return [float(scope[key]) for scope in scopes if isinstance(scope.get(key), (int, float))]
 
     @staticmethod
     def _matches(claimed: float, actual: float, metric_name: str, absolute_ms: float, tolerance: float) -> bool:
@@ -124,8 +140,13 @@ class FactValidator:
             return diff <= tolerance
         return diff / abs(actual) <= tolerance
 
-    def validate(self, analysis_text: str, fact: FactSheet) -> ValidationResult:
-        """Validate all numeric claims in analysis_text against fact."""
+    def validate(self, analysis_text: str, fact: FactSheet,
+                 extra_values: Iterable[float] = ()) -> ValidationResult:
+        """Validate all numeric claims in analysis_text against fact.
+
+        ``extra_values`` are measurements of other runs or requirement limits the text may quote.
+        """
+        extra_values = list(extra_values)
         claims = self.extractor.extract(analysis_text)
         mismatches = []
         missing_fields = []
@@ -136,13 +157,14 @@ class FactValidator:
                 missing_fields.append(claim.metric_name)
                 continue
 
-            if not self._matches(
+            known = [actual, *self._also_measured(fact, claim.metric_name), *extra_values]
+            if not any(self._matches(
                 claimed=claim.claimed_value,
-                actual=actual,
+                actual=value,
                 metric_name=claim.metric_name,
                 absolute_ms=self.absolute_ms,
                 tolerance=self.tolerance,
-            ):
+            ) for value in known):
                 mismatches.append({
                     "metric": claim.metric_name,
                     "claimed": claim.claimed_value,
@@ -153,10 +175,9 @@ class FactValidator:
 
         is_valid = not mismatches and not missing_fields
 
-        # Build a corrected summary if invalid
         corrected_summary = None
         if not is_valid:
-            lines = ["以下数字声明与原始 JTL 计算结果不符，已修正："]
+            lines = ["以下数字声明与原始 JTL 计算结果不符："]
             for m in mismatches:
                 lines.append(f"- {m['metric']}: LLM 声明 {m['claimed']}{m['unit']}，实际 {m['actual']}{m['unit']}")
             corrected_summary = "\n".join(lines)

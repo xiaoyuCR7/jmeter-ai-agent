@@ -14,6 +14,9 @@
         {{ L('不通过', 'Failed') }} <b class="bad">{{ req.failed }}</b> ·
         {{ L('无法评估', 'No data') }} <b class="muted">{{ req.missing }}</b>
       </p>
+      <el-alert v-if="req.load_gaps?.length" class="load-gap" type="warning" :closable="false" show-icon
+        :title="L('负载未达到需求，这次达标不能算数', 'The run stayed below the required load, so a pass here does not count')"
+        :description="req.load_gaps.map(loadGapText).join('；')" />
       <el-table :data="req.items" size="small" :row-class-name="rowClass">
         <el-table-column :label="L('编号', 'ID')" prop="id" width="70" />
         <el-table-column :label="L('需求', 'Requirement')" min-width="220">
@@ -70,6 +73,7 @@
           <span>{{ c.kind === 'baseline' ? L('对比基线', 'vs baseline') : L('对比上一次', 'vs previous run') }}「{{ c.data.name }}」</span>
           <el-tag :type="historyType(c.data.verdict)" size="small">{{ historyText(c.data.verdict) }}</el-tag>
         </div>
+        <p v-for="note in c.data.notes || []" :key="note.kind" class="comparison-note">{{ noteText(note) }}</p>
         <div class="deltas">
           <span v-for="d in c.data.deltas.filter(d => d.metric !== 'min_response_time')" :key="d.metric" class="delta" :class="d.is_regression ? 'bad' : d.direction === 'better' ? 'ok' : ''">
             {{ metricTitle(d.metric) }} {{ d.baseline }} → {{ d.target }}
@@ -133,7 +137,8 @@
           <el-table-column :label="L('与响应时间相关', 'Corr. with RT')" width="130" align="right">
             <template #default="{ row }">
               <span v-if="row.corr_response_time == null" class="muted">—</span>
-              <span v-else :class="{ bad: row.corr_response_time >= 0.7 }">{{ row.corr_response_time }}</span>
+              <span v-else :class="{ bad: row.corr_strong, muted: !row.corr_strong && (row.corr_points ?? 0) < 8 }"
+                :title="L(`基于 ${row.corr_points ?? '?'} 个时间段`, `From ${row.corr_points ?? '?'} time segments`)">{{ row.corr_response_time }}</span>
             </template>
           </el-table-column>
         </el-table>
@@ -156,7 +161,7 @@ import { CanvasRenderer } from 'echarts/renderers'
 import { LineChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/components'
 import VChart from 'vue-echarts'
-import { api, type ExecutionEvidence } from '@/api'
+import { api, type ComparisonNote, type ExecutionEvidence, type LoadGap } from '@/api'
 import { useI18n } from '@/composables/useI18n'
 
 use([CanvasRenderer, LineChart, GridComponent, TooltipComponent, LegendComponent])
@@ -187,6 +192,14 @@ const describe = (row: { transaction: string | null; metric: string; operator: s
   const op = ({ lte: '≤', lt: '<', gte: '≥', gt: '>' } as Record<string, string>)[row.operator] || row.operator
   return `${row.transaction ? `[${row.transaction}] ` : ''}${metric} ${op} ${row.expected}`
 }
+
+const loadGapText = (gap: LoadGap) => {
+  const name = ({ concurrency: L('并发', 'Concurrency'), duration_seconds: L('时长（秒）', 'Duration (s)'), target_tps: L('成功 TPS', 'Successful TPS') })[gap.field]
+  return L(`${name} 要求 ${gap.expected}，实际 ${gap.actual}`, `${name}: required ${gap.expected}, reached ${gap.actual}`)
+}
+const noteText = (note: ComparisonNote) => note.kind === 'load'
+  ? L(`两次负载不同（峰值线程 ${note.baseline} → ${note.target}），不判定退化。`, `The runs used different load (peak threads ${note.baseline} → ${note.target}), so no regression is judged.`)
+  : L(`样本量偏小（${note.baseline} → ${note.target}），差异可能只是波动。`, `Few samples (${note.baseline} → ${note.target}); the difference may be noise.`)
 
 const history = computed(() => props.evidence?.baseline ?? null)
 const comparisons = computed(() => [
@@ -250,11 +263,14 @@ async function refresh() {
   }
 }
 
-// Plot the chosen server metric against JMeter's 30 s response-time segments on one time axis.
+// Plot the chosen server metric against JMeter's response-time segments on one time axis.
 const chartOption = computed(() => {
   const series = server.value?.chart?.[chartIndex.value]
   if (!series) return {}
-  const rt = (props.timeline || []).map(s => [Number(s.time_range.split('-')[0]) + 15, s.avg_response_time])
+  const rt = (props.timeline || []).map(s => {
+    const [start, end] = s.time_range.replace('s', '').split('-').map(Number)
+    return [(start + end) / 2, s.avg_response_time]
+  })
   return {
     tooltip: { trigger: 'axis' },
     legend: { data: [series.name, L('平均响应时间', 'Avg response time')] },
@@ -281,7 +297,9 @@ const chartOption = computed(() => {
 .quote.unverified { color: var(--app-warning); }
 .empty p { margin: 0 0 8px; color: var(--app-text-secondary); }
 .sla { margin: 0 0 8px; padding-left: 18px; font-size: 13px; }
+.load-gap { margin-bottom: 12px; }
 .comparison { margin-bottom: 14px; }
+.comparison-note { margin: 0 0 6px; font-size: 13px; color: var(--app-warning); }
 .comparison-title { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 13px; color: var(--app-text); }
 .deltas { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; font-variant-numeric: tabular-nums; color: var(--app-text-secondary); }
 .delta.bad { color: var(--app-danger); }

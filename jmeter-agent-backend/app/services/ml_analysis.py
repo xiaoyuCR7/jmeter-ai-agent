@@ -1,10 +1,9 @@
 """ML-powered anomaly detection and metrics correlation.
 
 Uses lightweight statistical methods (no heavy ML deps):
-- Z-score for spike detection
-- IQR (Interquartile Range) for outlier detection
-- Moving average for trend analysis
-- Percentile-based anomaly scoring
+- Median and MAD for spike detection, which one spike cannot inflate the way it inflates a mean
+- Drops measured against the median, away from the ramp-up and the tail
+- Linear slope for trend analysis
 """
 
 import math
@@ -62,10 +61,16 @@ class MLAnomalyDetector:
         report = detector.compare_to_baseline(current_metrics, baseline_metrics)
     """
 
-    def __init__(self, sensitivity: float = 2.0):
+    MIN_SEGMENTS = 4
+    # Below these floors a tiny spread would turn ordinary jitter into outliers.
+    MIN_SPREAD_SHARE = 0.1
+    MIN_ERROR_SPREAD_POINTS = 1.0
+    MAD_TO_SIGMA = 1.4826
+
+    def __init__(self, sensitivity: float = 3.5):
         """
         Args:
-            sensitivity: Z-score threshold (lower = more sensitive). Default 2.0.
+            sensitivity: Modified z-score threshold (lower = more sensitive). Default 3.5.
         """
         self.sensitivity = sensitivity
 
@@ -81,7 +86,9 @@ class MLAnomalyDetector:
         error_rates = []
         throughputs = []
 
+        ranges = []
         for seg in timeline_segments:
+            ranges.append(getattr(seg, 'time_range', None) or (seg.get('time_range') if isinstance(seg, dict) else None))
             if hasattr(seg, 'avg_response_time'):
                 val = seg.avg_response_time
             elif isinstance(seg, dict):
@@ -107,15 +114,15 @@ class MLAnomalyDetector:
             throughputs.append(float(val))
 
         # Response time anomalies
-        rt_anomalies = self._detect_spikes(response_times, "response_time")
+        rt_anomalies = self._detect_spikes(response_times, "response_time", ranges)
         anomalies.extend(rt_anomalies)
 
         # Error rate anomalies
-        err_anomalies = self._detect_spikes(error_rates, "error_rate")
+        err_anomalies = self._detect_spikes(error_rates, "error_rate", ranges)
         anomalies.extend(err_anomalies)
 
         # Throughput drops
-        thr_anomalies = self._detect_drops(throughputs, "throughput")
+        thr_anomalies = self._detect_drops(throughputs, "throughput", ranges)
         anomalies.extend(thr_anomalies)
 
         # Response time trend divergence
@@ -207,44 +214,62 @@ class MLAnomalyDetector:
 
     # ── Internal detection methods ──────────────────────
 
-    def _detect_spikes(self, values: list[float], metric: str) -> list[Anomaly]:
-        """Detect value spikes using Z-score method."""
-        if len(values) < 3:
+    @staticmethod
+    def _median(values: list[float]) -> float:
+        data = sorted(values)
+        mid = len(data) // 2
+        return data[mid] if len(data) % 2 else (data[mid - 1] + data[mid]) / 2
+
+    @staticmethod
+    def _where(ranges: Optional[list], index: int) -> str:
+        return ranges[index] if ranges and ranges[index] else f"segment {index}"
+
+    def _detect_spikes(self, values: list[float], metric: str, ranges: Optional[list] = None) -> list[Anomaly]:
+        """Flag values far above the median. Only upward: a fast or error-free segment is not a problem."""
+        if len(values) < self.MIN_SEGMENTS:
             return []
         anomalies = []
-        mean = sum(values) / len(values)
-        std = self._stddev(values, mean)
-        if std == 0:
+        median = self._median(values)
+        mad = self._median([abs(v - median) for v in values]) * self.MAD_TO_SIGMA
+        floor = self.MIN_ERROR_SPREAD_POINTS if metric == "error_rate" else median * self.MIN_SPREAD_SHARE
+        spread = max(mad, floor)
+        if spread == 0:
             return []
 
         for i, val in enumerate(values):
-            z = abs(val - mean) / std
-            if z > self.sensitivity:
-                severity = "high" if z > self.sensitivity * 1.5 else "medium"
+            score = (val - median) / spread
+            if score > self.sensitivity:
+                severity = "high" if score > self.sensitivity * 1.5 else "medium"
                 anomalies.append(Anomaly(
                     metric=metric,
                     value=val,
-                    expected_range=(max(0, mean - self.sensitivity * std),
-                                    mean + self.sensitivity * std),
+                    expected_range=(max(0, median - self.sensitivity * spread),
+                                    median + self.sensitivity * spread),
                     severity=severity,
-                    description=f"{metric} spike at segment {i}: {val:.2f} (z-score={z:.1f})",
+                    description=f"{metric} spike at {self._where(ranges, i)}: {val:.2f} "
+                                f"(median={median:.2f}, score={score:.1f})",
                 ))
         return anomalies
 
-    def _detect_drops(self, values: list[float], metric: str) -> list[Anomaly]:
-        """Detect significant drops (for throughput, etc.)."""
-        if len(values) < 3:
+    def _detect_drops(self, values: list[float], metric: str, ranges: Optional[list] = None) -> list[Anomaly]:
+        """Detect significant drops between the ramp-up and the tail, where low rates are expected."""
+        if len(values) < self.MIN_SEGMENTS:
             return []
         anomalies = []
-        mean = sum(values) / len(values)
-        for i, val in enumerate(values):
-            if mean > 0 and val < mean * 0.5:
+        median = self._median(values)
+        limit = median * 0.5
+        inside = [i for i, val in enumerate(values) if val >= limit]
+        if not inside:
+            return []
+        for i in range(inside[0], inside[-1] + 1):
+            val = values[i]
+            if val < limit:
                 anomalies.append(Anomaly(
                     metric=metric,
                     value=val,
-                    expected_range=(mean * 0.5, float("inf")),
+                    expected_range=(limit, float("inf")),
                     severity="medium",
-                    description=f"{metric} drop at segment {i}: {val:.2f} (mean={mean:.2f})",
+                    description=f"{metric} drop at {self._where(ranges, i)}: {val:.2f} (median={median:.2f})",
                 ))
         return anomalies
 
@@ -297,16 +322,7 @@ class MLAnomalyDetector:
         elif avg_err > 1:
             score -= 10
 
-        # Penalize for throughput degradation
-        if len(thr) >= 2 and thr[-1] < thr[0] * 0.7:
-            score -= 15
-
         return max(0, min(100, score))
-
-    def _stddev(self, values: list[float], mean: float) -> float:
-        if len(values) < 2:
-            return 0
-        return math.sqrt(sum((v - mean) ** 2 for v in values) / (len(values) - 1))
 
 
 ml_detector = MLAnomalyDetector()

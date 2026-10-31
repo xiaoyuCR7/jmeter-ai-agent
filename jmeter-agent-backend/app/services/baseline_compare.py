@@ -15,6 +15,11 @@ REGRESSION_THRESHOLD_PCT = 20.0
 # Transaction-level checks: response time grows, or errors rise by at least this many percentage points.
 TRANSACTION_METRICS = (('p95_response_time', 'P95'), ('avg_response_time', '平均'), ('error_rate', '错误率'))
 ERROR_RATE_POINTS = 1.0
+# Below these sizes a percentile is a handful of samples, so a change in it is not evidence.
+MIN_RUN_SAMPLES = 100
+MIN_TRANSACTION_SAMPLES = 30
+# Runs at different concurrency answer different questions.
+LOAD_TOLERANCE_PCT = 10.0
 
 
 def snapshot_of(summary: DetailedTestSummary) -> dict:
@@ -34,6 +39,9 @@ def compare_transactions(baseline: DetailedTestSummary, target: DetailedTestSumm
     rows = []
     base_labels, target_labels = baseline.per_label or {}, target.per_label or {}
     for label in sorted(set(base_labels) & set(target_labels)):
+        if min(base_labels[label].get('count', MIN_TRANSACTION_SAMPLES),
+               target_labels[label].get('count', MIN_TRANSACTION_SAMPLES)) < MIN_TRANSACTION_SAMPLES:
+            continue
         for key, title in TRANSACTION_METRICS:
             old, new = base_labels[label].get(key), target_labels[label].get(key)
             if not isinstance(old, (int, float)) or not isinstance(new, (int, float)):
@@ -51,14 +59,32 @@ def compare_transactions(baseline: DetailedTestSummary, target: DetailedTestSumm
     return rows[:20]
 
 
+def _peak_threads(summary: DetailedTestSummary) -> Optional[int]:
+    return ((summary.diagnostics or {}).get('load') or {}).get('peak_threads')
+
+
+def comparability_notes(baseline: DetailedTestSummary, target: DetailedTestSummary) -> list[dict]:
+    """Why a comparison of these two runs should be read with care."""
+    notes = []
+    old, new = _peak_threads(baseline), _peak_threads(target)
+    if old and new and abs(new - old) / old * 100 > LOAD_TOLERANCE_PCT:
+        notes.append({'kind': 'load', 'baseline': old, 'target': new})
+    if min(baseline.total_requests, target.total_requests) < MIN_RUN_SAMPLES:
+        notes.append({'kind': 'samples', 'baseline': baseline.total_requests, 'target': target.total_requests})
+    return notes
+
+
 def _comparison(name: str, baseline: DetailedTestSummary, target: DetailedTestSummary, **identity) -> dict:
     report = RegressionEngine(REGRESSION_THRESHOLD_PCT).compare(baseline, target, name, 'current').to_dict()
     transactions = compare_transactions(baseline, target)
     verdict = report['verdict']
     if any(t['is_regression'] for t in transactions) and verdict in ('stable', 'improvement'):
         verdict = 'mixed' if verdict == 'improvement' else 'regression'
+    notes = comparability_notes(baseline, target)
+    if any(note['kind'] == 'load' for note in notes):
+        verdict = 'unknown'
     return {**identity, 'name': name, 'verdict': verdict, 'summary': report['summary'], 'deltas': report['deltas'],
-            'transactions': transactions, 'threshold_pct': REGRESSION_THRESHOLD_PCT}
+            'transactions': transactions, 'threshold_pct': REGRESSION_THRESHOLD_PCT, 'notes': notes}
 
 
 async def _active_baseline(project_id: str, test_plan_id: Optional[str]) -> Optional[dict]:
@@ -122,6 +148,11 @@ _METRIC_TITLES = {'avg_response_time': '平均响应时间', 'p95_response_time'
 
 def _format_one(title: str, comparison: dict) -> list[str]:
     lines = [f"### {title}「{comparison['name']}」：{comparison['verdict']}"]
+    for note in comparison.get('notes', []):
+        if note['kind'] == 'load':
+            lines.append(f"- 负载不同（峰值线程 {note['baseline']}→{note['target']}），不判定退化，差异可能只是负载造成的。")
+        else:
+            lines.append(f"- 样本量偏小（{note['baseline']}→{note['target']}），差异可能只是波动。")
     changed = [d for d in comparison.get('deltas', []) if d['delta_pct'] is not None and abs(d['delta_pct']) >= 5]
     if changed:
         lines.append('- 整体：' + '，'.join(

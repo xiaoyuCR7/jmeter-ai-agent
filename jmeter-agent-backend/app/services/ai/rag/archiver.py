@@ -51,6 +51,7 @@ class RAGArchiver:
         self,
         structured_analysis: StructuredAnalysis,
         fact: FactSheet,
+        extra_values: tuple = (),
     ) -> dict:
         """Archive a structured analysis result with full validation.
 
@@ -102,7 +103,7 @@ class RAGArchiver:
 
         # 2. Validate numeric claims in the combined analysis text
         analysis_text = self._structured_analysis_to_text(structured_analysis)
-        validation = fact_validator.validate(analysis_text, fact)
+        validation = fact_validator.validate(analysis_text, fact, extra_values)
         result["validation"] = validation
 
         # 3. Archive hypotheses (interpretations) regardless of number validation,

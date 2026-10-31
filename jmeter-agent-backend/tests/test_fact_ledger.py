@@ -579,7 +579,7 @@ def test_out_of_order_samples_use_earliest_origin_and_real_tail_window(fmt):
     ordered = timed_summary([(1000, 1000), (32000, 1000)], fmt)
     shuffled = timed_summary([(32000, 1000), (1000, 1000)], fmt)
     assert shuffled.model_dump() == ordered.model_dump()
-    assert [segment.time_range for segment in shuffled.timeline_segments] == ['0-30s', '30-60s']
+    assert [segment.time_range for segment in shuffled.timeline_segments] == ['0-5s', '30-35s']
     assert shuffled.timeline_segments[-1].throughput == 0.5
 
 

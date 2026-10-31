@@ -73,6 +73,7 @@
             <el-table :data="timeline" size="small" max-height="360">
               <el-table-column prop="time_range" :label="t('report.timeSeriesTable.timeRange')" width="110" />
               <el-table-column :label="t('report.timeSeriesTable.requests')" align="right"><template #default="{ row }"><span class="num">{{ row.request_count }}</span></template></el-table-column>
+              <el-table-column :label="L('线程', 'Threads')" align="right"><template #default="{ row }"><span class="num">{{ row.active_threads ?? '-' }}</span></template></el-table-column>
               <el-table-column label="Avg" align="right"><template #default="{ row }"><span class="num">{{ formatMs(row.avg_response_time) }}</span></template></el-table-column>
               <el-table-column label="Max" align="right"><template #default="{ row }"><span class="num">{{ formatMs(row.max_response_time) }}</span></template></el-table-column>
               <el-table-column label="TPS" align="right"><template #default="{ row }"><span class="num">{{ formatTps(row.throughput) }}</span></template></el-table-column>
@@ -106,6 +107,9 @@
           <section class="panel">
             <el-table :data="errors" size="small" :empty-text="L('没有错误', 'No errors')">
               <el-table-column prop="error_type" :label="t('report.errorType')" min-width="200" show-overflow-tooltip />
+              <el-table-column :label="L('接口', 'Transactions')" min-width="180" show-overflow-tooltip>
+                <template #default="{ row }">{{ errorLabels(row) }}</template>
+              </el-table-column>
               <el-table-column :label="t('report.errorCount')" width="90" align="right"><template #default="{ row }"><span class="num">{{ row.count }}</span></template></el-table-column>
               <el-table-column :label="t('report.errorRatio')" width="90" align="right"><template #default="{ row }"><span class="num">{{ formatPct(row.percentage) }}</span></template></el-table-column>
               <el-table-column :label="t('report.errorExample')" min-width="260" show-overflow-tooltip>
@@ -120,7 +124,7 @@
             <el-alert v-if="staleVerdict" type="error" :closable="false" show-icon
               :title="L('需求判定已变化，这份分析可能过时', 'The requirement verdict has changed since this analysis was written')"
               :description="L(`生成分析时：${staleVerdict.then}；现在：${staleVerdict.now}。`, `When written: ${staleVerdict.then}. Now: ${staleVerdict.now}.`)" />
-            <el-alert :title="t('report.evidenceWarning')" type="warning" :closable="false" show-icon />
+            <el-alert :title="factCheck.title" :description="factCheck.detail" :type="factCheck.type" :closable="false" show-icon />
             <div class="ai-block lead">
               <h4>{{ t('report.evaluation') }}</h4>
               <p>{{ ai.overall_assessment }}</p>
@@ -182,6 +186,7 @@ const timeline = computed<any[]>(() => summary.value.timeline_segments || [])
 const errors = computed<any[]>(() => summary.value.error_details || [])
 const transactions = computed(() => Object.entries(summary.value.per_label || {}).map(([label, stats]: [string, any]) => ({ label, ...stats })))
 const ai = computed(() => report.value?.ai_analysis || null)
+const errorLabels = (row: any) => Object.entries(row.labels || {}).map(([label, count]) => `${label} (${count})`).join(', ') || '-'
 
 const banner = computed(() => {
   const req = report.value?.evidence?.requirements
@@ -189,6 +194,7 @@ const banner = computed(() => {
     const detail = L(`达标 ${req.passed} · 不达标 ${req.failed} · 无数据 ${req.missing}`, `${req.passed} met · ${req.failed} not met · ${req.missing} no data`)
     if (req.verdict === 'pass') return { tone: 'pass', title: L('性能需求全部达标', 'All requirements met'), detail }
     if (req.verdict === 'fail') return { tone: 'fail', title: L('性能需求未达标', 'Requirements not met'), detail }
+    if (req.load_gaps?.length && !req.missing) return { tone: 'incomplete', title: L('负载未达到需求，不能算达标', 'Below the required load, so this is not a pass'), detail }
     return { tone: 'incomplete', title: L('部分需求无法评估', 'Some requirements could not be evaluated'), detail }
   }
   const violations = report.value?.sla_result?.violations?.length || 0
@@ -313,6 +319,19 @@ const staleVerdict = computed(() => {
     ? L('未设性能需求', 'no requirements')
     : L(`达标 ${v.passed} · 不达标 ${v.failed} · 无数据 ${v.missing}`, `${v.passed} met · ${v.failed} not met · ${v.missing} no data`)
   return same ? null : { then: describe(then), now: describe(now) }
+})
+
+const factCheck = computed(() => {
+  const a = ai.value
+  if (a?.evidence_status === 'mismatch') {
+    const wrong = (a.fact_check?.mismatches || []).map((m: any) => `${m.metric}: ${m.claimed} → ${m.actual}`).join('；')
+    return { type: 'error' as const, title: L('AI 文本里有数字与实测不符，请以指标为准', 'Some numbers in the AI text do not match the measurements; trust the metrics'), detail: wrong }
+  }
+  if (a?.evidence_status === 'verified') {
+    const count = a.fact_check?.checked ?? 0
+    return { type: 'info' as const, title: L(`已核对 ${count} 处指标数字，均与实测相符`, `${count} metric values checked against the measurements`), detail: L('这只核对数字；原因和建议仍是推测，不等于已验证的根因。', 'Only the numbers are checked. Causes and advice are still hypotheses, not verified root causes.') }
+  }
+  return { type: 'warning' as const, title: t('report.evidenceWarning'), detail: '' }
 })
 
 const aiLists = computed(() => {

@@ -97,19 +97,21 @@ class RAGRetriever:
         self,
         report_data: dict,
         limit: int = 10,
+        module: Optional[str] = None,
     ) -> dict:
         """Search RAG for relevant historical documents.
 
         Args:
             report_data: New test report data.
             limit: Max documents per category.
+            module: The module when the caller knows it; otherwise it is guessed from the report text.
 
         Returns:
             Dict with: metadata, previous_analyses, similar_defects,
                        module_history, module_standards, formatted_context.
         """
         meta = self.extract_metadata(report_data)
-        module = meta["module"]
+        module = meta["module"] = module or meta["module"]
         keywords = meta["all_keywords"]
 
         # 1. Previous analysis conclusions for same module

@@ -353,7 +353,7 @@ async def test_analysis_crash_is_recorded_on_the_analysis_and_announced(monkeypa
     monkeypatch.setattr(routes, 'TestAnalyzer', lambda **kwargs: SimpleNamespace(
         analyze=AsyncMock(side_effect=TimeoutError('model timed out'))))
     monkeypatch.setattr(rag_archiver, 'archive_raw_report', lambda **kwargs: None)
-    monkeypatch.setattr(routes, '_analysis_evidence', AsyncMock(return_value=('', None)))
+    monkeypatch.setattr(routes, '_analysis_evidence', AsyncMock(return_value=('', None, [])))
     emit = AsyncMock()
     monkeypatch.setattr(execution_lifecycle, 'emit', emit)
     execution = SimpleNamespace(id='crash', project_id='p', status=routes.TestExecutionStatus.COMPLETED,

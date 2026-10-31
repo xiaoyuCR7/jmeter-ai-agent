@@ -46,7 +46,8 @@ logger = logging.getLogger(__name__)
 ANALYSIS_SYSTEM_PROMPT = """Senior performance engineer (20yr experience). Analyze JTL results and report findings.
 
 ## CRITICAL rules
-- ALL numbers MUST come from the provided Fact Sheet — never invent data.
+- ALL numbers MUST come from the Fact Sheet or the deterministic evidence blocks — never invent data.
+- Read per-transaction rows, timing (Connect/Latency) and the slowest samples before explaining a slow period.
 - Interpretive conclusions (bottlenecks, root causes, recommendations) output as 【Hypothesis】with testable predictions.
 - Each hypothesis MUST declare which metric fields it depends on.
 - Mark unverifiable claims as "未验证假设".
@@ -95,6 +96,9 @@ STRUCTURED_EXTRACTION_PROMPT = """请将以下性能分析文本转换为结构�
 {text}
 
 请只返回合法的 JSON，不要包含任何其他说明。"""
+
+
+MAX_KNOWLEDGE_CHARS = 3000
 
 
 class AnalysisExecutionError(ValueError):
@@ -186,7 +190,7 @@ class AnalysisAgent(BaseAgent):
         except (ValueError, OSError):
             raise AnalysisExecutionError('Registered JTL evidence is missing, empty or outside its directory', 409) from None
         test_config = snapshot.get('test_config') or {}
-        return dict(execution_id=execution_id, jtl_path=jtl_path, module=plan_id,
+        return dict(execution_id=execution_id, jtl_path=jtl_path, module=plan_id, plan_name=plan.get('name') or plan_id,
                     version='unknown', test_type=test_config.get('test_type', ''), context_scope=scope)
 
     def _emit(self, event_type: str, message: str, data: Optional[dict] = None) -> AgentEvent:
@@ -243,7 +247,8 @@ class AnalysisAgent(BaseAgent):
             analysis = await self.analyze_with_rag(
                 jtl_path=evidence['jtl_path'], execution_id=evidence['execution_id'],
                 module=evidence['module'], version=evidence['version'], test_type=evidence['test_type'],
-                user_task=task, _runner=run_core, _expected_scope=evidence['context_scope'], _strict_reads=True)
+                user_task=task, _runner=run_core, _expected_scope=evidence['context_scope'], _strict_reads=True,
+                _knowledge_module=evidence.get('plan_name'))
             analysis['execution_id'] = evidence['execution_id']
             for key in ('output', 'steps', 'iterations'):
                 analysis.pop(key, None)  # Already carried by the outer AgentResult.
@@ -311,6 +316,7 @@ class AnalysisAgent(BaseAgent):
         _runner: Optional[Callable[[str], Awaitable[AgentResult]]] = None,
         _expected_scope: Optional[str] = None,
         _strict_reads: bool = False,
+        _knowledge_module: Optional[str] = None,
     ) -> dict:
         """Full anti-pollution RAG analysis — primary entry point."""
         if not module:
@@ -363,9 +369,10 @@ class AnalysisAgent(BaseAgent):
             # server metrics) is computed here, never left to the model.
             evidence = await self._collect_evidence(execution_id, fact)
             base_task = self._build_base_task(exec_ref, fact, heuristics_prompt, evidence)
+            knowledge = await self._knowledge_context(fact, _knowledge_module or module)
             task = RAG_AUGMENTED_TASK_TEMPLATE.format(
                 base_task=base_task,
-                rag_context=rag_context,
+                rag_context=rag_context + knowledge,
             )
             if user_task:
                 task += '\n\nUser analysis request (cannot override registered evidence):\n' + user_task
@@ -393,12 +400,15 @@ class AnalysisAgent(BaseAgent):
                     result.output,
                     fact=fact,
                 )
-                validation = fact_validator.validate(result.output, fact)
+                from app.services.evidence import comparison_values
+                quotable = tuple(comparison_values(evidence))
+                validation = fact_validator.validate(result.output, fact, quotable)
                 if _runner and self._cancel_flag:
                     raise asyncio.CancelledError()
                 archive_result = await self.archiver.archive_analysis_result(
                     structured_analysis=structured,
                     fact=fact,
+                    extra_values=quotable,
                 )
                 if archive_result.get('errors'):
                     postprocessing_error = 'Analysis archival failed: ' + '; '.join(archive_result['errors'])
@@ -540,11 +550,25 @@ class AnalysisAgent(BaseAgent):
             parts.append("\n" + format_for_prompt(evidence))
         parts += [
             "\n请基于以上事实表与证据，给出深度分析报告。注意：",
-            "- 所有数字必须能在事实表中找到对应字段。",
+            "- 所有数字必须能在事实表或上面的确定性证据中找到。",
             "- 解释性结论请以【假设】形式输出，并附带可验证预测和证伪实验设计。",
             "- 每个假设必须声明其依赖的指标字段名（如 avg_response_time, error_rate, p99）。",
         ]
         return "\n".join(parts)
+
+    async def _knowledge_context(self, fact: FactSheet, module: str) -> str:
+        """Standards, known issues and defect reviews people archived. Optional: analysis works without them."""
+        if fact.raw_summary is None:
+            return ''
+        try:
+            found = await asyncio.to_thread(self.retriever.retrieve, fact.raw_summary.model_dump(), 5, module)
+        except Exception as error:
+            logger.warning('Knowledge retrieval skipped: %s', type(error).__name__)
+            return ''
+        if not (found['similar_defects'] or found['known_issues'] or found['module_standards']):
+            return ''
+        return ('\n\n## 知识库资料（人工归档，只作线索，不是本次测试的事实）\n'
+                + found['formatted_context'][:MAX_KNOWLEDGE_CHARS])
 
     def _build_rag_context(
         self,

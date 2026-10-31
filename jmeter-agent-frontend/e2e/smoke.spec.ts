@@ -100,3 +100,31 @@ test('document to report', async ({ page }) => {
   await expect(page.getByText('The requirement verdict has changed since this analysis was written')).toBeVisible()
   await expect(page.getByText('When written: no requirements. Now: 1 met · 0 not met · 0 no data.')).toBeVisible()
 })
+
+test('report states what was checked and what cannot be judged', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('jmeter-agent-lang', 'en'))
+  await mockApi(page)
+  const evidence = report.evidence
+  await page.route(url => url.pathname.endsWith('/executions/run1/report'), route => route.fulfill({ json: {
+    ...report,
+    summary: { ...report.summary, error_details: [{ error_type: '200: no order id', count: 3, percentage: 1,
+      sample_messages: ['no order id'], labels: { Checkout: 3 } }] },
+    evidence: { ...evidence,
+      requirements: { ...evidence.requirements, verdict: 'incomplete',
+        load_gaps: [{ field: 'concurrency', expected: 100, actual: 10 }] },
+      baseline: { previous: null, baseline: { ...evidence.baseline.baseline, verdict: 'unknown',
+        notes: [{ kind: 'load', baseline: 100, target: 10 }] } } },
+    ai_analysis: { ...report.ai_analysis, requirements_verdict: null, evidence_status: 'mismatch',
+      fact_check: { checked: 2, mismatches: [{ metric: 'p99', claimed: 900, actual: 400 }] } },
+  } }))
+
+  await page.goto('/executions/run1')
+  await expect(page.getByText('Below the required load, so this is not a pass')).toBeVisible()
+  await expect(page.getByText('Concurrency: required 100, reached 10')).toBeVisible()
+  await expect(page.getByText(/The runs used different load \(peak threads 100 → 10\)/)).toBeVisible()
+  await page.getByRole('tab', { name: 'Errors 1' }).click()
+  await expect(page.getByText('Checkout (3)')).toBeVisible()
+  await page.getByRole('tab', { name: 'AI analysis' }).click()
+  await expect(page.getByText('Some numbers in the AI text do not match the measurements')).toBeVisible()
+  await expect(page.getByText('p99: 900 → 400')).toBeVisible()
+})

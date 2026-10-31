@@ -11,7 +11,7 @@ from app.models.schemas import DetailedTestSummary, TimelineSegment
 from app.services import server_metrics as sm
 
 START = datetime(2026, 10, 1, 10, 0, 0)
-END = START + timedelta(seconds=180)
+END = START + timedelta(seconds=240)
 
 
 def summary_with_timeline(rts):
@@ -60,11 +60,11 @@ async def test_saturation_peak_and_response_time_correlation():
     # CPU climbs with response time; memory stays flat (no correlation possible).
     cpu = sm.MetricQuery(name='CPU', promql='cpu', unit='%', saturation=85)
     mem = sm.MetricQuery(name='Mem', promql='mem', unit='%')
-    series = {'cpu': [(t, 40 + t / 3) for t in range(0, 181, 10)], 'mem': [(t, 50) for t in range(0, 181, 10)]}
+    series = {'cpu': [(t, 40 + t / 4) for t in range(0, 241, 10)], 'mem': [(t, 50) for t in range(0, 241, 10)]}
     raw = await sm.collect(config(cpu, mem), START, END, transport=prometheus(lambda q: series[q]))
-    result = sm.analyze(raw, summary_with_timeline([100, 150, 220, 300, 420, 600]))
+    result = sm.analyze(raw, summary_with_timeline([100, 150, 220, 300, 420, 600, 700, 800]))
     cpu_row, mem_row = result['metrics']
-    assert cpu_row['max'] == 100.0 and cpu_row['peak_at_s'] == 180
+    assert cpu_row['max'] == 100.0 and cpu_row['peak_at_s'] == 240
     assert cpu_row['above_saturation_pct'] > 0
     assert cpu_row['corr_response_time'] >= 0.9
     assert mem_row['corr_response_time'] is None

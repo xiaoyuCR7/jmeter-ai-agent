@@ -33,6 +33,7 @@ _SUMMARY_FIELDS = {
 }
 _OPERATOR_TEXT = {'lte': '≤', 'lt': '<', 'gte': '≥', 'gt': '>'}
 _OPERATOR_SYMBOLS = {'<=': 'lte', '≤': 'lte', '<': 'lt', '>=': 'gte', '≥': 'gte', '>': 'gt'}
+LOAD_TOLERANCE = 0.9  # A run within 10% of the required load counts as having reached it.
 
 
 class RequirementItem(BaseModel):
@@ -216,6 +217,12 @@ class RequirementVerdict(BaseModel):
     source_verified: bool = False
 
 
+class LoadGap(BaseModel):
+    field: Literal['concurrency', 'duration_seconds', 'target_tps']
+    expected: float
+    actual: float
+
+
 class RequirementEvaluation(BaseModel):
     verdict: Literal['pass', 'fail', 'incomplete', 'none']
     passed: int = 0
@@ -223,6 +230,7 @@ class RequirementEvaluation(BaseModel):
     missing: int = 0
     items: list[RequirementVerdict] = Field(default_factory=list)
     load_profile: Optional[LoadProfile] = None
+    load_gaps: list[LoadGap] = Field(default_factory=list, description='Where the run fell short of the required load')
 
 
 _HTTP_METHODS = ('GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS')
@@ -293,11 +301,16 @@ def _matching_labels(summary: DetailedTestSummary, transaction: str,
 
 def _label_value(stats: dict, metric: str) -> Optional[float]:
     key = {'p90': 'p90_response_time', 'p95': 'p95_response_time', 'p99': 'p99_response_time'}.get(metric, metric)
-    value = stats.get(key)
+    # Fast failures must not satisfy a latency or throughput limit. Reports parsed before
+    # success stats existed have only the combined numbers.
+    source = stats if metric == 'error_rate' else stats.get('success') or stats
+    value = source.get(key)
     return float(value) if isinstance(value, (int, float)) else None
 
 
 def _global_value(summary: DetailedTestSummary, metric: str) -> Optional[float]:
+    if metric != 'error_rate' and summary.success:
+        return _label_value({'success': summary.success}, metric)
     if metric == 'p90':
         value = (summary.percentiles or {}).get('p90')
     else:
@@ -308,6 +321,21 @@ def _global_value(summary: DetailedTestSummary, metric: str) -> Optional[float]:
 def _passes(actual: float, operator: str, expected: float) -> bool:
     return {'lte': actual <= expected, 'lt': actual < expected,
             'gte': actual >= expected, 'gt': actual > expected}[operator]
+
+
+def _load_gaps(profile: Optional[LoadProfile], summary: DetailedTestSummary) -> list[LoadGap]:
+    """A pass only counts at the load the requirements were written for."""
+    load = (summary.diagnostics or {}).get('load') or {}
+    if profile is None or not load:
+        return []
+    measured = {'concurrency': load.get('peak_threads'), 'duration_seconds': load.get('duration_seconds'),
+                'target_tps': (summary.success or {}).get('throughput', summary.throughput)}
+    gaps = []
+    for name, actual in measured.items():
+        expected = getattr(profile, name)
+        if expected and actual is not None and actual < expected * LOAD_TOLERANCE:
+            gaps.append(LoadGap(field=name, expected=expected, actual=actual))
+    return gaps
 
 
 def _worst(values: list[float], operator: str) -> float:
@@ -344,10 +372,11 @@ def evaluate(requirements: Optional[PerformanceRequirements], summary: DetailedT
             source=item.source, source_verified=item.source_verified))
     failed = sum(v.status == 'fail' for v in verdicts)
     missing = sum(v.status == 'missing' for v in verdicts)
+    gaps = _load_gaps(requirements.load_profile, summary)
     return RequirementEvaluation(
-        verdict='fail' if failed else ('incomplete' if missing else 'pass'),
+        verdict='fail' if failed else ('incomplete' if missing or gaps else 'pass'),
         passed=len(verdicts) - failed - missing, failed=failed, missing=missing,
-        items=verdicts, load_profile=requirements.load_profile)
+        items=verdicts, load_profile=requirements.load_profile, load_gaps=gaps)
 
 
 def format_for_prompt(evaluation: RequirementEvaluation) -> str:
@@ -361,5 +390,10 @@ def format_for_prompt(evaluation: RequirementEvaluation) -> str:
         gap = f'，超出 {v.gap_pct}%' if v.gap_pct is not None else ''
         quote = f' 原文：「{v.source}」' if v.source else ''
         lines.append(f'- {v.id} {v.description}：实际 {actual} → {v.status}{gap}.{quote}')
+    names = {'concurrency': '并发', 'duration_seconds': '时长(秒)', 'target_tps': '成功 TPS'}
+    for item in evaluation.load_gaps:
+        lines.append(f'- 负载未达到需求：{names[item.field]} 要求 {item.expected:g}，实际 {item.actual:g}。'
+                     '在这个负载下的达标不能算满足需求。')
+    lines.append('时延和吞吐只按成功样本判定，全部失败时记为 missing。')
     lines.append('分析时必须逐条引用上述需求编号说明达标情况；不达标项要结合事实表与其它证据给出可能原因。')
     return '\n'.join(lines)

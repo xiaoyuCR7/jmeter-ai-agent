@@ -40,7 +40,7 @@ from app.core.config import (
     load_paths_config, save_paths_config
 )
 from app.services.ai.adapters.factory import AIAdapterFactory, HEALTH_CHECK_TIMEOUT_SECONDS
-from app.services.ai.analyzer import TestAnalyzer
+from app.services.ai.analyzer import TestAnalyzer, check_numbers
 from app.services.jmeter.jmx_generator import JMXGenerator
 from app.services.jmeter.executor import get_executor
 from app.services.jmeter.report_parser import ReportParser
@@ -96,6 +96,16 @@ async def _delete_test_plan_from_db(plan_id: str):
     store.delete_test_plan(plan_id)
 
 
+def _fact_check_note(analysis: dict) -> str:
+    check = analysis.get('fact_check') or {}
+    if analysis.get('evidence_status') == 'mismatch':
+        wrong = '；'.join(f"{m['metric']} 写的是 {m['claimed']}，实测 {m['actual']}" for m in check.get('mismatches', []))
+        return f"有数字与实测不符，请以原始指标为准：{wrong}。"
+    if analysis.get('evidence_status') == 'verified':
+        return f"已核对文中 {check.get('checked', 0)} 处指标数字，均与实测相符；解释性内容仍是推测，不等于已验证根因。"
+    return "AI文本尚未逐项事实核验，请结合原始指标；推测不等于已验证根因。"
+
+
 def _save_analysis_markdown(report_dir: str, execution_id: str, analysis) -> str:
     """Save AI analysis as a readable Markdown file in the report directory.
 
@@ -110,7 +120,7 @@ def _save_analysis_markdown(report_dir: str, execution_id: str, analysis) -> str
 **执行ID**: {execution_id}
 **生成时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
-**分析状态**: {ad.get('analysis_status', 'completed')}。AI文本尚未逐项事实核验，请结合原始指标；推测不等于已验证根因。
+**分析状态**: {ad.get('analysis_status', 'completed')}。{_fact_check_note(ad)}
 
 ---
 
@@ -124,17 +134,19 @@ def _save_analysis_markdown(report_dir: str, execution_id: str, analysis) -> str
         for item in ad.get('key_findings', []):
             md += f"- {item}\n"
 
-        md += "\n## 具体问题定位\n\n"
-        for item in ad.get('specific_issues', []):
-            md += f"- {item}\n"
+        if ad.get('specific_issues'):
+            md += "\n## 具体问题定位\n\n"
+            for item in ad['specific_issues']:
+                md += f"- {item}\n"
 
         tl = ad.get('timeline_analysis', '')
         if tl:
             md += f"\n## 性能时间线分析\n\n{tl}\n"
 
-        md += "\n## 资源瓶颈推断\n\n"
-        for item in ad.get('resource_bottlenecks', []):
-            md += f"- {item}\n"
+        if ad.get('resource_bottlenecks'):
+            md += "\n## 资源瓶颈推断\n\n"
+            for item in ad['resource_bottlenecks']:
+                md += f"- {item}\n"
 
         md += "\n## 性能瓶颈点\n\n"
         for item in ad.get('performance_bottlenecks', []):
@@ -638,15 +650,32 @@ async def download_test_plan(plan_id: str):
 # ===== Test Execution =====
 async def _analysis_evidence(execution):
     """The same requirement verdicts, baseline comparison and server metrics the report shows."""
-    from app.services.evidence import build_evidence, format_for_prompt
+    from app.services.evidence import build_evidence, comparison_values, format_for_prompt
     try:
         evidence = await build_evidence(execution, execution.summary)
     except Exception as error:
         logger.warning("Evidence unavailable for analysis of %s: %s", execution.id, error)
-        return "", None
+        return "", None, []
     req = evidence.requirements
     verdict = {"verdict": req.verdict, "passed": req.passed, "failed": req.failed, "missing": req.missing}
-    return format_for_prompt(evidence), verdict
+    return format_for_prompt(evidence), verdict, comparison_values(evidence)
+
+
+async def _record_facts(execution: TestExecutionInfo):
+    """Give later analyses of this plan a measured history, and test the hypotheses waiting for one."""
+    from app.services.ai.memory import fact_ledger, hypothesis_ledger
+    from app.services.ai.memory.provenance import load_execution_scope
+    jtl_path = os.path.join(execution.report_dir or '', 'result.jtl')
+    scope = await load_execution_scope(execution.id)
+    if not scope or not os.path.isfile(jtl_path):
+        return
+    config = (execution.context_snapshot or {}).get('test_config') or {}
+    fact = await asyncio.to_thread(
+        fact_ledger.compute_from_summary, summary=execution.summary, execution_id=execution.id, jtl_path=jtl_path,
+        module=execution.test_plan_id, version='unknown', test_type=config.get('test_type', ''))
+    fact.context_scope = scope
+    if await fact_ledger.save(fact):
+        await hypothesis_ledger.evaluate_module_hypotheses(execution.test_plan_id, execution.id)
 
 
 async def _postprocess_web_execution(execution: TestExecutionInfo, test_config: dict, ai_model=None):
@@ -655,12 +684,12 @@ async def _postprocess_web_execution(execution: TestExecutionInfo, test_config: 
     if execution.status == TestExecutionStatus.COMPLETED and execution.summary:
         try:
             analyzer = TestAnalyzer(model_type=ai_model)  # None: the factory picks the default model
-            evidence_text, verdict = await _analysis_evidence(execution)
+            evidence_text, verdict, comparison_numbers = await _analysis_evidence(execution)
             analysis = await analyzer.analyze(
                 summary_data=execution.summary.model_dump(), test_config=test_config,
                 test_type=test_config.get("test_type", "unknown"), evidence_text=evidence_text)
             analysis.requirements_verdict = verdict
-            execution.ai_analysis = analysis
+            execution.ai_analysis = check_numbers(analysis, execution.summary, execution.id, comparison_numbers)
             _save_analysis_markdown(execution.report_dir, execution.id, execution.ai_analysis)
         except Exception as error:
             logger.warning("AI analysis failed for %s: %s", execution.id, error)
@@ -677,6 +706,10 @@ async def _postprocess_web_execution(execution: TestExecutionInfo, test_config: 
                 version=execution.id, execution_id=execution.id, plan_id=execution.test_plan_id)
         except Exception as error:
             logger.warning("RAG archiving skipped for %s: %s", execution.id, error)
+        try:
+            await _record_facts(execution)
+        except Exception as error:
+            logger.warning("Fact recording skipped for %s: %s", execution.id, error)
 
 
 async def _run_test(execution_id: str, jmx_path: str, test_config: dict, ai_model=None):

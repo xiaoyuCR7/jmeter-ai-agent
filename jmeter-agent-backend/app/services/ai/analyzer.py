@@ -8,7 +8,9 @@ import anthropic
 
 from app.services.ai.adapters.factory import AIAdapterFactory
 from app.services.ai.prompts.test_analyzer import TEST_ANALYZER_SYSTEM_PROMPT, build_analysis_prompt
-from app.models.schemas import ReportAnalysis
+from app.services.ai.memory.fact_ledger import FactLedger
+from app.services.ai.memory.validators import fact_validator
+from app.models.schemas import DetailedTestSummary, ReportAnalysis
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +18,24 @@ logger = logging.getLogger(__name__)
 AI_ANALYSIS_TIMEOUT_SECONDS = 120
 # Maximum retries for transient failures (rate limits, network errors)
 AI_ANALYSIS_MAX_RETRIES = 2
+# Thinking models spend this budget before they write; 4000 left some of them with an empty reply.
+AI_ANALYSIS_MAX_TOKENS = 8000
+
+
+def check_numbers(analysis: ReportAnalysis, summary: DetailedTestSummary, execution_id: str,
+                  extra_values=()) -> ReportAnalysis:
+    """Compare the numbers the model wrote with what the run measured. Only numbers: explanations stay hypotheses."""
+    if analysis.analysis_status != 'completed':
+        return analysis
+    parts = [analysis.overall_assessment, analysis.timeline_analysis, analysis.conclusion]
+    for items in (analysis.key_findings, analysis.specific_issues, analysis.resource_bottlenecks,
+                  analysis.performance_bottlenecks, analysis.error_analysis, analysis.risk_areas):
+        parts += items
+    fact = FactLedger.compute_from_summary(summary, execution_id)
+    result = fact_validator.validate('\n'.join(parts), fact, extra_values)
+    analysis.fact_check = {'checked': len(result.claims), 'mismatches': result.mismatches}
+    analysis.evidence_status = ('mismatch' if result.mismatches else 'verified' if result.claims else 'unverified')
+    return analysis
 
 
 class TestAnalyzer:
@@ -38,7 +58,7 @@ class TestAnalyzer:
         from app.models.schemas import AIChatMessage
         chat_messages = [AIChatMessage(role=m["role"], content=m["content"]) for m in messages]
         try:
-            chat_messages = self.adapter.prepare_chat_messages(chat_messages, response_tokens=4000)
+            chat_messages = self.adapter.prepare_chat_messages(chat_messages, response_tokens=AI_ANALYSIS_MAX_TOKENS)
         except ValueError:
             return ReportAnalysis(analysis_status="failed",
                 overall_assessment="分析输入与输出预留超过上下文预算，未发送模型请求",
@@ -50,12 +70,16 @@ class TestAnalyzer:
         for attempt in range(AI_ANALYSIS_MAX_RETRIES + 1):
             try:
                 response = await asyncio.wait_for(
-                    self.adapter.chat(chat_messages, temperature=0.3, max_tokens=4000, max_retries=0),
+                    self.adapter.chat(chat_messages, temperature=0.3, max_tokens=AI_ANALYSIS_MAX_TOKENS, max_retries=0),
                     timeout=AI_ANALYSIS_TIMEOUT_SECONDS,
                 )
                 try:
                     return self._parse_response(response)
                 except (ValueError, TypeError):
+                    if attempt < AI_ANALYSIS_MAX_RETRIES:
+                        logger.warning("AI analysis attempt %d/%d returned unusable output",
+                                       attempt + 1, AI_ANALYSIS_MAX_RETRIES + 1)
+                        continue
                     return ReportAnalysis(analysis_status="invalid",
                         overall_assessment="AI分析输出未通过结构校验，未采纳为结论",
                         conclusion="AI分析不可用，请参考原始指标数据人工判断",

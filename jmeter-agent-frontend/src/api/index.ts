@@ -95,6 +95,12 @@ export interface RequirementVerdict {
   source_verified: boolean
 }
 
+export interface LoadGap {
+  field: 'concurrency' | 'duration_seconds' | 'target_tps'
+  expected: number
+  actual: number
+}
+
 export interface RequirementEvaluation {
   verdict: 'pass' | 'fail' | 'incomplete' | 'none'
   passed: number
@@ -102,6 +108,7 @@ export interface RequirementEvaluation {
   missing: number
   items: RequirementVerdict[]
   load_profile: LoadProfile | null
+  load_gaps?: LoadGap[]
 }
 
 export interface MetricQuery {
@@ -128,6 +135,8 @@ export interface ServerMetricRow {
   saturation?: number | null
   above_saturation_pct?: number | null
   corr_response_time?: number | null
+  corr_points?: number
+  corr_strong?: boolean
   error?: string
   no_data?: boolean
 }
@@ -149,12 +158,19 @@ export interface ServerMetricsEvidence {
   chart?: { name: string; unit: string; series: string; points: [number, number][] }[]
 }
 
+export interface ComparisonNote {
+  kind: 'load' | 'samples'
+  baseline: number
+  target: number
+}
+
 export interface HistoryComparison {
   name: string
   execution_id?: string | null
   baseline_id?: number
   verdict: 'stable' | 'regression' | 'improvement' | 'mixed' | 'unknown'
   threshold_pct?: number
+  notes?: ComparisonNote[]
   summary: string
   deltas: { metric: string; baseline: number; target: number; delta_pct: number | null; direction: string; is_regression: boolean }[]
   transactions: { label: string; metric: string; metric_title: string; baseline: number; target: number; delta_pct: number | null; is_regression: boolean }[]

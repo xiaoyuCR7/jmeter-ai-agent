@@ -68,13 +68,14 @@ def test_response_time_statistics_match_a_sorted_list_reference():
         assert stats['p99_response_time'] == round(_percentile(own, .99), 2)
 
 
-def test_timeline_segments_aggregate_each_thirty_second_window():
+def test_timeline_segments_aggregate_each_window():
     rows = _samples(5000)
     summary = ReportParser()._parse_csv_jtl(StringIO(_csv(rows)))
     origin = min(row[0] for row in rows)
+    width = int(summary.timeline_segments[0].time_range.split('-')[1].rstrip('s')) * 1000
     windows = {}
     for ts, elapsed, *_rest in rows:
-        windows.setdefault((ts - origin) // 30000, []).append(elapsed)
+        windows.setdefault((ts - origin) // width, []).append(elapsed)
 
     assert [segment.request_count for segment in summary.timeline_segments] == [
         len(windows[index]) for index in sorted(windows)]
