@@ -288,8 +288,6 @@ const messages: Translations = {
   'createPlan.runNow': { 'zh-CN': '立即执行', en: 'Run Now' },
   'createPlan.backToList': { 'zh-CN': '返回列表', en: 'Back to List' },
   'createPlan.generate': { 'zh-CN': '生成测试计划', en: 'Generate Test Plan' },
-  'createPlan.unsupportedSteps': { 'zh-CN': '基础生成器尚不支持该阶梯模板。请使用经验证的 JMX；阶段间隔与总升压时间的规则需先确定。', en: 'The basic generator does not support this stepped template. Use a validated JMX; stage intervals and total ramp timing must be defined first.' },
-  'createPlan.unsupportedSpike': { 'zh-CN': '基础生成器尚不支持突增负载模板。请使用经验证的 JMX；峰值、保持与恢复阶段需先确定。', en: 'The basic generator does not support spike profiles. Use a validated JMX; peak, hold and recovery stages must be defined first.' },
   'createPlan.message.success': { 'zh-CN': '测试计划生成成功', en: 'Test plan generated successfully' },
   'createPlan.message.failed': { 'zh-CN': '生成失败', en: 'Generation failed' },
   'createPlan.message.runStarted': { 'zh-CN': '测试已开始执行', en: 'Test execution started' },

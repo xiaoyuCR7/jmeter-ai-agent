@@ -182,11 +182,18 @@ export interface HistoryEvidence {
   is_baseline?: boolean
 }
 
+export interface PlanIssue {
+  severity: 'error' | 'warning'
+  code: string
+  message: string
+}
+
 export interface ExecutionEvidence {
   execution_id: string
   project_id: string
   test_plan_id: string | null
   requirements: RequirementEvaluation
+  plan_issues?: PlanIssue[]
   baseline: HistoryEvidence | null
   server_metrics: ServerMetricsEvidence | null
 }

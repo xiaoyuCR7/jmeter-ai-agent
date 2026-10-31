@@ -171,7 +171,7 @@ def fact():
 @pytest.mark.parametrize('text', [
     'P95、P99 分别为 500ms 和 900ms', '登录接口 P99 为 3000ms，整体 P99 为 900ms', '错误率较上次上升 50%',
     'P99 比基线恶化了 30%', '吞吐量下降 20%', '服务端 CPU 峰值 92%，TPS 为 100', 'P99 约为 P50 的 3 倍', 'P95 ≤ 800 ms',
-    'P99 是平均值的 3 倍', '平均响应时间 300 ms',
+    'P99 是平均值的 3 倍', '平均响应时间 300 ms', '错误率 5-10 s 为 72%', 'P95 3~5 秒之间',
 ])
 def test_honest_sentences_are_not_flagged(text):
     assert FactValidator().validate(text, fact()).mismatches == []

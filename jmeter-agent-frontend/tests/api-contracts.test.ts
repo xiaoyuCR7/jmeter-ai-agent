@@ -44,28 +44,14 @@ it('CSV preview maps the response columns and row arrays to table objects', asyn
   expect(context.csvPreviewData.value).toEqual([{ name: 'Alice', age: '3' }])
 })
 
-it.each(['spike', 'ramp_up'])('unsupported %s template is blocked before any generation call', async kind => {
-  const source = readFileSync(new URL('../src/views/CreateTestPlan.vue', import.meta.url), 'utf8').match(/<script setup lang="ts">([\s\S]*?)<\/script>/)![1]
-  const context = { api: { generateTestPlan: vi.fn().mockResolvedValue({ data: { id: 'wrong' } }) },
-    form: { value: { test_config: { test_type: kind, step_users: 10, step_duration: 60 }, endpoints: [] } },
-    computed: (fn: () => any) => ({ get value() { return fn() } }),
-    unsupportedLoadReason: { value: 'Unsupported template' },
-    generating: { value: false }, generatedPlan: { value: null }, projectId: { value: null },
-    buildEndpointPayload: (v: any) => v, ElMessage: { warning: vi.fn(), error: vi.fn(), success: vi.fn() }, t: (s: string) => s }
-  await selected(source, ['unsupportedLoadReason', 'generatePlan'], context).generatePlan()
-  expect(context.api.generateTestPlan).not.toHaveBeenCalled()
-  expect(context.ElMessage.warning).toHaveBeenCalledOnce()
-  expect(context.generatedPlan.value).toBe(null)
-})
-
-it.each(['baseline', 'concurrency', 'stress', 'stability', 'custom'])('ordinary %s defaults retain the RPS request', async kind => {
+it.each(['baseline', 'concurrency', 'stress', 'stability', 'custom', 'spike', 'ramp_up'])('ordinary %s defaults retain the RPS request', async kind => {
   const source = readFileSync(new URL('../src/views/CreateTestPlan.vue', import.meta.url), 'utf8').match(/<script setup lang="ts">([\s\S]*?)<\/script>/)![1]
   const config = { test_type: kind, target_rps: 100, step_users: 10, step_duration: 60, duration_seconds: 300 }
   const context = { api: { generateTestPlan: vi.fn().mockResolvedValue({ data: { id: 'generated' } }) },
     form: { value: { test_config: config, endpoints: [] } }, computed: (fn: () => any) => ({ get value() { return fn() } }),
     generating: { value: false }, generatedPlan: { value: null }, projectId: { value: null },
     buildEndpointPayload: (v: any) => v, ElMessage: { warning: vi.fn(), error: vi.fn(), success: vi.fn() }, t: (s: string) => s }
-  await selected(source, ['unsupportedLoadReason', 'generatePlan'], context).generatePlan()
+  await selected(source, ['generatePlan'], context).generatePlan()
   expect(context.api.generateTestPlan).toHaveBeenCalledWith(expect.objectContaining({ test_config: config }))
   expect(context.generatedPlan.value).toEqual({ id: 'generated' })
   expect(context.ElMessage.error).not.toHaveBeenCalled()

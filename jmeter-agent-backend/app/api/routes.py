@@ -41,6 +41,7 @@ from app.core.config import (
 )
 from app.services.ai.adapters.factory import AIAdapterFactory, HEALTH_CHECK_TIMEOUT_SECONDS
 from app.services.ai.analyzer import TestAnalyzer, check_numbers
+from app.services.jmeter import jmx_lint
 from app.services.jmeter.jmx_generator import JMXGenerator
 from app.services.jmeter.executor import get_executor
 from app.services.jmeter.report_parser import ReportParser
@@ -498,6 +499,12 @@ async def generate_test_plan(request: GenerateTestPlanRequest, project_id: str =
                 test_config=request.test_config,
                 base_url=base_url
             )
+
+        # Nothing is saved until the plan can actually run.
+        failures = jmx_lint.errors(jmx_lint.lint(jmx_content))
+        loaded = await asyncio.to_thread(jmx_lint.load_check, jmx_content) if not failures else None
+        if failures or (loaded and loaded['checked'] and not loaded['ok']):
+            raise HTTPException(status_code=422, detail=jmx_lint.describe(failures) or f"JMeter 无法加载：{loaded['error']}")
 
         # Save JMX under project directory
         plan_id = str(uuid.uuid4())[:8]

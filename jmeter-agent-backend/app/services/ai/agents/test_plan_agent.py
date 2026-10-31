@@ -6,23 +6,26 @@ from app.services.ai.adapters.base import BaseAIAdapter
 from app.services.ai.agent.base import BaseAgent
 from app.services.ai.agent.tool_registry import ToolRegistry
 from app.services.ai.agent.tools import get_all_builtin_tools
+from app.services.ai.prompts.jmx_generator import SCENARIO_RULES
 
 
-TEST_PLAN_SYSTEM_PROMPT = """JMeter test plan generator agent. Extract APIs from docs, detect dependencies, generate .jmx files.
+TEST_PLAN_SYSTEM_PROMPT = f"""JMeter test plan generator agent. Extract APIs from docs, detect dependencies, generate .jmx files.
+
+{SCENARIO_RULES}
 
 ## Dependency detection rules
-- login/auth/token/signin endpoints → extract token via JSON Extractor (ref_name: auth_token)
-- Subsequent requests must use Authorization: Bearer ${auth_token}
 - Extract types: json_path ($.data.token), regex ("token":"([^"]+)"), header (Set-Cookie)
 - Order endpoints: no-dependency first, dependent later
 
-## Test type params
-- baseline: 5-10 users, 10-30min | concurrency: 100-1000 users, 5min
-- ramp_up: step 20-50 users, 10min+ | stress: 1000+ users, 2-5min
-- stability: 50-200 users, 1hr+ | spike: 2000+ users, 1-2min
+## Test types
+The load comes from the user's words or documents. If they give none, stay small; never pick a large load yourself.
+- baseline: one steady level | concurrency: many users at once
+- ramp_up: rising steps, set step_users and step_duration | stress: rises in five steps to concurrent_users
+- stability: long steady run, set stability_hours | spike: background load, then a sudden burst
 
 ## Workflow
 Understand requirements → analyze deps → create_jmx → validate_jmx → fix if needed → report.
+create_jmx refuses a plan with errors and saves nothing: read the issues, fix the arguments, call it again.
 Report: jmx path, config summary, endpoint list with deps, extraction rules, next steps."""
 
 

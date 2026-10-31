@@ -1,16 +1,88 @@
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
+import hashlib
+import json
+import math
 import os
+import re
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional
 from urllib.parse import urlsplit, urlunsplit, urlencode
 
 from app.core.config import settings
-from app.models.schemas import APIEndpoint, TestConfig, TestType, ExtractionType
-from app.services.ai.adapters.factory import AIAdapterFactory
-from app.services.ai.prompts.jmx_generator import JMX_GENERATOR_SYSTEM_PROMPT, build_jmx_generation_prompt
+from pydantic import BaseModel, Field
 
+from app.models.schemas import APIEndpoint, CsvDataFile, TestConfig, TestType, ExtractionType
+from app.services.ai.adapters.factory import AIAdapterFactory
+from app.services.ai.prompts.jmx_generator import SCENARIO_SYSTEM_PROMPT, build_scenario_prompt
+
+
+
+# Models that think spend this budget before they answer.
+SCENARIO_MAX_TOKENS = 8000
+SCENARIO_ATTEMPTS = 3
+
+# Steps of a stress test: a rising load shows where the system starts to give way.
+STRESS_STEPS = 5
+SPIKE_BASE_SHARE = 10  # One user in ten stays on as background load.
+
+
+@dataclass(frozen=True)
+class LoadGroup:
+    name: str
+    users: int
+    ramp_seconds: int
+    delay_seconds: int
+    duration_seconds: int
+
+
+def _steps(prefix: str, users: int, step_users: int, step_seconds: int) -> list[LoadGroup]:
+    """Each step is a thread group starting later and ending with the others, which needs no plugin."""
+    count = max(math.ceil(users / max(step_users, 1)), 1)
+    total = count * step_seconds
+    return [LoadGroup(f"{prefix} step {index + 1}", min(step_users, users - index * step_users),
+                      max(step_seconds // 6, 1), index * step_seconds, total - index * step_seconds)
+            for index in range(count)]
+
+
+def load_shape(config: TestConfig) -> list[LoadGroup]:
+    """How the test type turns users and time into thread groups."""
+    users = config.concurrent_users or 1
+    ramp = config.ramp_up_seconds or 0
+    duration = config.duration_seconds or 0
+    kind = config.test_type
+    if kind == TestType.RAMP_UP:
+        return _steps("RAMP_UP", users, config.step_users or 10, config.step_duration or 60)
+    if kind == TestType.STRESS and duration:
+        steps = min(STRESS_STEPS, users)
+        return _steps("STRESS", users, math.ceil(users / steps), max(duration // steps, 1))
+    if kind == TestType.SPIKE and duration:
+        base = max(users // SPIKE_BASE_SHARE, 1)
+        groups = [LoadGroup("SPIKE base", base, min(ramp, duration // 6), 0, duration)]
+        if users > base:
+            groups.append(LoadGroup("SPIKE burst", users - base, min(ramp, max(duration // 12, 1)), duration // 3,
+                                    max(duration // 3, 1)))
+        return groups
+    if kind == TestType.STABILITY and config.stability_hours:
+        duration = math.ceil(config.stability_hours * 3600)
+    return [LoadGroup(f"{kind.value.upper()} Test", users, ramp, 0, duration)]
+
+
+class Scenario(BaseModel):
+    """What the model decides; everything about JMX syntax stays in this module."""
+    base_url: Optional[str] = None
+    endpoints: List[APIEndpoint] = Field(..., min_length=1)
+    csv_data_files: Optional[List[CsvDataFile]] = None
+
+
+def _parse_scenario(response: str) -> Scenario:
+    text = (response or "").strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("The reply has no JSON object")
+    return Scenario.model_validate(json.loads(text[start:end + 1]))
 
 
 class JMXGenerator:
@@ -19,51 +91,45 @@ class JMXGenerator:
     def __init__(self, model_type: Optional[str] = None):
         self.model_type = model_type
     
-    async def generate_from_ai(self, api_doc: str, endpoints: List[APIEndpoint], 
+    async def generate_from_ai(self, api_doc: str, endpoints: List[APIEndpoint],
                                test_config: TestConfig, base_url: Optional[str] = None) -> str:
-        """使用AI生成JMX内容"""
-        adapter = AIAdapterFactory.create(self.model_type)
-        
-        prompt = build_jmx_generation_prompt(
-            api_doc=api_doc,
-            endpoints=[ep.model_dump() for ep in endpoints] if endpoints else None,
-            test_config=test_config.model_dump(),
-            base_url=base_url
-        )
-        
+        """让模型设计场景，再由生成器写出 JMX；校验不通过时把问题交还模型修改"""
         from app.models.schemas import AIChatMessage
+        from app.services.jmeter import jmx_lint
+        adapter = AIAdapterFactory.create(self.model_type)
         messages = [
-            AIChatMessage(role="system", content=JMX_GENERATOR_SYSTEM_PROMPT),
-            AIChatMessage(role="user", content=prompt)
+            AIChatMessage(role="system", content=SCENARIO_SYSTEM_PROMPT),
+            AIChatMessage(role="user", content=build_scenario_prompt(
+                api_doc, [ep.model_dump() for ep in endpoints] if endpoints else None,
+                test_config.model_dump(), base_url), pinned=True),
         ]
-        
-        messages = adapter.prepare_chat_messages(messages, response_tokens=12000)
-        response = await adapter.chat(messages, temperature=0.2, max_tokens=12000)
-        
-        # Clean up response - extract XML only
-        xml_content = response.strip()
-        if xml_content.startswith("```xml"):
-            xml_content = xml_content[6:]
-        if xml_content.startswith("```"):
-            xml_content = xml_content[3:]
-        if xml_content.endswith("```"):
-            xml_content = xml_content[:-3]
-        xml_content = xml_content.strip()
-        
-        return xml_content
-    
+        problem = ""
+        for _ in range(SCENARIO_ATTEMPTS):
+            prepared = adapter.prepare_chat_messages(messages, response_tokens=SCENARIO_MAX_TOKENS)
+            response = await adapter.chat(prepared, temperature=0.1, max_tokens=SCENARIO_MAX_TOKENS)
+            try:
+                scenario = _parse_scenario(response)
+                target = base_url or scenario.base_url
+                if not target:
+                    raise ValueError("The document gives no base_url")
+                config = test_config
+                if scenario.csv_data_files:
+                    config = test_config.model_copy(update={"csv_data_files": scenario.csv_data_files})
+                jmx = self.generate_basic_jmx(scenario.endpoints, config, target,
+                                              f"{test_config.test_type.value}_test")
+                failures = jmx_lint.errors(jmx_lint.lint(jmx))
+                if not failures:
+                    return jmx
+                problem = jmx_lint.describe(failures)
+            except ValueError as error:  # pydantic's ValidationError is a ValueError
+                problem = str(error)[:1500]
+            messages.append(AIChatMessage(role="assistant", content=(response or "")[:4000]))
+            messages.append(AIChatMessage(role="user", content=f"这个场景不能使用：{problem}\n修正后重新输出完整 JSON。"))
+        raise ValueError(f"AI could not produce a valid plan: {problem}")
+
     def generate_basic_jmx(self, endpoints: List[APIEndpoint], test_config: TestConfig,
                           base_url: str, test_name: str = "Test Plan") -> str:
         """生成基础JMX（无需AI）"""
-        unsupported = []
-        if test_config.test_type == TestType.SPIKE:
-            unsupported.append("spike profile")
-        if test_config.test_type == TestType.RAMP_UP:
-            for name in ("step_users", "step_duration"):
-                if name in test_config.model_fields_set and getattr(test_config, name) not in (None, 0):
-                    unsupported.append(name)
-        if unsupported:
-            raise ValueError("Unsupported by the basic JMX generator: " + ", ".join(unsupported))
         if test_config.target_rps is not None and test_config.target_rps < 0:
             raise ValueError("target_rps must be non-negative")
         base = self._split_base_url(base_url)
@@ -71,17 +137,17 @@ class JMXGenerator:
         root.set("version", "1.2")
         root.set("properties", "5.0")
         root.set("jmeter", "5.6.3")
-        
+
         hash_tree = ET.SubElement(root, "hashTree")
         test_plan = self._create_test_plan(hash_tree, test_name)
         test_plan_hash = ET.SubElement(hash_tree, "hashTree")
-        
-        # Create Thread Group
-        thread_group = self._create_thread_group(test_plan_hash, test_config)
-        tg_hash = ET.SubElement(test_plan_hash, "hashTree")
 
+        ordered_endpoints = self._topological_sort(endpoints)
+        keeps_session = any(endpoint.phase == "once_per_user" for endpoint in endpoints)
+
+        # Configuration lives on the plan, so every thread group of a load shape shares it.
         if test_config.target_rps:
-            timer = ET.SubElement(tg_hash, "ConstantThroughputTimer", {
+            timer = ET.SubElement(test_plan_hash, "ConstantThroughputTimer", {
                 "guiclass": "TestBeanGUI", "testclass": "ConstantThroughputTimer",
                 "testname": "Target RPS (all active threads, shared)", "enabled": "true"})
             # JMeter's persisted mode is the enum ordinal, not the UI label.
@@ -90,120 +156,123 @@ class JMXGenerator:
             ET.SubElement(throughput, "name").text = "throughput"
             ET.SubElement(throughput, "value").text = str(float(test_config.target_rps * 60))
             ET.SubElement(throughput, "savedValue").text = "0.0"
-            ET.SubElement(tg_hash, "hashTree")
-        
-        # Add HTTP Defaults
-        self._create_http_defaults(tg_hash, base_url)
-        ET.SubElement(tg_hash, "hashTree")
-        
-        # Add Header Manager (global default) — only common headers shared by ALL endpoints
-        # to avoid incorrectly applying the first endpoint's headers to every request.
+            ET.SubElement(test_plan_hash, "hashTree")
+
+        self._create_http_defaults(test_plan_hash, base_url, test_config)
+        ET.SubElement(test_plan_hash, "hashTree")
+
+        # Only common headers shared by ALL endpoints, so one endpoint's headers never reach the others.
         global_headers = self._compute_common_headers(endpoints)
         if global_headers:
-            self._create_header_manager(tg_hash, global_headers)
-            ET.SubElement(tg_hash, "hashTree")
+            self._create_header_manager(test_plan_hash, global_headers)
+            ET.SubElement(test_plan_hash, "hashTree")
 
-        # Add Cookie Manager
-        self._create_cookie_manager(tg_hash)
-        ET.SubElement(tg_hash, "hashTree")
+        # A session from a once-per-user login has to survive into later iterations.
+        self._create_cookie_manager(test_plan_hash, clear_each_iteration=not keeps_session)
+        ET.SubElement(test_plan_hash, "hashTree")
 
-        # Add Cache Manager
-        self._create_cache_manager(tg_hash)
-        ET.SubElement(tg_hash, "hashTree")
+        self._create_cache_manager(test_plan_hash)
+        ET.SubElement(test_plan_hash, "hashTree")
 
-        # Sort endpoints by dependency order
-        ordered_endpoints = self._topological_sort(endpoints)
+        for csv_file in test_config.csv_data_files or []:
+            self._create_csv_dataset(
+                test_plan_hash, filename=self._csv_path(csv_file), variable_names=",".join(csv_file.variables),
+                delimiter=csv_file.delimiter, recycle=csv_file.recycle, stop_thread=csv_file.stop_thread,
+                sharing_mode=csv_file.sharing)
+            ET.SubElement(test_plan_hash, "hashTree")
 
-        # Auto-detect authentication endpoints and add AuthManager if needed
-        has_auth = self._detect_auth_flow(endpoints)
-        if has_auth:
-            self._create_auth_manager(tg_hash, auth_type=has_auth)
-            ET.SubElement(tg_hash, "hashTree")
-
-        # Add CSV DataSet if test_config specifies data files
-        csv_files = getattr(test_config, 'csv_data_files', None)
-        if csv_files:
-            for csv_cfg in csv_files:
-                self._create_csv_dataset(
-                    tg_hash,
-                    filename=csv_cfg.get("filename", "data.csv"),
-                    variable_names=csv_cfg.get("variables", ""),
-                    delimiter=csv_cfg.get("delimiter", ","),
-                    recycle=csv_cfg.get("recycle", True),
-                    stop_thread=csv_cfg.get("stop_thread", False),
-                    sharing_mode=csv_cfg.get("sharing", "all"),
-                )
-                ET.SubElement(tg_hash, "hashTree")
-
-        # Think time config
-        think_time = test_config.think_time_ms or 0
-
-        # Add HTTP Requests for each endpoint
-        for endpoint in ordered_endpoints:
-            # Apply variable bindings from upstream extractions
-            resolved_endpoint = self._resolve_bindings(endpoint)
-            endpoint_url = urlsplit(resolved_endpoint.path)
-            if not endpoint_url.scheme and not endpoint_url.netloc:
-                path = base.path.rstrip("/") + "/" + endpoint_url.path.lstrip("/")
-                query = "&".join(value for value in (base.query, endpoint_url.query) if value)
-                resolved_endpoint.path = urlunsplit(("", "", path, query, ""))
-
-            self._create_http_request(tg_hash, resolved_endpoint)
-            req_hash = ET.SubElement(tg_hash, "hashTree")
-
-            # Per-endpoint header manager (with resolved variables)
-            per_endpoint_headers = self._resolve_header_bindings(endpoint)
-            if resolved_endpoint.content_type and not any(
-                    name.lower() == "content-type" for name in per_endpoint_headers):
-                per_endpoint_headers["Content-Type"] = resolved_endpoint.content_type
-            if per_endpoint_headers:
-                self._create_header_manager(req_hash, per_endpoint_headers)
-                ET.SubElement(req_hash, "hashTree")
-
-            # Add Response Assertion
-            self._create_response_assertion(req_hash, resolved_endpoint.expected_status or 200)
-            ET.SubElement(req_hash, "hashTree")
-
-            # Add Post-Processors for variable extraction
-            for extraction in (endpoint.extractions or []):
-                if extraction.extract_type == "json_path":
-                    self._create_json_extractor(req_hash, extraction)
-                elif extraction.extract_type == "regex":
-                    self._create_regex_extractor(req_hash, extraction)
-                elif extraction.extract_type == "boundary":
-                    self._create_boundary_extractor(req_hash, extraction)
-                elif extraction.extract_type == "xpath":
-                    self._create_xpath_extractor(req_hash, extraction)
-                elif extraction.extract_type == "header":
-                    self._create_header_extractor(req_hash, extraction)
-                ET.SubElement(req_hash, "hashTree")
-
-            # Add think time timer after each request (if configured)
-            if think_time > 0:
-                self._create_constant_timer(req_hash, think_time)
-                ET.SubElement(req_hash, "hashTree")
+        setup = [endpoint for endpoint in ordered_endpoints if endpoint.phase == "setup"]
+        flow = [endpoint for endpoint in ordered_endpoints if endpoint.phase != "setup"]
+        if setup:
+            self._create_thread_group(test_plan_hash, LoadGroup("Setup", 1, 0, 0, 0), test_config, element="SetupThreadGroup")
+            self._add_flow(ET.SubElement(test_plan_hash, "hashTree"), setup, base, 0)
+        for group in load_shape(test_config):
+            self._create_thread_group(test_plan_hash, group, test_config)
+            self._add_flow(ET.SubElement(test_plan_hash, "hashTree"), flow, base, test_config.think_time_ms or 0)
 
         return self._finalize_jmx(root, test_plan_hash)
 
-    def _detect_auth_flow(self, endpoints) -> Optional[str]:
-        """Auto-detect authentication pattern from endpoint analysis.
+    def _add_flow(self, parent: ET.Element, endpoints: list, base, think_time: int):
+        """Add the requests one thread group runs, each inside the controllers its role needs."""
+        shared, shared_weight = None, None
+        for endpoint in endpoints:
+            target = parent
+            if endpoint.phase == "once_per_user":
+                target = self._create_once_only_controller(target, endpoint.name)
+            if endpoint.weight and endpoint.weight < 100:
+                # Adjacent requests of one weight are one branch: a purchase funnel runs whole or not at all.
+                if endpoint.weight != shared_weight or target is not parent:
+                    shared = self._create_throughput_controller(target, endpoint.name, endpoint.weight)
+                    shared_weight = endpoint.weight
+                target = shared
+            else:
+                shared_weight = None
+            self._add_endpoint(target, endpoint, base, think_time)
 
-        Returns None if no auth, or auth_type string ('bearer', 'basic', etc.).
-        """
-        auth_keywords = ["login", "auth", "token", "signin", "oauth", "authenticate"]
-        for ep in endpoints:
-            path_lower = (ep.path or "").lower()
-            name_lower = (ep.name or "").lower()
-            if any(kw in path_lower or kw in name_lower for kw in auth_keywords):
-                return "bearer"
-        # Check if any header bindings suggest auth
-        for ep in endpoints:
-            for b in (ep.bindings or []):
-                if b.target_location == "header" and (
-                    "auth" in b.target_key.lower() or "token" in b.variable_name.lower()
-                ):
-                    return "bearer"
-        return None
+    def _add_endpoint(self, parent: ET.Element, endpoint, base, think_time: int):
+        # Variable bindings from upstream extractions; a copy, since a load shape adds it many times.
+        resolved_endpoint = self._resolve_bindings(endpoint)
+        endpoint_url = urlsplit(resolved_endpoint.path)
+        if not endpoint_url.scheme and not endpoint_url.netloc:
+            path = base.path.rstrip("/") + "/" + endpoint_url.path.lstrip("/")
+            query = "&".join(value for value in (base.query, endpoint_url.query) if value)
+            resolved_endpoint.path = urlunsplit(("", "", path, query, ""))
+
+        self._create_http_request(parent, resolved_endpoint)
+        req_hash = ET.SubElement(parent, "hashTree")
+
+        # Per-endpoint header manager (with resolved variables)
+        per_endpoint_headers = self._resolve_header_bindings(endpoint)
+        if resolved_endpoint.content_type and not any(
+                name.lower() == "content-type" for name in per_endpoint_headers):
+            per_endpoint_headers["Content-Type"] = resolved_endpoint.content_type
+        if per_endpoint_headers:
+            self._create_header_manager(req_hash, per_endpoint_headers)
+            ET.SubElement(req_hash, "hashTree")
+
+        self._create_response_assertion(req_hash, resolved_endpoint.expected_status or 200)
+        ET.SubElement(req_hash, "hashTree")
+
+        for check in (endpoint.response_checks or []):
+            self._create_json_assertion(req_hash, check)
+            ET.SubElement(req_hash, "hashTree")
+
+        # Add Post-Processors for variable extraction
+        for extraction in (endpoint.extractions or []):
+            if extraction.extract_type == "json_path":
+                self._create_json_extractor(req_hash, extraction)
+            elif extraction.extract_type == "regex":
+                self._create_regex_extractor(req_hash, extraction)
+            elif extraction.extract_type == "boundary":
+                self._create_boundary_extractor(req_hash, extraction)
+            elif extraction.extract_type == "xpath":
+                self._create_xpath_extractor(req_hash, extraction)
+            elif extraction.extract_type == "header":
+                self._create_header_extractor(req_hash, extraction)
+            ET.SubElement(req_hash, "hashTree")
+
+        # Add think time timer after each request (if configured)
+        if think_time > 0:
+            self._create_constant_timer(req_hash, think_time)
+            ET.SubElement(req_hash, "hashTree")
+
+    @staticmethod
+    def _csv_path(csv_file) -> str:
+        """Where JMeter reads the file: rows are stored by content, so identical data shares one file."""
+        from app.core.config import safe_path
+        data_dir = os.path.join(settings.BASE_DIR, "test_data")
+        if csv_file.rows:
+            content = "\n".join(csv_file.delimiter.join(row) for row in csv_file.rows) + "\n"
+            name = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16] + ".csv"
+            path = os.path.join(data_dir, name)
+            os.makedirs(data_dir, exist_ok=True)
+            with open(path, "w", encoding="utf-8", newline="") as stream:
+                stream.write(content)
+            return path
+        path = safe_path(os.path.join(data_dir, csv_file.filename or ""), [data_dir])
+        if not csv_file.filename or not os.path.isfile(path):
+            raise ValueError(f"Test data file not found in test_data: {csv_file.filename}")
+        return path
 
     def _finalize_jmx(self, root: ET.Element, test_plan_hash: ET.Element) -> str:
         """Add listeners and serialize the JMX XML tree to a pretty-printed string."""
@@ -253,58 +322,61 @@ class JMXGenerator:
         
         return elem
     
-    def _create_thread_group(self, parent: ET.Element, config: TestConfig) -> ET.Element:
-        elem = ET.SubElement(parent, "ThreadGroup")
-        elem.set("guiclass", "ThreadGroupGui")
-        elem.set("testclass", "ThreadGroup")
-        elem.set("testname", f"{config.test_type.value.upper()} Test")
+    def _create_thread_group(self, parent: ET.Element, group: "LoadGroup", config: TestConfig,
+                             element: str = "ThreadGroup") -> ET.Element:
+        elem = ET.SubElement(parent, element)
+        elem.set("guiclass", f"{element}Gui")
+        elem.set("testclass", element)
+        elem.set("testname", group.name)
         elem.set("enabled", "true")
-        
+
         string_prop = ET.SubElement(elem, "stringProp")
         string_prop.set("name", "ThreadGroup.on_sample_error")
         string_prop.text = "continue"
-        
-        element = ET.SubElement(elem, "elementProp")
-        element.set("name", "ThreadGroup.main_controller")
-        element.set("elementType", "LoopController")
-        element.set("guiclass", "LoopControlPanel")
-        element.set("testclass", "LoopController")
-        element.set("testname", "Loop Controller")
-        element.set("enabled", "true")
-        
-        bool_prop = ET.SubElement(element, "boolProp")
+
+        controller = ET.SubElement(elem, "elementProp")
+        controller.set("name", "ThreadGroup.main_controller")
+        controller.set("elementType", "LoopController")
+        controller.set("guiclass", "LoopControlPanel")
+        controller.set("testclass", "LoopController")
+        controller.set("testname", "Loop Controller")
+        controller.set("enabled", "true")
+
+        bool_prop = ET.SubElement(controller, "boolProp")
         bool_prop.set("name", "LoopController.continue_forever")
         bool_prop.text = "false"
-        
-        int_prop = ET.SubElement(element, "intProp")
+
+        int_prop = ET.SubElement(controller, "intProp")
         int_prop.set("name", "LoopController.loops")
-        if config.iterations:
+        if element == "SetupThreadGroup":
+            int_prop.text = "1"
+        elif config.iterations:
             int_prop.text = str(config.iterations)
         else:
             int_prop.text = "-1"  # Forever, controlled by duration
-        
+
         string_prop2 = ET.SubElement(elem, "stringProp")
         string_prop2.set("name", "ThreadGroup.num_threads")
-        string_prop2.text = str(config.concurrent_users)
-        
+        string_prop2.text = str(group.users)
+
         string_prop3 = ET.SubElement(elem, "stringProp")
         string_prop3.set("name", "ThreadGroup.ramp_time")
-        string_prop3.text = str(config.ramp_up_seconds)
-        
+        string_prop3.text = str(group.ramp_seconds)
+
         bool_prop2 = ET.SubElement(elem, "boolProp")
         bool_prop2.set("name", "ThreadGroup.scheduler")
-        bool_prop2.text = "true" if config.duration_seconds else "false"
-        
+        bool_prop2.text = "true" if group.duration_seconds else "false"
+
         string_prop4 = ET.SubElement(elem, "stringProp")
         string_prop4.set("name", "ThreadGroup.duration")
-        string_prop4.text = str(config.duration_seconds or 0)
-        
+        string_prop4.text = str(group.duration_seconds)
+
         string_prop5 = ET.SubElement(elem, "stringProp")
         string_prop5.set("name", "ThreadGroup.delay")
-        string_prop5.text = "0"
-        
+        string_prop5.text = str(group.delay_seconds)
+
         return elem
-    
+
     @staticmethod
     def _split_base_url(base_url: str):
         parsed = urlsplit(base_url if "://" in base_url else "https://" + base_url)
@@ -316,7 +388,7 @@ class JMXGenerator:
         parsed.port
         return parsed
 
-    def _create_http_defaults(self, parent: ET.Element, base_url: str):
+    def _create_http_defaults(self, parent: ET.Element, base_url: str, config: TestConfig):
         elem = ET.SubElement(parent, "ConfigTestElement")
         elem.set("guiclass", "HttpDefaultsGui")
         elem.set("testclass", "ConfigTestElement")
@@ -334,8 +406,9 @@ class JMXGenerator:
             ("HTTPSampler.path", ""),
             ("HTTPSampler.contentEncoding", ""),
             ("HTTPSampler.concurrentPool", "6"),
-            ("HTTPSampler.connect_timeout", ""),
-            ("HTTPSampler.response_timeout", ""),
+            # Without limits a stalled server holds its threads and the run never reaches its load.
+            ("HTTPSampler.connect_timeout", str(config.connect_timeout_ms or "")),
+            ("HTTPSampler.response_timeout", str(config.response_timeout_ms or "")),
         ]
         for name, value in props:
             sp = ET.SubElement(elem, "stringProp")
@@ -373,7 +446,7 @@ class JMXGenerator:
             sp2.set("name", "Header.value")
             sp2.text = str(value)
     
-    def _create_cookie_manager(self, parent: ET.Element):
+    def _create_cookie_manager(self, parent: ET.Element, clear_each_iteration: bool = True):
         elem = ET.SubElement(parent, "CookieManager")
         elem.set("guiclass", "CookiePanel")
         elem.set("testclass", "CookieManager")
@@ -385,7 +458,7 @@ class JMXGenerator:
         
         bool_prop = ET.SubElement(elem, "boolProp")
         bool_prop.set("name", "CookieManager.clearEachIteration")
-        bool_prop.text = "true"
+        bool_prop.text = "true" if clear_each_iteration else "false"
     
     def _create_cache_manager(self, parent: ET.Element):
         elem = ET.SubElement(parent, "CacheManager")
@@ -445,8 +518,12 @@ class JMXGenerator:
         collection.set("name", "Arguments.arguments")
 
         if endpoint.body is not None:
-            import json
-            body_str = endpoint.body if isinstance(endpoint.body, str) else json.dumps(endpoint.body, ensure_ascii=False)
+            if isinstance(endpoint.body, str):
+                body_str = endpoint.body
+            elif isinstance(endpoint.body, dict) and "x-www-form-urlencoded" in (endpoint.content_type or ""):
+                body_str = urlencode(endpoint.body, doseq=True, safe="${}()")
+            else:
+                body_str = json.dumps(endpoint.body, ensure_ascii=False)
             bool_prop = ET.SubElement(elem, "boolProp")
             bool_prop.set("name", "HTTPSampler.postBodyRaw")
             bool_prop.text = "true"
@@ -490,10 +567,10 @@ class JMXGenerator:
         elem.set("testname", "Response Assertion")
         elem.set("enabled", "true")
         
+        # "Asserion" is JMeter's own spelling. Any other name loads fine and asserts nothing.
         collection = ET.SubElement(elem, "collectionProp")
-        collection.set("name", "Assertion.test_strings")
-        
-        # JMeter ResponseAssertion requires the expected strings in this collection.
+        collection.set("name", "Asserion.test_strings")
+
         string_prop = ET.SubElement(collection, "stringProp")
         string_prop.set("name", str(expected_status))
         string_prop.text = str(expected_status)
@@ -503,8 +580,9 @@ class JMXGenerator:
         sp.text = "Assertion.response_code"
         
         bool_prop = ET.SubElement(elem, "boolProp")
+        # The expected status decides on its own, so an expected 404 can pass.
         bool_prop.set("name", "Assertion.assume_success")
-        bool_prop.text = "false"
+        bool_prop.text = "true"
         
         int_prop = ET.SubElement(elem, "intProp")
         int_prop.set("name", "Assertion.test_type")
@@ -513,6 +591,45 @@ class JMXGenerator:
         string_prop = ET.SubElement(elem, "stringProp")
         string_prop.set("name", "Assertion.custom_message")
         string_prop.text = f"Expected status {expected_status}"
+
+    def _create_json_assertion(self, parent: ET.Element, check):
+        """Check the business result in the body: an HTTP 200 can still carry a failure."""
+        elem = ET.SubElement(parent, "JSONPathAssertion")
+        elem.set("guiclass", "JSONPathAssertionGui")
+        elem.set("testclass", "JSONPathAssertion")
+        elem.set("testname", f"Check: {check.json_path}")
+        elem.set("enabled", "true")
+
+        for name, value in (("JSON_PATH", check.json_path), ("EXPECTED_VALUE", check.expected or "")):
+            ET.SubElement(elem, "stringProp", name=name).text = value
+        for name, value in (("JSONVALIDATION", check.expected is not None), ("EXPECT_NULL", False),
+                            ("INVERT", False), ("ISREGEX", False)):
+            ET.SubElement(elem, "boolProp", name=name).text = "true" if value else "false"
+
+    # ── Controllers ─────────────────────────────────────────
+
+    def _create_once_only_controller(self, parent: ET.Element, name: str) -> ET.Element:
+        elem = ET.SubElement(parent, "OnceOnlyController")
+        elem.set("guiclass", "OnceOnlyControllerGui")
+        elem.set("testclass", "OnceOnlyController")
+        elem.set("testname", f"Once: {name}")
+        elem.set("enabled", "true")
+        return ET.SubElement(parent, "hashTree")
+
+    def _create_throughput_controller(self, parent: ET.Element, name: str, percent: int) -> ET.Element:
+        elem = ET.SubElement(parent, "ThroughputController")
+        elem.set("guiclass", "ThroughputControllerGui")
+        elem.set("testclass", "ThroughputController")
+        elem.set("testname", f"{percent}%: {name}")
+        elem.set("enabled", "true")
+        ET.SubElement(elem, "intProp", name="ThroughputController.style").text = "1"  # Percent executions
+        ET.SubElement(elem, "boolProp", name="ThroughputController.perThread").text = "false"
+        ET.SubElement(elem, "intProp", name="ThroughputController.maxThroughput").text = "1"
+        share = ET.SubElement(elem, "FloatProperty")
+        ET.SubElement(share, "name").text = "ThroughputController.percentThroughput"
+        ET.SubElement(share, "value").text = str(float(percent))
+        ET.SubElement(share, "savedValue").text = "0.0"
+        return ET.SubElement(parent, "hashTree")
 
     # ── Request Correlation: Extractors ─────────────────────
 
@@ -722,12 +839,10 @@ class JMXGenerator:
         are already in the correct format. This method ensures binding
         values use proper template format.
         """
+        # Always a copy: the caller rewrites the path, and a load shape adds an endpoint many times.
+        resolved = endpoint.model_copy(deep=True)
         if not endpoint.bindings:
-            return endpoint
-
-        # Build a mutable copy
-        import copy
-        resolved = copy.deepcopy(endpoint)
+            return resolved
 
         for binding in endpoint.bindings:
             var_name = binding.variable_name
@@ -752,13 +867,16 @@ class JMXGenerator:
                 if resolved.body is None:
                     resolved.body = {}
                 if key:
+                    if not isinstance(resolved.body, dict):
+                        raise ValueError(f"{endpoint.name}: body field binding needs a JSON object body")
                     resolved.body[key] = var_ref
                 else:
                     # Replace entire body with template
                     resolved.body = var_ref
             elif target == "path":
-                # Replace placeholder in path, e.g. /users/{id} → /users/${id}
-                resolved.path = resolved.path.replace(f"{{{key}}}", var_ref)
+                # Replace placeholder in path, e.g. /users/{id} → /users/${id}. A path that already
+                # says ${id} is done; replacing inside it would leave a stray $ in the URL.
+                resolved.path = re.sub(r"(?<!\$)\{" + re.escape(key) + r"\}", lambda _: var_ref, resolved.path)
             elif target == "url":
                 # Template replaces the entire URL construction
                 pass  # handled by the template itself in headers
@@ -891,63 +1009,6 @@ class JMXGenerator:
 
         tc_hash = ET.SubElement(parent, "hashTree")
         return tc_hash
-
-    # ── Auth Manager ────────────────────────────────────────
-
-    def _create_auth_manager(self, parent: ET.Element, auth_type: str = "bearer",
-                             username: str = "", password: str = "",
-                             token_var: str = "${auth_token}"):
-        """Generate an HTTP Authorization Manager.
-
-        Args:
-            auth_type: bearer / basic / digest / kerberos
-            token_var: Variable reference for bearer token
-        """
-        elem = ET.SubElement(parent, "AuthManager")
-        elem.set("guiclass", "AuthPanel")
-        elem.set("testclass", "AuthManager")
-        elem.set("testname", f"Auth Manager ({auth_type})")
-        elem.set("enabled", "true")
-
-        # Auth mechanism
-        sp_mech = ET.SubElement(elem, "stringProp")
-        sp_mech.set("name", "AuthManager.mechanism")
-        mech_map = {"bearer": "BEARER", "basic": "BASIC", "digest": "DIGEST", "kerberos": "KERBEROS"}
-        sp_mech.text = mech_map.get(auth_type, "BEARER")
-
-        # Auth entries collection
-        collection = ET.SubElement(elem, "collectionProp")
-        collection.set("name", "AuthManager.auth_list")
-
-        entry = ET.SubElement(collection, "elementProp")
-        entry.set("name", "")
-        entry.set("elementType", "Authorization")
-
-        sp_url = ET.SubElement(entry, "stringProp")
-        sp_url.set("name", "Authorization.url")
-        sp_url.text = ""  # Empty = apply to all URLs
-
-        sp_user = ET.SubElement(entry, "stringProp")
-        sp_user.set("name", "Authorization.username")
-        sp_user.text = username
-
-        sp_pass = ET.SubElement(entry, "stringProp")
-        sp_pass.set("name", "Authorization.password")
-        sp_pass.text = password
-
-        sp_domain = ET.SubElement(entry, "stringProp")
-        sp_domain.set("name", "Authorization.domain")
-        sp_domain.text = ""
-
-        sp_realm = ET.SubElement(entry, "stringProp")
-        sp_realm.set("name", "Authorization.realm")
-        sp_realm.text = ""
-
-        if auth_type == "bearer":
-            # JMeter AuthManager does not natively support bearer tokens.
-            # Inject the token via a global HeaderManager so all samplers carry it.
-            self._create_header_manager(parent, {"Authorization": f"Bearer {token_var}"})
-            return
 
     # ── JDBC Sampler ────────────────────────────────────────
 

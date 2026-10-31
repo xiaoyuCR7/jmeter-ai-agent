@@ -23,15 +23,16 @@ async def test_ai_jmx_request_reserves_output_before_model(monkeypatch):
     from app.services.ai.adapters.factory import AIAdapterFactory
     adapter = object.__new__(DeepSeekAdapter)
     adapter.max_tokens = 8000
-    adapter.chat = AsyncMock(return_value='<jmeterTestPlan/>')
+    adapter.chat = AsyncMock(return_value='{"base_url":"https://example.invalid","endpoints":[{"name":"a","method":"GET","path":"/a"}]}')
     monkeypatch.setattr(AIAdapterFactory, 'create', lambda *args: adapter)
-    monkeypatch.setattr(settings, 'AGENT_CONTEXT_TOKEN_BUDGET', 12000)
+    monkeypatch.setattr(settings, 'AGENT_CONTEXT_TOKEN_BUDGET', 8000)
     with pytest.raises(ValueError, match='context budget'):
         await JMXGenerator().generate_from_ai('GET /fixture', [], LoadConfig(test_type='baseline'))
     adapter.chat.assert_not_awaited()
     monkeypatch.setattr(settings, 'AGENT_CONTEXT_TOKEN_BUDGET', 32000)
-    assert await JMXGenerator().generate_from_ai('GET /fixture', [], LoadConfig(test_type='baseline')) == '<jmeterTestPlan/>'
-    assert adapter.chat.call_args.kwargs['max_tokens'] == 12000
+    plan = await JMXGenerator().generate_from_ai('GET /fixture', [], LoadConfig(test_type='baseline'))
+    assert ET.fromstring(plan).find('.//HTTPSamplerProxy').get('testname') == 'a'
+    assert adapter.chat.call_args.kwargs['max_tokens'] == 8000
 
 
 @pytest.mark.parametrize('base,protocol,host,port', [
@@ -97,16 +98,7 @@ async def test_agent_endpoint_constructor_keeps_expected_status(monkeypatch, tmp
     assert ET.fromstring(saved[0]).find('.//ResponseAssertion/collectionProp/stringProp').text == '204'
 
 
-@pytest.mark.parametrize('values', [
-    {'test_type': 'spike'}, {'test_type': 'ramp_up', 'step_duration': 10},
-    {'test_type': 'ramp_up', 'step_users': 10},
-])
-def test_unsupported_load_controls_are_explicit(values):
-    with pytest.raises(ValueError, match='[Uu]nsupported'):
-        JMXGenerator().generate_basic_jmx([], LoadConfig(**values), 'https://example.invalid')
-
-
-@pytest.mark.parametrize('kind', ['baseline', 'concurrency', 'stress', 'stability', 'custom'])
+@pytest.mark.parametrize('kind', ['baseline', 'concurrency', 'stability', 'custom'])
 def test_explicit_rate_generates_one_shared_rps_timer_without_losing_duration(kind):
     config = LoadConfig(**LoadConfig(test_type=kind, target_rps=100).model_dump())
     root = ET.fromstring(JMXGenerator().generate_basic_jmx(
@@ -164,12 +156,6 @@ def test_standard_double_property_keeps_throughput_on_editor_roundtrip():
     rebuilt = parse_jmx(build_jmx(node))
     assert float(rebuilt['children'][0]['properties']['throughput']) == 6000
     assert int(rebuilt['children'][0]['properties']['calcMode']) == 3
-
-
-def test_linear_ramp_up_remains_supported_without_step_request():
-    root = ET.fromstring(JMXGenerator().generate_basic_jmx([], LoadConfig(
-        test_type='ramp_up', concurrent_users=20, ramp_up_seconds=40), 'https://example.invalid'))
-    assert root.find('.//ThreadGroup/stringProp[@name="ThreadGroup.ramp_time"]').text == '40'
 
 
 def test_absolute_endpoint_does_not_gain_base_prefix_and_keeps_query():

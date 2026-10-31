@@ -25,6 +25,13 @@ os.environ.update({
 import pytest  # noqa: E402
 
 from app.core import config, local_access  # noqa: E402  (must follow the environment above)
+from app.services.jmeter import jmx_lint  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_jmeter_start(monkeypatch):
+    """A load check starts JMeter; test_generated_plans_jmeter.py is where that happens on purpose."""
+    monkeypatch.setattr(jmx_lint, 'load_check', lambda content: {'checked': False, 'ok': None, 'error': None})
 
 # A user's paths_config.json would otherwise override the plan and report folders.
 config.PATHS_CONFIG_FILE = str(_DATA / 'paths_config.json')

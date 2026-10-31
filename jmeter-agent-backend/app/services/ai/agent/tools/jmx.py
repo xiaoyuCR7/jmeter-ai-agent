@@ -1,17 +1,23 @@
 """Agent tools for JMX test plan file management."""
 
+import asyncio
 import os
 import json
 from typing import Optional
 
 from app.core.config import settings
 from app.services.ai.agent.tool_registry import Tool
+from app.services.jmeter import jmx_lint
 from app.services.jmeter.jmx_generator import JMXGenerator
 from app.services.jmeter.jmx_parser import parse_jmx, strip_source
 from app.services.jmeter.jmx_builder import build_jmx
 from app.models.schemas import (
-    APIEndpoint, TestConfig, ExtractionRule, VariableBinding, ExtractionType
+    APIEndpoint, CsvDataFile, ResponseCheck, TestConfig, ExtractionRule, VariableBinding, ExtractionType
 )
+
+# A closed loop with no pause measures how fast the threads spin, not how users behave.
+# Load-limit tests want exactly that spin; the rest default to a user's pace.
+DEFAULT_THINK_TIME_MS = {'baseline': 1000, 'ramp_up': 1000, 'stability': 1000, 'custom': 1000}
 
 
 async def create_jmx(
@@ -23,6 +29,12 @@ async def create_jmx(
     duration_seconds: int = 300,
     ramp_up_seconds: int = 30,
     project_id: Optional[str] = None,
+    think_time_ms: Optional[int] = None,
+    target_rps: Optional[int] = None,
+    step_users: Optional[int] = None,
+    step_duration: Optional[int] = None,
+    stability_hours: Optional[float] = None,
+    csv_data_files: Optional[list[dict]] = None,
 ) -> dict:
     """Generate a JMeter .jmx test plan from endpoint definitions.
 
@@ -35,6 +47,12 @@ async def create_jmx(
         duration_seconds: Test duration in seconds.
         ramp_up_seconds: Ramp-up time in seconds.
         project_id: Optional project ID for organizing files.
+        think_time_ms: Pause between requests; defaults to a user's pace except for load-limit tests.
+        target_rps: Cap the total request rate.
+        step_users: Users added per step of a ramp_up test.
+        step_duration: Seconds per step of a ramp_up test.
+        stability_hours: Length of a stability test.
+        csv_data_files: Per-user data, as [{"variables": [...], "rows": [[...]]}].
     """
     # Build APIEndpoint objects
     from app.services.execution_lifecycle import validate_id
@@ -75,6 +93,9 @@ async def create_jmx(
             body=ep_data.get("body"),
             content_type=ep_data.get("content_type", "application/json"),
             expected_status=ep_data.get("expected_status", 200),
+            response_checks=[ResponseCheck(**check) for check in ep_data.get("response_checks") or []],
+            phase=ep_data.get("phase", "iteration"),
+            weight=ep_data.get("weight"),
             extractions=extractions,
             bindings=bindings,
             depends_on=ep_data.get("depends_on", []),
@@ -86,6 +107,12 @@ async def create_jmx(
         concurrent_users=concurrent_users,
         duration_seconds=duration_seconds,
         ramp_up_seconds=ramp_up_seconds,
+        think_time_ms=DEFAULT_THINK_TIME_MS.get(test_type, 0) if think_time_ms is None else think_time_ms,
+        target_rps=target_rps,
+        stability_hours=stability_hours,
+        csv_data_files=[CsvDataFile(**item) for item in csv_data_files or []] or None,
+        **{key: value for key, value in (('step_users', step_users), ('step_duration', step_duration))
+           if value is not None},
     )
 
     generator = JMXGenerator()
@@ -95,6 +122,14 @@ async def create_jmx(
         base_url=base_url,
         test_name=test_name,
     )
+    issues = jmx_lint.lint(jmx_content)
+    failures = jmx_lint.errors(issues)
+    loaded = await asyncio.to_thread(jmx_lint.load_check, jmx_content) if not failures else None
+    if loaded and loaded['checked'] and not loaded['ok']:
+        failures = [{'severity': 'error', 'code': 'jmeter_load', 'message': f"JMeter 无法加载：{loaded['error']}"}]
+    if failures:
+        # Nothing is saved: an agent fixes its arguments and calls again.
+        return {"error": "The plan was not created: " + jmx_lint.describe(failures), "issues": failures}
 
     import uuid
     plan_id = uuid.uuid4().hex
@@ -114,6 +149,7 @@ async def create_jmx(
         "concurrent_users": concurrent_users,
         "duration_seconds": duration_seconds,
         "base_url": base_url,
+        "warnings": [issue['message'] for issue in issues],
         "message": f"JMX test plan created at {jmx_path}",
     }
 
@@ -208,39 +244,17 @@ async def validate_jmx(jmx_path: str) -> dict:
         return {"valid": False, "error": f"File not found: {jmx_path}"}
 
     try:
-        tree = parse_jmx(jmx_path)
-        # Check for basic structure
-        issues = []
-        if not isinstance(tree, dict):
-            issues.append("Root element is not a valid test plan object")
-
-        # Check for ThreadGroup
-        has_thread_group = False
-        has_http_sampler = False
-
-        def check_node(node):
-            nonlocal has_thread_group, has_http_sampler
-            if isinstance(node, dict):
-                tc = node.get("testclass", "")
-                if "ThreadGroup" in tc:
-                    has_thread_group = True
-                if "HTTPSampler" in tc:
-                    has_http_sampler = True
-                for child in node.get("children", []):
-                    check_node(child)
-
-        check_node(tree)
-
-        if not has_thread_group:
-            issues.append("Missing ThreadGroup element")
-        if not has_http_sampler:
-            issues.append("Missing HTTP Sampler (no HTTP requests defined)")
-
+        with open(jmx_path, "r", encoding="utf-8") as stream:
+            content = stream.read()
+        issues = jmx_lint.lint(content)
+        failures = jmx_lint.errors(issues)
+        # A plan with its problems found already needs no JMeter start to confirm them.
+        loaded = await asyncio.to_thread(jmx_lint.load_check, content) if not failures else None
         return {
-            "valid": len(issues) == 0,
-            "issues": issues,
-            "has_thread_group": has_thread_group,
-            "has_http_sampler": has_http_sampler,
+            "valid": not failures and (loaded is None or loaded['ok'] is not False),
+            "issues": [issue['message'] for issue in failures],
+            "warnings": [issue['message'] for issue in issues if issue['severity'] == 'warning'],
+            "jmeter_load": loaded,
         }
     except Exception as e:
         return {"valid": False, "error": str(e)}
@@ -480,8 +494,22 @@ jmx_tools = [
                             "path": {"type": "string", "description": "URL path, e.g. /api/users"},
                             "headers": {"type": "object", "description": "Request headers"},
                             "query_params": {"type": "object", "description": "Query parameters"},
-                            "body": {"type": "object", "description": "Request body (JSON)"},
-                            "content_type": {"type": "string", "description": "Content-Type header"},
+                            "body": {"type": ["object", "array", "string"], "description": "Request body: JSON object or array, an object for form posts, or a raw string"},
+                            "content_type": {"type": "string", "description": "Content-Type header. Use application/x-www-form-urlencoded for form posts"},
+                            "expected_status": {"type": "integer", "description": "HTTP status this request must return, as documented: often 201 for create, 204 for delete. Default 200"},
+                            "response_checks": {
+                                "type": "array", "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "json_path": {"type": "string", "description": "JSON Path, e.g. $.code"},
+                                        "expected": {"type": "string", "description": "Expected value. Omit it to require only that the field exists; do not write *"},
+                                    },
+                                    "required": ["json_path"],
+                                },
+                                "description": "Business results to check in the response body; an HTTP 200 can still be a failure",
+                            },
+                            "phase": {"type": "string", "enum": ["iteration", "once_per_user", "setup"], "description": "iteration: every loop (default). once_per_user: login. setup: once before the load, for shared preparation; its variables do not reach other requests"},
+                            "weight": {"type": "integer", "description": "Percent of iterations that run this request, for traffic mixes. Adjacent requests with the same weight are one branch and run or skip together, so give every later step of a funnel the same weight"},
                             "depends_on": {
                                 "type": "array", "items": {"type": "string"},
                                 "description": "Names of upstream endpoints this one depends on (e.g., ['Login'])"
@@ -507,7 +535,7 @@ jmx_tools = [
                                 "type": "array", "items": {
                                     "type": "object",
                                     "properties": {
-                                        "variable_name": {"type": "string", "description": "Variable to inject (must match an extraction ref_name from upstream)"},
+                                        "variable_name": {"type": "string", "description": "Variable to inject (must match an extraction ref_name from upstream). For a path variable, write /orders/{id} in path and bind target_location path, target_key id"},
                                         "target_location": {"type": "string", "enum": ["header", "path", "query", "body", "url"], "description": "Where to inject the variable"},
                                         "target_key": {"type": "string", "description": "Key name: header name, query param name, body field name, or URL path placeholder"},
                                         "template": {"type": "string", "description": "Custom template. Default: ${variable_name}. Example: 'Bearer ${auth_token}'"},
@@ -527,6 +555,23 @@ jmx_tools = [
                 "duration_seconds": {"type": "integer", "description": "Test duration in seconds (default 300)"},
                 "ramp_up_seconds": {"type": "integer", "description": "Ramp-up time in seconds (default 30)"},
                 "project_id": {"type": "string", "description": "Optional project ID for organizing files"},
+                "think_time_ms": {"type": "integer", "description": "Pause between requests. Default 1000 for baseline, ramp_up, stability and custom; 0 for concurrency, stress and spike"},
+                "target_rps": {"type": "integer", "description": "Cap on total requests per second"},
+                "step_users": {"type": "integer", "description": "ramp_up: users added per step"},
+                "step_duration": {"type": "integer", "description": "ramp_up: seconds per step"},
+                "stability_hours": {"type": "number", "description": "stability: test length in hours"},
+                "csv_data_files": {
+                    "type": "array", "items": {
+                        "type": "object",
+                        "properties": {
+                            "variables": {"type": "array", "items": {"type": "string"}, "description": "Column variable names"},
+                            "rows": {"type": "array", "items": {"type": "array", "items": {"type": "string"}}, "description": "Data rows from the document"},
+                            "filename": {"type": "string", "description": "Existing file in test_data, instead of rows"},
+                        },
+                        "required": ["variables"],
+                    },
+                    "description": "Per-user data such as several accounts. Reference columns as ${name}",
+                },
             },
             "required": ["test_name", "endpoints", "base_url"],
         },
@@ -568,7 +613,7 @@ jmx_tools = [
     ),
     Tool(
         name="validate_jmx",
-        description="Validate a JMX file structure — checks for required elements (ThreadGroup, HTTP Sampler) and reports issues.",
+        description="Check a JMX file: broken structure, assertions that check nothing, unresolved variables and paths, and whether JMeter can load it.",
         parameters={
             "type": "object",
             "properties": {

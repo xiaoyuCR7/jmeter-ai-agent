@@ -23,9 +23,8 @@
           <div class="template-desc">{{ getTemplateDesc(template.id) || template.description }}</div>
         </el-card>
       </div>
-      <el-alert v-if="unsupportedLoadReason" :title="unsupportedLoadReason" type="warning" show-icon :closable="false" />
       <div class="step-actions">
-        <el-button type="primary" @click="nextStep" :disabled="!selectedTemplate || !!unsupportedLoadReason">{{ t('createPlan.next') }}</el-button>
+        <el-button type="primary" @click="nextStep" :disabled="!selectedTemplate">{{ t('createPlan.next') }}</el-button>
       </div>
     </div>
 
@@ -257,7 +256,7 @@
 
       <div v-else class="step-actions">
         <el-button @click="prevStep">{{ t('createPlan.prev') }}</el-button>
-        <el-button type="primary" @click="generatePlan" :loading="generating" :disabled="!!unsupportedLoadReason">{{ t('createPlan.generate') }}</el-button>
+        <el-button type="primary" @click="generatePlan" :loading="generating">{{ t('createPlan.generate') }}</el-button>
       </div>
     </div>
   </div>
@@ -310,13 +309,6 @@ const loadTemplates = async () => {
   const res = await api.getTemplates()
   templates.value = res.data
 }
-
-const unsupportedLoadReason = computed(() => {
-  const config = form.value.test_config
-  if (config.test_type === 'spike') return t('createPlan.unsupportedSpike')
-  if (config.test_type === 'ramp_up' && (config.step_users || config.step_duration)) return t('createPlan.unsupportedSteps')
-  return ''
-})
 
 const loadModels = async () => {
   try {
@@ -428,10 +420,6 @@ const prevStep = () => {
 }
 
 const generatePlan = async () => {
-  if (unsupportedLoadReason.value) {
-    ElMessage.warning(unsupportedLoadReason.value)
-    return
-  }
   generating.value = true
   try {
     const payload = {

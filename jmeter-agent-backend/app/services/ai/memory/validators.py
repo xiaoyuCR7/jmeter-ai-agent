@@ -22,9 +22,10 @@ ABSOLUTE_TOLERANCE_MS = 50  # 50ms absolute for response times
 # Only these may stand between a metric and its value. "P99 恶化了 30%" or "P95、P99 分别为" are
 # not statements of the metric's value, and an open gap would read them as if they were.
 _GAP = r"(?:\s|[:：=≈（(]|响应时间|耗时|延迟|实测|实际|整体|总体|约为|大约|大概|约|为|是|达到|高达|达|仅)*"
-_TIME = _GAP + r"(\d+(?:\.\d+)?)\s*(ms|毫秒|s|秒)?(?!\s*(?:[%％倍]|\d|\.\d))"
-_RATE = _GAP + r"(\d+(?:\.\d+)?)\s*(req/s|rps|tps|请求/秒)?(?!\s*(?:[%％倍]|\d|\.\d))"
-_PERCENT = _GAP + r"(\d+(?:\.\d+)?)\s*(%|％|percent)?(?!\s*(?:倍|\d|\.\d))"
+# A number followed by a range mark is a time span ("错误率 5-10 s 为 72%"), not the metric's value.
+_TIME = _GAP + r"(\d+(?:\.\d+)?)\s*(ms|毫秒|s|秒)?(?!\s*(?:[%％倍\-–—~至到]|\d|\.\d))"
+_RATE = _GAP + r"(\d+(?:\.\d+)?)\s*(req/s|rps|tps|请求/秒)?(?!\s*(?:[%％倍\-–—~至到]|\d|\.\d))"
+_PERCENT = _GAP + r"(\d+(?:\.\d+)?)\s*(%|％|percent)?(?!\s*(?:[倍\-–—~至到]|\d|\.\d))"
 
 
 class MetricClaimExtractor:

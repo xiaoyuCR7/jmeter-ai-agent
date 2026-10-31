@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, model_validator, field_validator
 from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 from enum import Enum
@@ -64,6 +64,18 @@ class VariableBinding(BaseModel):
     template: Optional[str] = Field(None, description="自定义模板")
 
 
+class ResponseCheck(BaseModel):
+    """A business result the response must show, beyond its HTTP status."""
+    json_path: str = Field(..., min_length=1, description="JSON Path，如 $.code")
+    expected: Optional[str] = Field(None, description="期望值；不填则只要求该字段存在")
+
+    @field_validator('expected', mode='before')
+    @classmethod
+    def _wildcard_means_exists(cls, value):
+        # Models write "*" for "any value", which JSON assertions compare literally and always fail.
+        return None if value in ('*', '') else (str(value) if isinstance(value, (int, float, bool)) else value)
+
+
 class APIEndpoint(BaseModel):
     name: str = Field(..., description="接口名称")
     method: str = Field(..., description="HTTP方法")
@@ -71,9 +83,13 @@ class APIEndpoint(BaseModel):
     description: Optional[str] = Field(None, description="接口描述")
     headers: Optional[Dict[str, str]] = Field(default_factory=dict)
     query_params: Optional[Dict[str, Any]] = Field(default_factory=dict)
-    body: Optional[Dict[str, Any]] = None
+    body: Optional[Any] = Field(None, description="请求体：JSON 对象或数组，表单接口用对象，也可以是原始字符串")
     content_type: Optional[str] = "application/json"
     expected_status: Optional[int] = 200
+    response_checks: Optional[List[ResponseCheck]] = Field(default_factory=list, description="响应体业务断言")
+    phase: Literal["iteration", "once_per_user", "setup"] = Field(
+        "iteration", description="iteration 每轮执行；once_per_user 每个用户一次（登录）；setup 压测开始前执行一次（准备数据）")
+    weight: Optional[int] = Field(None, ge=1, le=100, description="占迭代的百分比，不填表示每轮都执行")
     extractions: Optional[List[ExtractionRule]] = Field(default_factory=list, description="从此接口响应中提取的变量")
     bindings: Optional[List[VariableBinding]] = Field(default_factory=list, description="注入到本请求的变量绑定")
     depends_on: Optional[List[str]] = Field(default_factory=list, description="本接口依赖的其他接口名称列表")
@@ -173,6 +189,17 @@ class UpdateEnvironmentRequest(BaseModel):
     headers: Optional[Dict[str, str]] = Field(None, description="全局请求头")
 
 
+class CsvDataFile(BaseModel):
+    """Per-user test data: an existing file in test_data, or rows to store there."""
+    filename: Optional[str] = Field(None, description="test_data 目录下的文件名")
+    variables: List[str] = Field(..., min_length=1, description="列对应的变量名")
+    rows: Optional[List[List[str]]] = Field(None, description="直接提供的数据行")
+    delimiter: str = ","
+    recycle: bool = True
+    stop_thread: bool = False
+    sharing: Literal["all", "current_thread", "current_thread_group"] = "all"
+
+
 class TestConfig(BaseModel):
     test_type: TestType = Field(..., description="测试类型")
     # No default rate: a throughput timer the user never asked for silently caps the load.
@@ -182,11 +209,14 @@ class TestConfig(BaseModel):
     duration_seconds: Optional[int] = Field(300, description="测试持续时间(秒)")
     iterations: Optional[int] = Field(None, description="迭代次数(与duration二选一)")
     think_time_ms: Optional[int] = Field(0, description="思考时间(ms)")
+    connect_timeout_ms: Optional[int] = Field(5000, description="连接超时(ms)")
+    response_timeout_ms: Optional[int] = Field(30000, description="响应超时(ms)")
+    csv_data_files: Optional[List[CsvDataFile]] = Field(None, description="参数化数据文件")
     # 阶梯测试专用
     step_users: Optional[int] = Field(10, description="每阶梯增加用户数")
     step_duration: Optional[int] = Field(60, description="每阶梯持续时间(秒)")
     # 稳定性测试专用
-    stability_hours: Optional[float] = Field(1.0, description="稳定性测试小时数")
+    stability_hours: Optional[float] = Field(None, description="稳定性测试小时数；填写后覆盖持续时间")
 
 
 class GenerateTestPlanRequest(BaseModel):
@@ -245,7 +275,6 @@ class ErrorDetail(BaseModel):
     percentage: float = Field(..., description="占总请求百分比")
     sample_messages: List[str] = Field(default_factory=list, description="错误示例消息")
     labels: Dict[str, int] = Field(default_factory=dict, description="出现该错误最多的接口及次数")
-    labels: Dict[str, int] = Field(default_factory=dict, description="出现该错误最多的接口及次数")
 
 
 class TimelineSegment(BaseModel):
@@ -255,9 +284,6 @@ class TimelineSegment(BaseModel):
     throughput: float = Field(..., description="该时间段吞吐量(req/s)")
     error_rate: float = Field(..., description="该时间段错误率(%)")
     request_count: int = Field(..., description="该时间段请求数")
-    active_threads: Optional[int] = Field(None, description="该时间段内的最大活跃线程数")
-    avg_connect_time: Optional[float] = Field(None, description="该时间段平均建连耗时(ms)")
-    avg_latency: Optional[float] = Field(None, description="该时间段平均首字节耗时(ms)")
     active_threads: Optional[int] = Field(None, description="该时间段内的最大活跃线程数")
     avg_connect_time: Optional[float] = Field(None, description="该时间段平均建连耗时(ms)")
     avg_latency: Optional[float] = Field(None, description="该时间段平均首字节耗时(ms)")

@@ -7,6 +7,7 @@ from app.services.ai.agent.base import BaseAgent
 from app.services.ai.agent.types import AgentEvent
 from app.services.ai.agent.tool_registry import ToolRegistry
 from app.services.ai.agent.tools import get_all_builtin_tools
+from app.services.ai.prompts.jmx_generator import SCENARIO_RULES
 
 # The start-from-document route drafts requirements itself after the workflow, every time.
 # Left to the model, the draft was sometimes saved, sometimes skipped.
@@ -14,7 +15,9 @@ REQUIREMENT_TOOLS = {'extract_performance_requirements', 'save_performance_requi
                      'get_performance_requirements'}
 
 
-WORKFLOW_SYSTEM_PROMPT = """JMeter performance test workflow orchestrator. End-to-end: API doc → project → test plans → execute → analyze.
+WORKFLOW_SYSTEM_PROMPT = f"""JMeter performance test workflow orchestrator. End-to-end: API doc → project → test plans → execute → analyze.
+
+{SCENARIO_RULES}
 
 ## Steps
 1. Extract from API doc: project name, base URL, endpoints
@@ -26,8 +29,10 @@ WORKFLOW_SYSTEM_PROMPT = """JMeter performance test workflow orchestrator. End-t
 6. parse_jtl_report (optional)
 
 ## Test type mapping
-Baseline→low concurrency(5-10), Concurrency→high(100-1000), Ramp-up→stepped, Stress→extreme, Stability→long-run.
-Default: baseline + concurrency if no type specified.
+Baseline→one steady level, Concurrency→many users at once, Ramp-up→rising steps, Stress→five rising steps, Stability→long run, Spike→sudden burst.
+The load comes from the user's words or documents. If they give none, stay small; never pick a large load yourself.
+Default: baseline if no type specified.
+create_jmx refuses a plan with errors and saves nothing: read the issues, fix the arguments, call it again.
 
 Report progress and results after each step."""
 
@@ -74,7 +79,7 @@ class WorkflowAgent(BaseAgent):
         execute: bool = False,
     ) -> str:
         """Build the same complete task for regular and streaming entry points."""
-        types_str = ", ".join(test_types) if test_types else "基准测试(baseline) + 高并发测试(concurrency)"
+        types_str = ", ".join(test_types) if test_types else "基准测试(baseline)"
 
         execute_instructions = ""
         if execute:

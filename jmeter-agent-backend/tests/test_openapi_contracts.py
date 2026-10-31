@@ -328,7 +328,7 @@ async def test_import_preserves_request_and_registers_plan_and_project(imported)
     sampler = root.find('.//HTTPSamplerProxy')
     assert sampler.find("stringProp[@name='HTTPSampler.path']").text == '/v1/users/a%20b?page=2'
     assert sampler.find(".//stringProp[@name='Argument.value']").text == '{"name": "Alice"}'
-    assert root.find(".//collectionProp[@name='Assertion.test_strings']/stringProp").text == '201'
+    assert root.find(".//collectionProp[@name='Asserion.test_strings']/stringProp").text == '201'
     assert 'Bearer ${auth_token}' in ET.tostring(root, encoding='unicode')
     assert any('auth_token' in warning for warning in result.warnings)
 

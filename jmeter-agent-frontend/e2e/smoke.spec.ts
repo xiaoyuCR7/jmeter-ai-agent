@@ -109,7 +109,7 @@ test('report states what was checked and what cannot be judged', async ({ page }
     ...report,
     summary: { ...report.summary, error_details: [{ error_type: '200: no order id', count: 3, percentage: 1,
       sample_messages: ['no order id'], labels: { Checkout: 3 } }] },
-    evidence: { ...evidence,
+    evidence: { ...evidence, plan_issues: [{ severity: 'error', code: 'dead_assertion', message: '断言无效' }],
       requirements: { ...evidence.requirements, verdict: 'incomplete',
         load_gaps: [{ field: 'concurrency', expected: 100, actual: 10 }] },
       baseline: { previous: null, baseline: { ...evidence.baseline.baseline, verdict: 'unknown',
@@ -120,6 +120,7 @@ test('report states what was checked and what cannot be judged', async ({ page }
 
   await page.goto('/executions/run1')
   await expect(page.getByText('Below the required load, so this is not a pass')).toBeVisible()
+  await expect(page.getByText('An assertion checks nothing, so failed requests may count as successes.')).toBeVisible()
   await expect(page.getByText('Concurrency: required 100, reached 10')).toBeVisible()
   await expect(page.getByText(/The runs used different load \(peak threads 100 → 10\)/)).toBeVisible()
   await page.getByRole('tab', { name: 'Errors 1' }).click()

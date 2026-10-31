@@ -1,5 +1,9 @@
 <template>
   <div class="evidence-panel">
+    <el-alert v-if="planErrors.length" type="error" :closable="false" show-icon
+      :title="L('这次运行使用的测试计划有问题，结果可能不可信', 'The test plan used for this run has problems, so the results may mislead')">
+      <ul class="plan-issues"><li v-for="(text, i) in planErrors" :key="i">{{ text }}</li></ul>
+    </el-alert>
     <section class="panel">
     <div class="section-header">
       <h4>{{ L('性能需求达标', 'Requirements') }}</h4>
@@ -201,6 +205,10 @@ const noteText = (note: ComparisonNote) => note.kind === 'load'
   ? L(`两次负载不同（峰值线程 ${note.baseline} → ${note.target}），不判定退化。`, `The runs used different load (peak threads ${note.baseline} → ${note.target}), so no regression is judged.`)
   : L(`样本量偏小（${note.baseline} → ${note.target}），差异可能只是波动。`, `Few samples (${note.baseline} → ${note.target}); the difference may be noise.`)
 
+const planErrors = computed(() => (props.evidence?.plan_issues ?? []).filter(issue => issue.severity === 'error').map(issue => ({
+  dead_assertion: L('有断言不起作用，失败的请求可能被算成成功。重新生成计划可以修复。', 'An assertion checks nothing, so failed requests may count as successes. Regenerating the plan fixes this.'),
+} as Record<string, string>)[issue.code] ?? issue.message))
+
 const history = computed(() => props.evidence?.baseline ?? null)
 const comparisons = computed(() => [
   ...(history.value?.baseline ? [{ kind: 'baseline', data: history.value.baseline }] : []),
@@ -298,6 +306,7 @@ const chartOption = computed(() => {
 .empty p { margin: 0 0 8px; color: var(--app-text-secondary); }
 .sla { margin: 0 0 8px; padding-left: 18px; font-size: 13px; }
 .load-gap { margin-bottom: 12px; }
+.plan-issues { margin: 4px 0 0; padding-left: 18px; }
 .comparison { margin-bottom: 14px; }
 .comparison-note { margin: 0 0 6px; font-size: 13px; color: var(--app-warning); }
 .comparison-title { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 13px; color: var(--app-text); }
