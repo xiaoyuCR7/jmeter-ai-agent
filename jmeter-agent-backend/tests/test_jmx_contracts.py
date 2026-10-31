@@ -31,7 +31,7 @@ async def test_ai_jmx_request_reserves_output_before_model(monkeypatch):
     adapter.chat.assert_not_awaited()
     monkeypatch.setattr(settings, 'AGENT_CONTEXT_TOKEN_BUDGET', 32000)
     plan = await JMXGenerator().generate_from_ai('GET /fixture', [], LoadConfig(test_type='baseline'))
-    assert ET.fromstring(plan).find('.//HTTPSamplerProxy').get('testname') == 'a'
+    assert ET.fromstring(plan).find('.//HTTPSamplerProxy').get('testname') == 'GET /a'
     assert adapter.chat.call_args.kwargs['max_tokens'] == 8000
 
 

@@ -29,6 +29,7 @@ class ExecutionEvidence(BaseModel):
     server_metrics: Optional[dict[str, Any]] = None
     run: Optional[dict[str, Any]] = None
     plan_issues: list[dict[str, Any]] = []
+    planned_load: list[dict[str, Any]] = []
     configured_load: Optional[dict[str, Any]] = None
 
 
@@ -36,13 +37,18 @@ CONFIGURED_LOAD_FIELDS = ('test_type', 'concurrent_users', 'ramp_up_seconds', 'd
                           'think_time_ms')
 
 
-def _plan_issues(jmx_path: Optional[str]) -> list[dict]:
-    """What is wrong with the plan that ran. Older plans are never rewritten, so a report has to say it."""
+def _read(jmx_path: Optional[str]) -> str:
     try:
         with open(jmx_path or '', encoding='utf-8') as stream:
-            return jmx_lint.lint(stream.read())
+            return stream.read()
     except OSError:
-        return []
+        return ''
+
+
+def _plan_issues(jmx_path: Optional[str]) -> list[dict]:
+    """What is wrong with the plan that ran. Older plans are never rewritten, so a report has to say it."""
+    content = _read(jmx_path)
+    return jmx_lint.lint(content) if content else []
 
 
 async def build_evidence(execution, summary: DetailedTestSummary) -> ExecutionEvidence:
@@ -72,7 +78,7 @@ async def build_evidence(execution, summary: DetailedTestSummary) -> ExecutionEv
     config = (get('context_snapshot') or {}).get('test_config') or {}
     return ExecutionEvidence(
         execution_id=get('id'), project_id=project_id, test_plan_id=get('test_plan_id'), run=run,
-        plan_issues=_plan_issues(get('jmx_path')),
+        plan_issues=_plan_issues(get('jmx_path')), planned_load=jmx_lint.planned_load(_read(get('jmx_path'))),
         configured_load={key: config.get(key) for key in CONFIGURED_LOAD_FIELDS} if config else None,
         requirements=requirement_service.evaluate(stored, summary, requirement_service.sampler_routes(get('jmx_path'))),
         baseline=history, server_metrics=server)
@@ -82,12 +88,21 @@ def format_for_prompt(evidence: ExecutionEvidence) -> str:
     load = evidence.configured_load
     return '\n\n'.join(filter(None, [
         f'## 配置负载\n{json.dumps(load, ensure_ascii=False)}' if load else '',
+        _format_planned_load(evidence.planned_load),
         _format_plan_issues(evidence.plan_issues),
         requirement_service.format_for_prompt(evidence.requirements),
         run_diagnostics.format_for_prompt(evidence.run),
         baseline_compare.format_for_prompt(evidence.baseline),
         server_metrics.format_for_prompt(evidence.server_metrics),
     ]))
+
+
+def _format_planned_load(groups: list[dict]) -> str:
+    if not groups:
+        return ''
+    return ('## planned_load（测试计划实际的线程组，负载是否符合预期以此为准）\n'
+            + json.dumps(groups, ensure_ascii=False, separators=(',', ':'))
+            + '\ndelay_seconds 是开始时间，duration_seconds 是持续时间，各线程组叠加后就是预期的线程曲线。')
 
 
 def _format_plan_issues(issues: list[dict]) -> str:

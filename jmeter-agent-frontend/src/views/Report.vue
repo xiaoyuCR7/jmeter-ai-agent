@@ -345,6 +345,7 @@ const aiLists = computed(() => {
     { title: t('report.errorRootCause'), items: a.error_analysis },
     { title: t('report.optimization'), items: a.recommendations },
     { title: t('report.riskAreas'), items: a.risk_areas },
+    { title: L('分析限制', 'Limits of this analysis'), items: a.limitations },
   ].filter(block => block.items?.length)
 })
 

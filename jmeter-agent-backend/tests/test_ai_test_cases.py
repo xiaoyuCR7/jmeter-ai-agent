@@ -243,7 +243,7 @@ async def test_the_model_gets_its_mistakes_back_and_fixes_them(monkeypatch):
     adapter = Replies('no json here', BAD, GOOD)
     monkeypatch.setattr(AIAdapterFactory, 'create', lambda *args: adapter)
     plan = await JMXGenerator().generate_from_ai('doc', [], LoadConfig(test_type='baseline'))
-    assert sampler_path(plan, 'a') == '/a' and adapter.chat.await_count == 3
+    assert sampler_path(plan, 'GET /a') == '/a' and adapter.chat.await_count == 3
     assert '{id}' in adapter.chat.await_args.args[0][-1].content
 
 

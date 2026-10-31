@@ -1,3 +1,4 @@
+import hashlib
 import os
 import shutil
 import uuid
@@ -134,6 +135,11 @@ def _save_analysis_markdown(report_dir: str, execution_id: str, analysis) -> str
 """
         for item in ad.get('key_findings', []):
             md += f"- {item}\n"
+
+        if ad.get('limitations'):
+            md += "\n## 分析限制\n\n"
+            for item in ad['limitations']:
+                md += f"- {item}\n"
 
         if ad.get('specific_issues'):
             md += "\n## 具体问题定位\n\n"
@@ -665,7 +671,15 @@ async def _analysis_evidence(execution):
         return "", None, []
     req = evidence.requirements
     verdict = {"verdict": req.verdict, "passed": req.passed, "failed": req.failed, "missing": req.missing}
-    return format_for_prompt(evidence), verdict, comparison_values(evidence)
+    return format_for_prompt(evidence) + await _open_hypotheses(execution), verdict, comparison_values(evidence)
+
+
+async def _open_hypotheses(execution) -> str:
+    """What earlier runs of this plan left to check, so a report can pick the thread up."""
+    from app.services.ai.memory import hypothesis_ledger
+    from app.services.ai.memory.hypothesis_ledger import HypothesisLedger
+    found = await hypothesis_ledger.list_for_module(execution.test_plan_id, limit=10)
+    return '\n\n## 这个计划的历史假设\n' + HypothesisLedger.format_for_prompt(found) if found else ''
 
 
 async def _record_facts(execution: TestExecutionInfo):
@@ -683,6 +697,26 @@ async def _record_facts(execution: TestExecutionInfo):
     fact.context_scope = scope
     if await fact_ledger.save(fact):
         await hypothesis_ledger.evaluate_module_hypotheses(execution.test_plan_id, execution.id)
+        await _record_hypotheses(execution, fact)
+
+
+async def _record_hypotheses(execution: TestExecutionInfo, fact):
+    """Report explanations join the ledger as untested, so a later run can settle them."""
+    from app.models.schemas import Hypothesis, HypothesisCategory, HypothesisStatus
+    from app.services.ai.memory import hypothesis_ledger
+    for item in (execution.ai_analysis.hypotheses if execution.ai_analysis else []):
+        statement = str(item.get('statement') or '').strip()
+        if not statement:
+            continue
+        try:
+            category = HypothesisCategory(item.get('category'))
+        except ValueError:
+            category = HypothesisCategory.BOTTLENECK
+        await hypothesis_ledger.add(Hypothesis(
+            hypothesis_id=hashlib.sha256(json.dumps([execution.id, statement], ensure_ascii=False).encode()).hexdigest(),
+            source_execution_id=execution.id, module=fact.module, version=fact.version, test_type=fact.test_type,
+            category=category, statement=statement, confidence=0.5, status=HypothesisStatus.UNTESTED,
+            testable_prediction=str(item.get('testable_prediction') or '') or None), if_absent=True)
 
 
 async def _postprocess_web_execution(execution: TestExecutionInfo, test_config: dict, ai_model=None):

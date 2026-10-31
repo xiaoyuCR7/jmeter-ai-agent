@@ -286,7 +286,8 @@ class TimelineSegment(BaseModel):
     request_count: int = Field(..., description="该时间段请求数")
     active_threads: Optional[int] = Field(None, description="该时间段内的最大活跃线程数")
     avg_connect_time: Optional[float] = Field(None, description="该时间段平均建连耗时(ms)")
-    avg_latency: Optional[float] = Field(None, description="该时间段平均首字节耗时(ms)")
+    avg_latency: Optional[float] = Field(None, description="该时间段平均 Latency(ms)，含建连")
+    avg_wait_time: Optional[float] = Field(None, description="该时间段建连之后到首字节的平均等待(ms)")
 
 
 class PerformanceTrend(BaseModel):
@@ -341,6 +342,8 @@ class ReportAnalysis(BaseModel):
     recommendations: List[str] = Field(default_factory=list, description="优化建议列表")
     improvement_plan: List[str] = Field(default_factory=list, description="具体的分步改进计划")
     risk_areas: List[str] = Field(default_factory=list, description="风险区域")
+    limitations: List[str] = Field(default_factory=list, description="这次分析受到的限制，只在这里说")
+    hypotheses: List[Dict[str, Any]] = Field(default_factory=list, description="可以被后续运行验证的假设")
     conclusion: str = Field(..., description="最终结论")
     # Requirement verdict when the analysis was written, so the report can flag it once requirements change.
     requirements_verdict: Optional[Dict[str, Any]] = None

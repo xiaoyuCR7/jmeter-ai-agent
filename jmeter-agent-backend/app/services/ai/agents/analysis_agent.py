@@ -23,6 +23,7 @@ from pydantic import TypeAdapter
 
 from app.services.ai.adapters.base import BaseAIAdapter
 from app.services.ai.memory.read_errors import LedgerReadError
+from app.services.ai.prompts.analysis_rules import ANALYSIS_RULES
 from app.services.ai.agent.base import BaseAgent, AGENT_SAFETY_RULES
 from app.services.ai.agent.types import AgentEvent, AgentResult, AgentState
 from app.services.ai.agent.tool_registry import ToolRegistry
@@ -43,7 +44,9 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
-ANALYSIS_SYSTEM_PROMPT = """Senior performance engineer (20yr experience). Analyze JTL results and report findings.
+ANALYSIS_SYSTEM_PROMPT = ANALYSIS_RULES + """
+
+Senior performance engineer (20yr experience). Analyze JTL results and report findings.
 
 ## CRITICAL rules
 - ALL numbers MUST come from the Fact Sheet or the deterministic evidence blocks — never invent data.
@@ -535,7 +538,9 @@ class AnalysisAgent(BaseAgent):
         evidence=None,
     ) -> str:
         """Build the base task prompt with the fact sheet and deterministic evidence."""
-        fact_json = fact.model_dump_json(exclude={"raw_summary"})
+        # The evidence block carries the transactions, with small samples' percentiles removed.
+        hidden = {"raw_summary", "per_label"} if evidence is not None and evidence.run else {"raw_summary"}
+        fact_json = fact.model_dump_json(exclude=hidden)
 
         parts = [
             f"请分析以下测试执行: {exec_ref}",

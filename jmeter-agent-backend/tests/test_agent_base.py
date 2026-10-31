@@ -763,6 +763,7 @@ async def test_auxiliary_request_rejects_unfittable_input_before_model(monkeypat
 async def test_planner_format_retry_keeps_original_task_and_reserves_output(monkeypatch):
     import json
     from app.core.config import settings
+    from app.services.ai.agent.planner import PLANNER_RESPONSE_TOKENS
     adapter = FakeAdapter(chat_responses=['x' * 500, '{"steps":[{"description":"explain"}]}'])
     planner = make_agent(adapter).planner
     await planner.plan('ORIGINAL_TASK', 'tool schema')
@@ -770,7 +771,7 @@ async def test_planner_format_retry_keeps_original_task_and_reserves_output(monk
     cost = lambda messages: sum(adapter.estimate_tokens(json.dumps(m.to_wire(), ensure_ascii=False)) + 8
                                 for m in messages)
     # Fit the required policy/task/correction, but not the malformed response.
-    total_budget = cost([m for m in retry if m.role != 'assistant']) + 2000 + 256 + 5
+    total_budget = cost([m for m in retry if m.role != 'assistant']) + PLANNER_RESPONSE_TOKENS + 256 + 5
     monkeypatch.setattr(settings, 'AGENT_CONTEXT_TOKEN_BUDGET', total_budget)
     adapter._chat_responses = ['x' * 500, '{"steps":[{"description":"explain"}]}']
     assert await planner.plan('ORIGINAL_TASK', 'tool schema')

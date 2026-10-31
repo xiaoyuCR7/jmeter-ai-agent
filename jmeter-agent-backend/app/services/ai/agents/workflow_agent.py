@@ -13,6 +13,8 @@ from app.services.ai.prompts.jmx_generator import SCENARIO_RULES
 # Left to the model, the draft was sometimes saved, sometimes skipped.
 REQUIREMENT_TOOLS = {'extract_performance_requirements', 'save_performance_requirements',
                      'get_performance_requirements'}
+# Nothing in this workflow writes or deletes arbitrary files.
+FILE_WRITE_TOOLS = {'write_file', 'delete_file'}
 
 
 WORKFLOW_SYSTEM_PROMPT = f"""JMeter performance test workflow orchestrator. End-to-end: API doc → project → test plans → execute → analyze.
@@ -52,6 +54,8 @@ class WorkflowAgent(BaseAgent):
         )
     """
 
+    final_instructions = "只写结果，不复述步骤：创建了哪些项目和计划（含 ID）、执行结果的关键数字、失败及原因、下一步。"
+
     def __init__(
         self,
         adapter: BaseAIAdapter,
@@ -60,7 +64,8 @@ class WorkflowAgent(BaseAgent):
     ):
         if tools is None:
             tools = ToolRegistry()
-            tools.register_many([t for t in get_all_builtin_tools() if t.name not in REQUIREMENT_TOOLS])
+            tools.register_many([t for t in get_all_builtin_tools()
+                                 if t.name not in REQUIREMENT_TOOLS | FILE_WRITE_TOOLS])
 
         super().__init__(
             name="WorkflowAgent",
@@ -117,10 +122,9 @@ class WorkflowAgent(BaseAgent):
 Execute in order:
 1. Extract from doc: project name, base_url, all API endpoints
 2. create_project
-3. create_jmx for each test type
-4. validate_jmx
-5. If execution enabled: resource check → execute → analyze
-6. Summarize results
+3. create_jmx for each test type (it validates; do not validate again)
+4. If execution enabled: resource check → execute → analyze
+5. Summarize results
 
 Performance requirements are drafted for the user's review by the app after this workflow;
 do not try to extract or save them here."""

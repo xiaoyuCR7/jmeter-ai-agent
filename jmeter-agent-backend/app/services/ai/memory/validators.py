@@ -126,7 +126,12 @@ class FactValidator:
             steady = (summary.diagnostics or {}).get("steady") or {}
             scopes += [summary.success or {}, steady, *(steady.get("labels") or {}).values()]
         scopes += [segment.model_dump() | {"count": segment.request_count} for segment in fact.timeline_segments]
-        return [float(scope[key]) for scope in scopes if isinstance(scope.get(key), (int, float))]
+        values = [float(scope[key]) for scope in scopes if isinstance(scope.get(key), (int, float))]
+        if metric_name == "avg_response_time" and summary is not None:
+            # "新建连接平均耗时 933ms" is an average too, of one phase of the request.
+            timing = (summary.diagnostics or {}).get("timing") or {}
+            values += [float(value) for value in timing.values() if isinstance(value, (int, float))]
+        return values
 
     @staticmethod
     def _matches(claimed: float, actual: float, metric_name: str, absolute_ms: float, tolerance: float) -> bool:

@@ -526,8 +526,9 @@ class MCPServer:
                 f"文档：\n{arguments.get('document', '')}"
             )
         elif name == "analyze-execution":
+            from app.services.ai.prompts.analysis_rules import ANALYSIS_RULES
             text = (
-                f"请分析执行 {arguments.get('execution_id', '')}：\n"
+                f"{ANALYSIS_RULES}\n\n请分析执行 {arguments.get('execution_id', '')}：\n"
                 "1) 先调用 get_execution_evidence 获取需求判定、基线/上次对比和服务端指标；必要时调用 parse_jtl_report 查看接口明细。\n"
                 "2) 结论逐条引用需求编号（如 R1）说明是否达标；所有数字必须来自证据。\n"
                 "3) 对不达标或退化项，结合服务端指标给出根因；证据不足时标注为【假设】并说明验证方法。\n"

@@ -532,7 +532,7 @@ class _Accumulator:
             index = (t - first) // (width * 1000)
             bucket = buckets.get(index)
             if bucket is None:
-                bucket = buckets[index] = [0, 0, 0, 0, 0, 0, 0]  # count, sum, max, errors, connect, latency, threads
+                bucket = buckets[index] = [0, 0, 0, 0, 0, 0, 0, 0]  # count, sum, max, errors, connect, latency, threads, wait
             bucket[0] += 1
             bucket[1] += e
             bucket[2] = max(bucket[2], e)
@@ -540,9 +540,10 @@ class _Accumulator:
             bucket[4] += connect
             bucket[5] += latency
             bucket[6] = max(bucket[6], threads)
+            bucket[7] += max(latency - connect, 0)
         segments = []
         for index in sorted(buckets):
-            count, total, peak, errors, connect, latency, threads = buckets[index]
+            count, total, peak, errors, connect, latency, threads, wait = buckets[index]
             start = index * width
             window = max(min(float(width), duration - start), 0.001)  # Tail buckets use their observed duration
             segments.append(TimelineSegment(
@@ -550,7 +551,7 @@ class _Accumulator:
                 max_response_time=peak, throughput=round(count / window, 2),
                 error_rate=round(errors / count * 100, 2), request_count=count,
                 active_threads=threads or None, avg_connect_time=round(connect / count, 2),
-                avg_latency=round(latency / count, 2)))
+                avg_latency=round(latency / count, 2), avg_wait_time=round(wait / count, 2)))
         return duration, segments
 
     def _steady(self, parser, peak: int, duration: float) -> tuple[Optional[dict], Optional[dict]]:
@@ -562,18 +563,26 @@ class _Accumulator:
         seconds = max((end - start) / 1000.0, 0.001)
         if seconds < duration * _MIN_STEADY_SHARE:
             return None, None
-        overall, labels = [Counter(), 0], {}
-        samples = failures = 0
-        for t, elapsed, ok, index in zip(self.ts, self.elapsed, self.ok, self.label_index):
-            if not start <= t <= end:
-                continue
-            samples += 1
-            if not ok:
-                failures += 1
-                continue
-            for group in (overall, labels.setdefault(self.label_names[index], [Counter(), 0])):
-                group[0][elapsed] += 1
-                group[1] += elapsed
+        def collect(reused_only: bool):
+            overall, labels = [Counter(), 0], {}
+            samples = failures = 0
+            for t, elapsed, ok, index, connect in zip(self.ts, self.elapsed, self.ok, self.label_index, self.connect):
+                if not start <= t <= end or (reused_only and connect):
+                    continue
+                samples += 1
+                if not ok:
+                    failures += 1
+                    continue
+                for group in (overall, labels.setdefault(self.label_names[index], [Counter(), 0])):
+                    group[0][elapsed] += 1
+                    group[1] += elapsed
+            return overall, labels, samples, failures
+
+        # A new connection costs far more than the request it carries; the first request of a
+        # late-starting user would otherwise set the steady P99. Without keep-alive none are reused.
+        overall, labels, samples, failures = collect(reused_only=True)
+        if samples < _MIN_STEADY_SAMPLES:
+            overall, labels, samples, failures = collect(reused_only=False)
         if samples < _MIN_STEADY_SAMPLES:
             return None, None
         first = min(self.ts)
@@ -599,11 +608,12 @@ class _Accumulator:
             "steady": steady,
             "timing": {"avg_connect_time": round(sum(self.connect) / count, 2),
                        "avg_latency": round(sum(self.latency) / count, 2),
+                       "avg_wait_time": round(sum(max(l - c, 0) for l, c in zip(self.latency, self.connect)) / count, 2),
                        "avg_download_time": round((sum(self.elapsed) - sum(self.latency)) / count, 2),
                        "new_connections": new_connections,
                        "avg_connect_when_new": round(sum(self.connect) / new_connections, 2) if new_connections else None},
             "slowest": [{"offset_s": round((self.ts[i] - first) / 1000.0, 1), "elapsed": self.elapsed[i],
-                         "connect": self.connect[i], "latency": self.latency[i],
+                         "connect": self.connect[i], "wait": max(self.latency[i] - self.connect[i], 0),
                          "label": self.label_names[self.label_index[i]], "threads": self.threads[i],
                          "success": bool(self.ok[i])} for i in slowest],
         }

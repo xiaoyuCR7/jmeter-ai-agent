@@ -346,7 +346,7 @@ async def test_a_finished_run_joins_the_measured_history(monkeypatch, tmp_path):
     monkeypatch.setattr(memory.fact_ledger, 'save', save)
     monkeypatch.setattr(memory.hypothesis_ledger, 'evaluate_module_hypotheses', evaluate)
     monkeypatch.setattr(provenance, 'load_execution_scope', scope)
-    execution = SimpleNamespace(id='run-1', report_dir=str(tmp_path), test_plan_id='plan-1', summary=summary_of(),
+    execution = SimpleNamespace(id='run-1', report_dir=str(tmp_path), test_plan_id='plan-1', summary=summary_of(), ai_analysis=None,
                                 context_snapshot={'test_config': {'test_type': 'baseline'}})
     await routes._record_facts(execution)
     assert saved[0].module == 'plan-1' and saved[0].context_scope == 'scope-1' and saved[0].test_type == 'baseline'

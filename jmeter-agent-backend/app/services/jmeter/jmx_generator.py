@@ -77,6 +77,26 @@ class Scenario(BaseModel):
     csv_data_files: Optional[List[CsvDataFile]] = None
 
 
+def normalize_scenario(endpoints: List[APIEndpoint]) -> List[APIEndpoint]:
+    """Make a model's plan comparable and lean.
+
+    Labels are the key history is compared on, and a model names the same request differently
+    each time. A value nothing reads only costs the extractor.
+    """
+    used = json.dumps([ep.model_dump(exclude={"extractions"}) for ep in endpoints], ensure_ascii=False)
+    names, seen = {}, {}
+    for endpoint in endpoints:
+        label = f"{endpoint.method.upper()} {endpoint.path.split('?')[0]}"
+        seen[label] = seen.get(label, 0) + 1
+        names[endpoint.name] = label if seen[label] == 1 else f"{label} #{seen[label]}"
+    return [endpoint.model_copy(update={
+        "name": names[endpoint.name],
+        "depends_on": [names.get(name, name) for name in endpoint.depends_on or []],
+        "extractions": [rule for rule in endpoint.extractions or [] if "${" + rule.ref_name + "}" in used
+                        or f'"variable_name": "{rule.ref_name}"' in used],
+    }) for endpoint in endpoints]
+
+
 def _parse_scenario(response: str) -> Scenario:
     text = (response or "").strip()
     start, end = text.find("{"), text.rfind("}")
@@ -115,7 +135,7 @@ class JMXGenerator:
                 config = test_config
                 if scenario.csv_data_files:
                     config = test_config.model_copy(update={"csv_data_files": scenario.csv_data_files})
-                jmx = self.generate_basic_jmx(scenario.endpoints, config, target,
+                jmx = self.generate_basic_jmx(normalize_scenario(scenario.endpoints), config, target,
                                               f"{test_config.test_type.value}_test")
                 failures = jmx_lint.errors(jmx_lint.lint(jmx))
                 if not failures:
@@ -253,7 +273,13 @@ class JMXGenerator:
 
         # Add think time timer after each request (if configured)
         if think_time > 0:
-            self._create_constant_timer(req_hash, think_time)
+            # A spread keeps users from settling into lockstep at the same moments.
+            self._create_uniform_random_timer(req_hash, round(think_time * 0.75), round(think_time * 1.25))
+            ET.SubElement(req_hash, "hashTree")
+
+        # Without its token every later request of this user fails, and the error rate says nothing.
+        if endpoint.phase == "once_per_user":
+            self._create_stop_user_on_error(req_hash)
             ET.SubElement(req_hash, "hashTree")
 
     @staticmethod
@@ -921,15 +947,16 @@ class JMXGenerator:
         elem.set("testclass", "UniformRandomTimer")
         elem.set("testname", f"Think Time: {min_ms}-{max_ms}ms")
         elem.set("enabled", "true")
-        sp = ET.SubElement(elem, "stringProp")
-        sp.set("name", "UniformRandomTimer.delay")
-        sp.text = str(max_ms)  # Maximum delay
-        # Random range = max - fixed_delay; fixed is derived from constant_delay
-        # Actually in JMeter: UniformRandomTimer has "delay" (constant part) + "range" (variable part)
-        # We split: min_ms = constant offset, max_ms - min_ms = random range
-        sp2 = ET.SubElement(elem, "stringProp")
-        sp2.set("name", "ConstantTimer.delay")
-        sp2.text = str(min_ms)
+        ET.SubElement(elem, "stringProp", name="ConstantTimer.delay").text = str(min_ms)
+        ET.SubElement(elem, "stringProp", name="RandomTimer.range").text = str(float(max_ms - min_ms))
+
+    def _create_stop_user_on_error(self, parent: ET.Element):
+        elem = ET.SubElement(parent, "ResultAction")
+        elem.set("guiclass", "ResultActionGui")
+        elem.set("testclass", "ResultAction")
+        elem.set("testname", "Stop this user if the request failed")
+        elem.set("enabled", "true")
+        ET.SubElement(elem, "intProp", name="OnError.action").text = "1"  # Stop the thread
 
     # ── CSV DataSet Config ──────────────────────────────────
 

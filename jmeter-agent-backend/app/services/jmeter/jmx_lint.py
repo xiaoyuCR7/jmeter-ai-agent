@@ -174,6 +174,24 @@ def lint(content) -> list[dict]:
     return issues
 
 
+def planned_load(content) -> list[dict]:
+    """The thread groups a plan really has: the plan decides the load, whatever its config said."""
+    try:
+        root = ET.fromstring(content)
+    except (ET.ParseError, TypeError):
+        return []
+    groups = []
+    for tag in _THREAD_GROUPS:
+        for group in root.iter(tag):
+            if group.get('enabled') == 'false':
+                continue
+            number = lambda name: int(_prop(group, name)) if _prop(group, name).isdigit() else 0
+            groups.append({'name': group.get('testname', ''), 'kind': tag, 'threads': number('ThreadGroup.num_threads'),
+                           'ramp_seconds': number('ThreadGroup.ramp_time'), 'delay_seconds': number('ThreadGroup.delay'),
+                           'duration_seconds': number('ThreadGroup.duration')})
+    return groups
+
+
 def errors(issues: list[dict]) -> list[dict]:
     return [issue for issue in issues if issue['severity'] == 'error']
 

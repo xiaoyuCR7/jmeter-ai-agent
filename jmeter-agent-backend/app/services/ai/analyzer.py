@@ -20,6 +20,9 @@ AI_ANALYSIS_TIMEOUT_SECONDS = 120
 AI_ANALYSIS_MAX_RETRIES = 2
 # Thinking models spend this budget before they write; 4000 left some of them with an empty reply.
 AI_ANALYSIS_MAX_TOKENS = 8000
+# A short report gets read. What a model writes past these limits is what it thought least of.
+FIELD_LIMITS = {'key_findings': 5, 'performance_bottlenecks': 3, 'recommendations': 3, 'risk_areas': 3,
+                'limitations': 3, 'hypotheses': 3}
 
 
 def check_numbers(analysis: ReportAnalysis, summary: DetailedTestSummary, execution_id: str,
@@ -29,7 +32,7 @@ def check_numbers(analysis: ReportAnalysis, summary: DetailedTestSummary, execut
         return analysis
     parts = [analysis.overall_assessment, analysis.timeline_analysis, analysis.conclusion]
     for items in (analysis.key_findings, analysis.specific_issues, analysis.resource_bottlenecks,
-                  analysis.performance_bottlenecks, analysis.error_analysis, analysis.risk_areas):
+                  analysis.performance_bottlenecks, analysis.error_analysis, analysis.risk_areas, analysis.limitations):
         parts += items
     fact = FactLedger.compute_from_summary(summary, execution_id)
     result = fact_validator.validate('\n'.join(parts), fact, extra_values)
@@ -159,6 +162,9 @@ class TestAnalyzer:
         # Validation status belongs to the application, never the model.
         data['analysis_status'] = 'completed'
         data['evidence_status'] = 'unverified'
+        for name, limit in FIELD_LIMITS.items():
+            if isinstance(data.get(name), list):
+                data[name] = data[name][:limit]
         result = ReportAnalysis.model_validate(data)
         if not result.overall_assessment.strip() or not result.conclusion.strip():
             raise ValueError('Analysis assessment and conclusion are required')

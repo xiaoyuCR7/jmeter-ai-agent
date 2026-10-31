@@ -8,7 +8,7 @@ from typing import Optional
 from app.core.config import settings
 from app.services.ai.agent.tool_registry import Tool
 from app.services.jmeter import jmx_lint
-from app.services.jmeter.jmx_generator import JMXGenerator
+from app.services.jmeter.jmx_generator import JMXGenerator, normalize_scenario
 from app.services.jmeter.jmx_parser import parse_jmx, strip_source
 from app.services.jmeter.jmx_builder import build_jmx
 from app.models.schemas import (
@@ -116,6 +116,7 @@ async def create_jmx(
     )
 
     generator = JMXGenerator()
+    eps = normalize_scenario(eps)
     jmx_content = generator.generate_basic_jmx(
         endpoints=eps,
         test_config=config,
@@ -145,10 +146,12 @@ async def create_jmx(
         "test_plan_id": plan.id,
         "test_name": test_name,
         "endpoints_count": len(eps),
+        "requests": [endpoint.name for endpoint in eps],  # The labels reports will use.
         "test_type": test_type,
         "concurrent_users": concurrent_users,
         "duration_seconds": duration_seconds,
         "base_url": base_url,
+        "validated": True,  # Lint and the JMeter load check ran above.
         "warnings": [issue['message'] for issue in issues],
         "message": f"JMX test plan created at {jmx_path}",
     }
@@ -479,7 +482,7 @@ async def import_jmx(source_path: str, project_id: str = "default",
 jmx_tools = [
     Tool(
         name="create_jmx",
-        description="Generate a JMeter .jmx test plan file from API endpoint definitions with dependency-aware ordering and variable extraction support. Creates a fully functional test plan with thread groups, HTTP samplers, assertions, extractors, and listeners.",
+        description="Generate a JMeter .jmx test plan from API endpoint definitions and save it. Includes ordering, extractors, assertions and the load shape of the test type. It checks the plan and has JMeter load it before saving, so the plan needs no further validation; a plan with errors is refused with the issues to fix.",
         parameters={
             "type": "object",
             "properties": {
@@ -509,7 +512,7 @@ jmx_tools = [
                                 "description": "Business results to check in the response body; an HTTP 200 can still be a failure",
                             },
                             "phase": {"type": "string", "enum": ["iteration", "once_per_user", "setup"], "description": "iteration: every loop (default). once_per_user: login. setup: once before the load, for shared preparation; its variables do not reach other requests"},
-                            "weight": {"type": "integer", "description": "Percent of iterations that run this request, for traffic mixes. Adjacent requests with the same weight are one branch and run or skip together, so give every later step of a funnel the same weight"},
+                            "weight": {"type": "integer", "description": "Percent of iterations that run this request, for traffic mixes. Only for requests whose share the document states. Adjacent requests with the same weight run or skip together, so use it on several steps only when the document says they share that share"},
                             "depends_on": {
                                 "type": "array", "items": {"type": "string"},
                                 "description": "Names of upstream endpoints this one depends on (e.g., ['Login'])"

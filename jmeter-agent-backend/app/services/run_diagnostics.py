@@ -12,6 +12,8 @@ from app.services.ml_analysis import ml_detector
 MAX_LABELS = 30
 MAX_ERRORS = 10
 MAX_ANOMALIES = 8
+# Below these sizes a percentile is one or two samples under another name.
+MIN_LABEL_SAMPLES = 20
 
 
 def _text(value, limit: int = 160) -> str:
@@ -28,6 +30,9 @@ def _label_row(name: str, stats: dict, steady: Optional[dict]) -> dict:
         row['steady_p95'], row['steady_p99'] = steady.get('p95_response_time'), steady.get('p99_response_time')
     if stats.get('is_transaction'):
         row['is_transaction'] = True
+    if (stats.get('count') or 0) < MIN_LABEL_SAMPLES:
+        row.update({key: None for key in ('p95_response_time', 'p99_response_time', 'success_p95',
+                                          'steady_p95', 'steady_p99') if key in row})
     return row
 
 
@@ -59,10 +64,6 @@ def format_for_prompt(run: Optional[dict]) -> str:
         return ''
     return ('## 运行诊断（由 JTL 确定性计算）\n'
             + json.dumps(run, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
-            + '\n字段说明：labels 是接口明细，按错误率和 P95 从差到好排序；errors.labels 是错误集中的接口。'
-              'steady 是并发达到峰值的区间，steady_p95、steady_p99 不含爬坡和收尾。'
-              'timing 中 connect 是建连，latency 是到首字节，download 是下载响应体。'
-              'slowest_samples 是最慢的单个样本，offset_s 是距开始的秒数。\n'
-              '先看这些证据再解释：慢样本的 connect 高说明慢在建连，不要归因到服务端处理；'
-              '慢样本集中在某一时刻时，要说明这一时刻，不要用爬坡或预热解释其它时段的现象；'
-              '错误集中在某个接口时，先判断它是否是有意的反向用例。')
+            + '\n字段说明：labels 是接口明细，按错误率和 P95 从差到好排序，分位数为 null 表示样本太少；'
+              'errors.labels 是错误集中的接口；steady_p95、steady_p99 是稳定段的分位数；'
+              'slowest_samples 是最慢的单个样本，offset_s 是距开始的秒数。')

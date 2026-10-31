@@ -9,6 +9,8 @@ from app.services.ai.agent.types import PlanStep
 from app.services.ai.adapters.base import BaseAIAdapter
 
 
+PLANNER_RESPONSE_TOKENS = 4000
+
 PLANNER_SYSTEM_PROMPT = """Task planner. Decompose user task into ordered steps.
 
 Each step: step_id(int), description(Chinese), tool_name(or null), tool_args(or null), expected_outcome(Chinese).
@@ -17,15 +19,16 @@ Output ONLY valid JSON:
 {"steps": [{"step_id": 1, "description": "...", "tool_name": "tool_name or null", "tool_args": {"key": "value"} or null, "expected_outcome": "..."}]}
 
 Rules: one action per step, note dependencies in description, only assign tool_name when needed, match tool args to schema.
+Plan only what the task asks for. Leave tool_args null when they are long: the step decides them when it runs.
 CRITICAL: Output MUST start with '{' and end with '}'. No markdown, no explanation."""
 
 
 class TaskPlanner:
     """Decompose user tasks into ordered PlanSteps using LLM."""
 
-    def __init__(self, adapter: BaseAIAdapter, safety_prompt: str = ""):
+    def __init__(self, adapter: BaseAIAdapter, safety_prompt: str = "", domain_prompt: str = ""):
         self.adapter = adapter
-        self.system_prompt = PLANNER_SYSTEM_PROMPT + ("\n\n" + safety_prompt if safety_prompt else "")
+        self.system_prompt = "\n\n".join(filter(None, [PLANNER_SYSTEM_PROMPT, safety_prompt, domain_prompt]))
 
     async def plan(
         self,
@@ -57,8 +60,8 @@ class TaskPlanner:
         # Try up to 2 times if JSON parsing fails
         plan = []
         for attempt in range(2):
-            selected = self.adapter.prepare_chat_messages(messages, response_tokens=2000)
-            response = await self.adapter.chat(selected, temperature=0.0, max_tokens=2000)
+            selected = self.adapter.prepare_chat_messages(messages, response_tokens=PLANNER_RESPONSE_TOKENS)
+            response = await self.adapter.chat(selected, temperature=0.0, max_tokens=PLANNER_RESPONSE_TOKENS)
             plan = self._parse_plan(response)
             if plan:
                 return plan  # A valid reasoning step may deliberately have no tool.
@@ -177,6 +180,6 @@ Step {failed_step.step_id}: {failed_step.description}
             AIChatMessage(role="user", content=prompt),
         ]
 
-        messages = self.adapter.prepare_chat_messages(messages, response_tokens=2000)
-        response = await self.adapter.chat(messages, temperature=0.3, max_tokens=2000)
+        messages = self.adapter.prepare_chat_messages(messages, response_tokens=PLANNER_RESPONSE_TOKENS)
+        response = await self.adapter.chat(messages, temperature=0.3, max_tokens=PLANNER_RESPONSE_TOKENS)
         return self._parse_plan(response)

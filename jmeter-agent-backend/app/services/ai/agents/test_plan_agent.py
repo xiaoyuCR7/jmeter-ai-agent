@@ -24,9 +24,15 @@ The load comes from the user's words or documents. If they give none, stay small
 - stability: long steady run, set stability_hours | spike: background load, then a sudden burst
 
 ## Workflow
-Understand requirements → analyze deps → create_jmx → validate_jmx → fix if needed → report.
-create_jmx refuses a plan with errors and saves nothing: read the issues, fix the arguments, call it again.
-Report: jmx path, config summary, endpoint list with deps, extraction rules, next steps."""
+Read the document, then call create_jmx once with the whole scenario.
+create_jmx checks the plan and has JMeter load it. A saved plan is valid: do not validate it again or read it back.
+If it refuses the plan, nothing was saved: fix the arguments from its issues and call it again.
+Finish with: test_plan_id, load, each request with its expected status and checks, and any warnings. Keep it short."""
+
+
+# Generating a plan needs no way to run tests, write files or delete anything.
+PLAN_TOOLS = {'create_jmx', 'validate_jmx', 'update_jmx', 'clone_jmx', 'parse_jmx_tree', 'list_test_plans',
+              'list_projects', 'get_project_info', 'create_project', 'get_performance_requirements'}
 
 
 class TestPlanAgent(BaseAgent):
@@ -40,6 +46,8 @@ class TestPlanAgent(BaseAgent):
         )
     """
 
+    plans_steps = False  # One tool call does the job; see BaseAgent.plans_steps.
+
     def __init__(
         self,
         adapter: BaseAIAdapter,
@@ -48,7 +56,7 @@ class TestPlanAgent(BaseAgent):
     ):
         if tools is None:
             tools = ToolRegistry()
-            tools.register_many(get_all_builtin_tools())
+            tools.register_many([tool for tool in get_all_builtin_tools() if tool.name in PLAN_TOOLS])
 
         super().__init__(
             name="TestPlanAgent",
@@ -85,9 +93,8 @@ API文档:
 
 请执行以下步骤：
 1. 从文档中提取所有API接口（HTTP方法、路径、参数等）
-2. 使用 create_jmx 工具为提取的接口生成测试计划
-3. 使用 validate_jmx 验证生成的测试计划
-4. 报告结果和文件路径"""
+2. 使用 create_jmx 工具为提取的接口生成测试计划（它会自行校验）
+3. 报告结果"""
 
         result = await self.run(task)
         return {

@@ -134,6 +134,16 @@ def test_steps_add_threads_over_time(service, tmp_path):
     assert early == 2 and max(int(row['allThreads']) for row in rows) == 4
 
 
+def test_a_failed_login_stops_that_user_instead_of_failing_everything_after_it(service, tmp_path):
+    url, seen = service
+    endpoints = [APIEndpoint(name='Login', method='GET', path='/private', phase='once_per_user'),
+                 APIEndpoint(name='Next', method='GET', path='/public')]
+    plan = JMXGenerator().generate_basic_jmx(endpoints, LoadConfig(
+        test_type='baseline', concurrent_users=2, ramp_up_seconds=0, duration_seconds=2), url)
+    assert Counter(row['label'] for row in run_plan(plan, tmp_path)) == {'Login': 2}
+    assert {path for _, path, _, _ in seen} == {'/private'}
+
+
 def test_setup_runs_once_before_the_load(service, tmp_path):
     url, seen = service
     endpoints = [APIEndpoint(name='Seed', method='POST', path='/login', phase='setup'),

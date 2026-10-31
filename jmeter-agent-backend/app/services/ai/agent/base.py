@@ -40,7 +40,7 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 AGENT_SAFETY_RULES = """## Rules (MUST follow)
-- Check resources before a test; use the returned configured thresholds and readiness decision.
+- Check resources before EXECUTING a test, using the returned thresholds and readiness decision. Creating or inspecting a plan needs no resource check.
 - NEVER delete files unless user explicitly asks. NEVER expose API keys/passwords.
 - Tool errors: fix invalid args; retry transient read failures once. Do not repeat timed-out writes/executions with unknown outcome. Report system errors and stop after 3 consecutive failures.
 - At most 8 tool calls per response. Split larger batches into rounds and observe results.
@@ -54,6 +54,8 @@ AGENT_SYSTEM_PROMPT = """Performance test agent. Use tools to: generate JMX plan
 ## Workflow
 Understand task → plan steps → execute with tools → observe results → adapt or conclude.
 Use compare_runs for comparisons (never manual). Validate results then report."""
+
+REACT_RESPONSE_TOKENS = 8000
 
 # ── ReAct prompt template (deprecated — kept for fallback compat) ──
 REACT_SYSTEM_TEMPLATE = """{base_prompt}
@@ -91,6 +93,12 @@ class BaseAgent:
       settings.AGENT_TOOL_TIMEOUT_SECONDS (default 600s).
     """
 
+    # Whether to plan steps first. A plan pays for itself on multi-stage work; one tool call
+    # with a planner around it costs a plan, a closing call per step and a summary.
+    plans_steps = True
+    final_instructions = ("请给出：\n1. 任务完成情况总结\n2. 关键结果（如果有数据请列出来）\n"
+                          "3. 后续建议（如果有的话）")
+
     # Module-level semaphore to cap concurrent agent runs
     _concurrency_semaphore: Optional[asyncio.Semaphore] = None
     _active_sessions: set[str] = set()
@@ -109,7 +117,8 @@ class BaseAgent:
         self.adapter = adapter
         self.tools = tools or ToolRegistry()
         self.memory = ConversationMemory(session_id=session_id)
-        self.planner = TaskPlanner(adapter, safety_prompt=AGENT_SAFETY_RULES)
+        # The planner decides what happens, so it needs the agent's domain rules too.
+        self.planner = TaskPlanner(adapter, safety_prompt=AGENT_SAFETY_RULES, domain_prompt=system_prompt or "")
         self.system_prompt = (system_prompt + "\n\n" + AGENT_SAFETY_RULES
                               if system_prompt else AGENT_SYSTEM_PROMPT)
         self.max_iterations = max_iterations
@@ -239,11 +248,12 @@ class BaseAgent:
 
             # Step 1: Plan
             try:
-                plan = await self.planner.plan(
-                    task=task,
-                    tools_description=self.tools.get_tools_description(),
-                    context=context,
-                )
+                if self.plans_steps:
+                    plan = await self.planner.plan(
+                        task=task,
+                        tools_description=self.tools.get_tools_description(),
+                        context=context,
+                    )
             except Exception as e:
                 logger.exception(f"[{self.name}] Planner failed:")
                 self._last_error_traceback = traceback.format_exc()
@@ -266,7 +276,7 @@ class BaseAgent:
             if direct_react:
                 self._emit("planning", "No effective plan — executing task directly with tools")
                 plan = [PlanStep(
-                    step_id=1, description=task,
+                    step_id=1, description="Complete the task above",  # The task itself is pinned in context.
                     tool_name=None,  # LLM decides which tool
                     expected_outcome="Task completed",
                 )]
@@ -436,7 +446,11 @@ class BaseAgent:
             )
             self._state = AgentState.REFLECTING
             try:
-                final_output = await self._generate_final_response(task, plan)
+                # A task done in one step ends with the model's own closing report; asking
+                # for a summary of that would be one more call to say the same thing.
+                closing = (plan[0].result.data.get('final_text') if direct_react and succeeded
+                           and isinstance(plan[0].result.data, dict) else None)
+                final_output = closing or await self._generate_final_response(task, plan)
             except Exception as e:
                 logger.exception(f"[{self.name}] Final response generation failed:")
                 final_output = f"Summary generation failed: {str(e)}"
@@ -582,7 +596,8 @@ class BaseAgent:
         from app.services.ai.agent.types import ToolResult
 
         tools_schema = self.tools.get_openai_schemas()
-        response_budget = 2000
+        # Thinking models spend this before they write, and a create_jmx call can be long.
+        response_budget = min(REACT_RESPONSE_TOKENS, max(2000, self.adapter.context_budget // 4))
         schema_cost = self.adapter.estimate_tokens(json.dumps(tools_schema, ensure_ascii=False, separators=(',', ':')))
         message_budget = min(self.adapter.max_tokens,
             self.adapter.context_budget - schema_cost - response_budget - 256)
@@ -715,6 +730,9 @@ class BaseAgent:
                         self.memory.add(AIChatMessage(role='tool', tool_call_id=remaining.id,
                             content='{"success":false,"error":"Not executed: user cancelled"}'))
 
+            elif not (response.text or "").strip() and react_i + 1 < self.max_react_per_step:
+                # A thinking model that ran out of budget returns nothing; that is not a conclusion.
+                logger.warning("[%s] Empty model reply in step %s", self.name, step.step_id)
             else:
                 # No tool calls — step complete
                 concluded = True
@@ -929,10 +947,7 @@ If replan is false, omit new_steps. Keep response under 200 chars."""
 ## 执行步骤
 {steps_summary}
 
-请给出：
-1. 任务完成情况总结
-2. 关键结果（如果有数据请列出来）
-3. 后续建议（如果有的话）"""
+{self.final_instructions}"""
 
         # Self-contained prompt: it already carries the task and the per-step
         # results, so there is no need to resend the whole conversation memory

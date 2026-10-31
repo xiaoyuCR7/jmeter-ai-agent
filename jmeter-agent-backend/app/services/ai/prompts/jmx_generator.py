@@ -8,13 +8,13 @@ import json
 SCENARIO_RULES = """## 编写压测用例的规则
 - 只写文档里有的接口，方法、路径、请求体都照文档；文档没有的不要编。
 - expected_status 必须按文档填：创建成功通常是 201，删除可能是 204，有意测 404 的用例填 404。
-- 文档写明业务成功标志时（如 code 为 0），用 response_checks 检查，例如 {"json_path":"$.code","expected":"0"}。只要求字段存在时不写 expected。HTTP 200 不代表业务成功。
+- 文档写明业务成功标志时（如 code 为 0），用 response_checks 检查，例如 {"json_path":"$.code","expected":"0"}。只要求字段存在时不写 expected。文档写了响应结构的接口，每个至少写一条，检查最能说明业务成功的字段。HTTP 200 不代表业务成功。
 - 登录和取 token 用 phase="once_per_user"：每个用户登录一次，否则登录压力会混进结果。
 - 只需执行一次的准备动作用 phase="setup"，比如创建共享数据。setup 里提取的变量后续请求拿不到；要给后续请求用的数据放到 once_per_user。
 - 用 extractions 提取响应里的值，再用 bindings 注入后续请求。需要登录的接口绑定 Authorization，公开接口不要带。
 - 路径变量写成 /orders/{id}，再用 bindings 把 id 绑定到提取的变量，target_location 为 path，target_key 为 id。路径里不要写 ${id}。
 - 写操作的数据要唯一时用 JMeter 函数，例如 "user_${__UUID()}"。可以多个用户共用的数据写固定值。
-- 真实流量比例不同时用 weight 表示百分比，比如下单只占 20%。相邻且 weight 相同的请求是同一段流程，一起执行或一起跳过：下单和确认都是漏斗后段时，给它们设相同的 weight。其它请求不要依赖设了 weight 的请求。
+- 只给文档写明了比例的请求设 weight，比如下单只占 20%，没写比例的请求不要设。文档写明一段流程的多个步骤同属这个比例时（如 40% 的用户走完下单和确认），给这些相邻步骤设相同的 weight，它们会一起执行或一起跳过。其它请求不要依赖设了 weight 的请求。
 - 不要把压测目标站点之外的地址写进用例。"""
 
 SCENARIO_SYSTEM_PROMPT = f"""你是资深性能测试工程师。根据接口文档设计压测场景，输出一个 JSON 对象，不要输出其它文字。
