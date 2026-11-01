@@ -210,6 +210,7 @@ onUnmounted(() => {
 }
 
 .table-panel { padding: 0; overflow: hidden; }
+.table-panel :deep(th.el-table__cell) { border-radius: 0; } // Flush with the panel, whose own corners clip it.
 .plan { font-weight: 500; color: var(--app-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sub { font-size: 12px; color: var(--app-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sub.error { color: var(--app-danger); max-width: 120px; }

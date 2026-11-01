@@ -123,6 +123,9 @@
           </div>
         </el-card>
       </el-tab-pane>
+      <el-tab-pane :label="t('accessLink.title')" name="access" lazy>
+        <AccessLinkPanel />
+      </el-tab-pane>
       <el-tab-pane :label="t('settings.appearance')" name="appearance">
         <el-card>
           <template #header>
@@ -168,11 +171,9 @@
         label-position="right"
       >
         <el-form-item :label="t('settings.form.provider')">
-          <el-radio-group v-model="form.provider" @change="onProviderChange">
-            <el-radio-button v-for="p in PROVIDERS" :key="p.key" :value="p.key">
-              {{ p.label || t('settings.form.providerCustom') }}
-            </el-radio-button>
-          </el-radio-group>
+          <el-select v-model="form.provider" @change="onProviderChange">
+            <el-option v-for="p in PROVIDERS" :key="p.key" :value="p.key" :label="p.label || t('settings.form.providerCustom')" />
+          </el-select>
         </el-form-item>
 
         <el-form-item :label="t('settings.form.model')" prop="model">
@@ -231,12 +232,13 @@ import { useAppStore } from '@/store'
 import { useI18n } from '@/composables/useI18n'
 import { useRoute, useRouter } from 'vue-router'
 import MCPConnectPanel from '@/components/MCPConnectPanel.vue'
+import AccessLinkPanel from '@/components/AccessLinkPanel.vue'
 
 const { t, setLang } = useI18n()
 
 const route = useRoute()
 const router = useRouter()
-const SETTINGS_TABS = ['models', 'mcp', 'system', 'appearance']
+const SETTINGS_TABS = ['models', 'mcp', 'system', 'access', 'appearance']
 const activeTab = ref(SETTINGS_TABS.includes(route.query.tab as string) ? route.query.tab as string : 'models')
 const onTabChange = (name: string | number) => router.replace({ query: name === 'models' ? {} : { tab: String(name) } })
 
@@ -675,11 +677,6 @@ onUnmounted(() => {
     @media (max-width: 768px) {
       font-size: 12px;
     }
-  }
-
-  :deep(.el-table__header-wrapper),
-  :deep(.el-table__body-wrapper) {
-    overflow-x: auto;
   }
 
   .table-scroll {

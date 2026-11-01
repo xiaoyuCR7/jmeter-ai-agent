@@ -130,6 +130,30 @@ a {
   color: var(--app-primary);
 }
 
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-button {
+  display: none;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: var(--app-radius-pill);
+  background: var(--app-border-strong) content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--app-text-muted);
+}
+
 :where(a, button, [role='tab'], [tabindex]):focus-visible {
   outline: 2px solid var(--app-primary);
   outline-offset: 2px;
@@ -137,6 +161,8 @@ a {
 
 /* ── Components ── */
 .el-card {
+  /* Declared on the card itself by Element Plus, so the value on :root never reaches it. */
+  --el-card-border-radius: var(--app-radius-lg);
   border-color: var(--app-border);
   background: var(--app-surface);
   box-shadow: var(--app-shadow) !important;
@@ -168,6 +194,19 @@ a {
 
 .el-table .el-table__cell {
   padding: 10px 0;
+}
+
+/* The header band sits inside a panel, so it gets control-sized corners and no line beneath them. */
+.el-table th.el-table__cell.is-leaf {
+  border-bottom-color: transparent;
+}
+
+.el-table th.el-table__cell:first-child {
+  border-radius: var(--app-radius) 0 0 var(--app-radius);
+}
+
+.el-table th.el-table__cell:last-child {
+  border-radius: 0 var(--app-radius) var(--app-radius) 0;
 }
 
 /* Long plan names break between words, not in the middle of one. */
