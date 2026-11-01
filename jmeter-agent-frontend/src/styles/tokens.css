@@ -1,58 +1,80 @@
-/* Design tokens for the app shell and new pages: solid surfaces, one accent, semantic status colors. */
+/* Design tokens: cool neutrals, one cobalt accent; the sidebar follows the theme.
+   Green / red / amber only ever mean pass / fail / check. */
 :root {
-  --app-bg: #f6f7f9;
+  --app-bg: #f3f5f8;
   --app-surface: #ffffff;
-  --app-surface-muted: #f1f3f5;
-  --app-hover: #eef0f3;
-  --app-border: #e3e6ea;
-  --app-border-strong: #cfd4da;
+  --app-surface-muted: #f0f3f7;
+  --app-hover: #e9edf3;
+  --app-border: #dfe4eb;
+  --app-border-strong: #c6cfda;
 
-  --app-text: #1c2128;
-  --app-text-secondary: #4b5563;
-  --app-text-muted: #7b8490;
+  --app-text: #131c2b;
+  --app-text-secondary: #424e5f;
+  --app-text-muted: #5f6c80;
 
-  --app-primary: #2563eb;
-  --app-primary-hover: #1d4ed8;
-  --app-primary-soft: #eaf1fe;
+  --app-primary: #2b5fd9;
+  --app-primary-hover: #214cb5;
+  --app-primary-soft: #e8eefc;
+  --app-on-primary: #ffffff;
 
-  --app-success: #16a34a;
-  --app-success-soft: #e9f7ef;
-  --app-danger: #dc2626;
-  --app-danger-soft: #fdecec;
-  --app-warning: #d97706;
-  --app-warning-soft: #fdf3e2;
+  --app-success: #12805c;
+  --app-success-soft: #e2f3ec;
+  --app-danger: #cf3341;
+  --app-danger-soft: #fcebed;
+  --app-warning: #b4660a;
+  --app-warning-soft: #fbf0de;
 
-  --app-radius: 6px;
-  --app-radius-lg: 8px;
+  --app-sidebar: var(--app-surface);
+  --app-sidebar-hover: var(--app-hover);
+  --app-sidebar-active: var(--app-primary-soft);
+  --app-sidebar-active-text: var(--app-primary);
+  --app-sidebar-border: var(--app-border);
+  --app-sidebar-text: var(--app-text-secondary);
+  --app-sidebar-text-strong: var(--app-text);
+
+  --app-radius-sm: 6px;   /* tags, badges, small buttons */
+  --app-radius: 8px;      /* buttons, inputs, list rows */
+  --app-radius-lg: 12px;  /* panels */
+  --app-radius-xl: 16px;  /* dialogs */
   --app-radius-pill: 999px;
-  --app-shadow: 0 1px 2px rgba(16, 24, 40, 0.05);
-  --app-shadow-lg: 0 8px 24px rgba(16, 24, 40, 0.12);
-  --app-font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+  --app-shadow: 0 1px 2px rgba(19, 28, 43, 0.04);
+  --app-shadow-lg: 0 12px 32px rgba(19, 28, 43, 0.14);
+  --app-focus-ring: 0 0 0 3px color-mix(in srgb, var(--app-primary) 22%, transparent);
+  --app-font-mono: ui-monospace, 'Cascadia Mono', Consolas, Menlo, 'Liberation Mono', monospace;
 }
 
 html.dark {
-  --app-bg: #0f1115;
-  --app-surface: #171a20;
-  --app-surface-muted: #1e2229;
-  --app-hover: #232831;
-  --app-border: #2a2f38;
-  --app-border-strong: #3a414d;
+  --app-bg: #0e141d;
+  --app-surface: #161e2a;
+  --app-surface-muted: #1c2533;
+  --app-hover: #232e3e;
+  --app-border: #2a3545;
+  --app-border-strong: #3c4a5d;
 
-  --app-text: #e6e8eb;
-  --app-text-secondary: #b3b9c2;
-  --app-text-muted: #8a929e;
+  --app-text: #e8edf3;
+  --app-text-secondary: #b6c0cd;
+  --app-text-muted: #8e9bad;
 
-  --app-primary: #4c8dff;
-  --app-primary-hover: #6aa0ff;
-  --app-primary-soft: rgba(76, 141, 255, 0.14);
+  --app-primary: #7ba4ff;
+  --app-primary-hover: #9cbcff;
+  --app-primary-soft: rgba(123, 164, 255, 0.15);
+  --app-on-primary: #0e141d;
 
-  --app-success: #3fb96b;
-  --app-success-soft: rgba(63, 185, 107, 0.14);
-  --app-danger: #f05252;
-  --app-danger-soft: rgba(240, 82, 82, 0.14);
-  --app-warning: #f0a33a;
-  --app-warning-soft: rgba(240, 163, 58, 0.14);
+  --app-success: #4cc79a;
+  --app-success-soft: rgba(76, 199, 154, 0.14);
+  --app-danger: #f6737f;
+  --app-danger-soft: rgba(246, 115, 127, 0.14);
+  --app-warning: #eeb054;
+  --app-warning-soft: rgba(238, 176, 84, 0.14);
+
+  --app-sidebar: #111823;
+  --app-sidebar-hover: #1a2331;
+  --app-sidebar-active: #243146;
+  --app-sidebar-active-text: #f3f6fa;
+  --app-sidebar-border: #222d3c;
+  --app-sidebar-text: #b4bfce;
+  --app-sidebar-text-strong: #f3f6fa;
 
   --app-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --app-shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.45);
+  --app-shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.5);
 }

@@ -5,16 +5,20 @@ import AutoImport from 'unplugin-auto-import/vite'
 import Components from 'unplugin-vue-components/vite'
 import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 
+const backend = `http://localhost:${process.env.PORT || 8000}`
+
 export default defineConfig({
   plugins: [
     vue(),
     AutoImport({
-      resolvers: [ElementPlusResolver()],
+      // main.ts loads Element Plus's full stylesheet before ours. Per-component imports would load
+      // after the theme and put its variables back to their defaults.
+      resolvers: [ElementPlusResolver({ importStyle: false })],
       imports: ['vue', 'vue-router', 'pinia'],
       dts: false,
     }),
     Components({
-      resolvers: [ElementPlusResolver()],
+      resolvers: [ElementPlusResolver({ importStyle: false })],
       dts: false,
     }),
   ],
@@ -34,11 +38,11 @@ export default defineConfig({
     port: 3000,
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        target: backend,
         changeOrigin: true,
       },
       '/reports': {
-        target: 'http://localhost:8000',
+        target: backend,
         changeOrigin: true,
       },
     },

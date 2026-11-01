@@ -35,6 +35,26 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Project switcher: the menu renders outside the page, so scoped styles do not reach it. */
+.el-dropdown-menu__item.is-current {
+  color: var(--app-primary);
+  font-weight: 500;
+}
+
+.switch-name {
+  flex: 1;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.switch-count {
+  margin-left: 24px;
+  font-size: 12px;
+  color: var(--app-text-muted);
+}
+
 /* Button rows laid out with flex gap: drop Element Plus's sibling margin so wrapped rows line up. */
 .button-row {
   display: flex;

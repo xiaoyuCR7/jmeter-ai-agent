@@ -15,16 +15,16 @@
       <el-table :data="rows" v-loading="loading && !executions.length" class="clickable"
         :empty-text="L('还没有执行记录，在项目的测试计划里点「运行」', 'No runs yet. Use Run on a test plan.')"
         @row-click="(row: any) => row.status === 'completed' && openReport(row.id)">
-        <el-table-column :label="L('开始时间', 'Started')" width="150">
+        <el-table-column :label="L('开始时间', 'Started')" width="172">
           <template #default="{ row }"><span class="num">{{ formatTime(row.start_time) }}</span></template>
         </el-table-column>
-        <el-table-column :label="L('测试计划', 'Test plan')" min-width="160">
+        <el-table-column :label="L('测试计划', 'Test plan')" min-width="200">
           <template #default="{ row }">
-            <div class="plan">{{ row.test_plan_name || row.test_plan_id }}</div>
+            <div class="plan" :title="row.test_plan_name">{{ row.test_plan_name || row.test_plan_id }}</div>
             <div v-if="!projectId" class="sub">{{ row.project_name }}</div>
           </template>
         </el-table-column>
-        <el-table-column :label="L('状态', 'Status')" width="124">
+        <el-table-column :label="L('状态', 'Status')" width="96">
           <template #default="{ row }">
             <StatusTag :status="row.status" />
             <el-progress v-if="row.status === 'running'" :percentage="row.progress || 0" :stroke-width="4" :show-text="false" />
@@ -33,33 +33,33 @@
             </el-tooltip>
           </template>
         </el-table-column>
-        <el-table-column :label="L('需求判定', 'Verdict')" width="120">
+        <el-table-column :label="L('需求判定', 'Verdict')" width="100">
           <template #default="{ row }"><VerdictTag v-if="row.metrics" :verdict="row.requirements" /></template>
         </el-table-column>
-        <el-table-column label="Avg" width="88" align="right">
+        <el-table-column label="Avg" width="80" align="right">
           <template #default="{ row }"><span class="num">{{ formatMs(row.metrics?.avg_response_time) }}</span></template>
         </el-table-column>
-        <el-table-column label="P95" width="88" align="right">
+        <el-table-column label="P95" width="84" align="right">
           <template #default="{ row }"><span class="num">{{ formatMs(row.metrics?.p95_response_time) }}</span></template>
         </el-table-column>
-        <el-table-column :label="L('错误率', 'Errors')" width="84" align="right">
+        <el-table-column :label="L('错误率', 'Errors')" width="72" align="right">
           <template #default="{ row }">
             <span class="num" :class="{ bad: (row.metrics?.error_rate || 0) > 0 }">{{ formatPct(row.metrics?.error_rate) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="TPS" width="72" align="right">
+        <el-table-column label="TPS" width="60" align="right">
           <template #default="{ row }"><span class="num">{{ formatTps(row.metrics?.throughput) }}</span></template>
         </el-table-column>
-        <el-table-column :label="L('时长', 'Duration')" width="84" align="right">
+        <el-table-column :label="L('时长', 'Duration')" width="64" align="right">
           <template #default="{ row }"><span class="num">{{ formatDuration(row.start_time, row.end_time) }}</span></template>
         </el-table-column>
-        <el-table-column :label="L('AI 分析', 'AI analysis')" width="104">
+        <el-table-column :label="L('AI 分析', 'AI analysis')" width="84">
           <template #default="{ row }">
             <span v-if="row.has_ai_analysis" class="ai-done">{{ L('已分析', 'Done') }}</span>
             <span v-else class="sub">-</span>
           </template>
         </el-table-column>
-        <el-table-column width="110" align="right">
+        <el-table-column width="96" align="right">
           <template #default="{ row }">
             <div class="actions" @click.stop>
               <el-button v-if="row.status === 'running' || row.status === 'pending'" size="small" text type="warning" @click="cancel(row.id)">
@@ -210,7 +210,7 @@ onUnmounted(() => {
 }
 
 .table-panel { padding: 0; overflow: hidden; }
-.plan { font-weight: 500; color: var(--app-text); }
+.plan { font-weight: 500; color: var(--app-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sub { font-size: 12px; color: var(--app-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sub.error { color: var(--app-danger); max-width: 120px; }
 .bad { color: var(--app-danger); }

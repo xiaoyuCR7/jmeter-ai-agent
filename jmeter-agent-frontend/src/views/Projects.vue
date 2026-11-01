@@ -1,6 +1,6 @@
 <template>
   <div class="projects-page">
-    <aside class="project-list">
+    <aside v-if="!listCollapsed || (!loading && !project)" class="project-list">
       <div class="list-toolbar">
         <el-input v-model="keyword" :placeholder="L('搜索项目', 'Search projects')" clearable :prefix-icon="Search" />
         <el-button :title="L('新建空项目', 'New empty project')" @click="openCreate"><el-icon><Plus /></el-icon></el-button>
@@ -27,7 +27,27 @@
       <template v-else-if="project">
         <header class="workspace-head">
           <div class="title-block">
-            <h2>{{ project.name }}</h2>
+            <div class="title-row">
+              <el-button text class="list-toggle" :aria-expanded="!listCollapsed"
+                :title="listCollapsed ? L('展开项目列表', 'Show project list') : L('收起项目列表', 'Hide project list')" @click="toggleList">
+                <el-icon><component :is="listCollapsed ? Expand : Fold" /></el-icon>
+              </el-button>
+              <el-dropdown v-if="listCollapsed" trigger="click" :max-height="360" @command="pickProject">
+                <h2><button class="project-switch" :title="L('切换项目', 'Switch project')">
+                  <span>{{ project.name }}</span><el-icon><ArrowDown /></el-icon>
+                </button></h2>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item v-for="p in projects" :key="p.id" :command="p.id" :class="{ 'is-current': p.id === projectId }">
+                      <span class="switch-name">{{ p.name }}</span>
+                      <span class="switch-count num">{{ p.test_plan_count || 0 }}</span>
+                    </el-dropdown-item>
+                    <el-dropdown-item divided :command="NEW_PROJECT" :icon="Plus">{{ L('新建空项目', 'New empty project') }}</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+              <h2 v-else>{{ project.name }}</h2>
+            </div>
             <div class="meta">
               <span v-if="project.environment?.base_url" class="mono">{{ project.environment.base_url }}</span>
               <span v-if="project.description" class="desc" :title="project.description">{{ project.description }}</span>
@@ -74,7 +94,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Plus, Search } from '@element-plus/icons-vue'
+import { ArrowDown, Expand, Fold, Plus, Search } from '@element-plus/icons-vue'
 import { api } from '@/api'
 import { useI18n } from '@/composables/useI18n'
 import { PROJECT_TABS } from '@/router'
@@ -85,6 +105,8 @@ import ProjectSettingsPanel from '@/components/project/ProjectSettingsPanel.vue'
 import RequirementsPanel from '@/components/RequirementsPanel.vue'
 
 const LAST_PROJECT_KEY = 'jmeter-agent-last-project'
+const LIST_OPEN_KEY = 'jmeter-agent-project-list-open'
+const NEW_PROJECT = '__new_project__'
 
 const route = useRoute()
 const router = useRouter()
@@ -94,6 +116,8 @@ const L = (zh: string, en: string) => currentLang.value === 'en' ? en : zh
 const projects = ref<any[]>([])
 const loading = ref(true)
 const keyword = ref('')
+// Most work stays in one project, so the list starts closed; the title switches projects meanwhile.
+const listCollapsed = ref(readListOpen() !== '1')
 const createVisible = ref(false)
 const creating = ref(false)
 const form = ref({ name: '', base_url: '', description: '' })
@@ -116,6 +140,15 @@ const filtered = computed(() => {
   const kw = keyword.value.trim().toLowerCase()
   return kw ? projects.value.filter(p => p.name.toLowerCase().includes(kw)) : projects.value
 })
+
+function readListOpen() {
+  try { return localStorage.getItem(LIST_OPEN_KEY) } catch { return null }
+}
+
+function toggleList() {
+  listCollapsed.value = !listCollapsed.value
+  try { localStorage.setItem(LIST_OPEN_KEY, listCollapsed.value ? '0' : '1') } catch { /* storage unavailable */ }
+}
 
 function readLastProject() {
   try { return localStorage.getItem(LAST_PROJECT_KEY) } catch { return null }
@@ -147,6 +180,8 @@ watch(projectId, id => {
 }, { immediate: true })
 
 const select = (id: string) => router.push(`/projects/${id}/${tab.value}`)
+
+const pickProject = (command: string) => command === NEW_PROJECT ? openCreate() : select(command)
 
 function openCreate() {
   form.value = { name: '', base_url: '', description: '' }
@@ -252,7 +287,28 @@ onMounted(async () => {
 
   h2 { margin: 0; font-size: 20px; font-weight: 600; color: var(--app-text); }
   .title-block { flex: 1; min-width: 0; }
-  .meta { display: flex; gap: 12px; font-size: 13px; color: var(--app-text-muted); margin-top: 2px; min-width: 0; }
+  .title-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .title-row h2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .title-row .el-dropdown { min-width: 0; }
+  .list-toggle { flex-shrink: 0; width: 32px; padding: 0; color: var(--app-text-secondary); font-size: 18px; }
+  .project-switch {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 100%;
+    padding: 2px 6px;
+    border: none;
+    border-radius: var(--app-radius);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+
+    span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .el-icon { flex-shrink: 0; font-size: 14px; color: var(--app-text-muted); }
+    &:hover { background: var(--app-hover); }
+  }
+  .meta { display: flex; gap: 12px; font-size: 13px; color: var(--app-text-muted); margin-top: 2px; min-width: 0; padding-left: 38px; }
   .meta > * { flex-shrink: 0; }
   .meta .desc { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mono { font-family: var(--app-font-mono); font-size: 12px; }

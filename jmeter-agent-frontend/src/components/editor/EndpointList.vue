@@ -166,7 +166,7 @@ function handleCommand(cmd: string, ep: EndpointItem) {
     gap: 10px;
 
     &:hover {
-      background: var(--app-primary-soft);
+      background: var(--app-hover);
 
       .ep-actions {
         opacity: 1;
@@ -178,12 +178,9 @@ function handleCommand(cmd: string, ep: EndpointItem) {
     }
 
     &.active {
-      background: var(--app-primary);
-      .ep-name, .ep-path { color: #fff; }
-      .method-badge {
-        box-shadow: 0 0 0 2px rgba(255,255,255,0.3);
-      }
-      .ep-actions .el-button { color: #fff; }
+      background: var(--app-primary-soft);
+      box-shadow: inset 0 0 0 1px var(--app-primary);
+      .ep-name { color: var(--app-primary); }
     }
 
     &.dragging {
@@ -235,7 +232,7 @@ function handleCommand(cmd: string, ep: EndpointItem) {
       .ep-path {
         font-size: 11px;
         color: var(--app-text-muted);
-        font-family: monospace;
+        font-family: var(--app-font-mono);
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -252,21 +249,24 @@ function handleCommand(cmd: string, ep: EndpointItem) {
   .method-badge {
     display: inline-block;
     padding: 2px 8px;
-    border-radius: var(--app-radius);
+    border-radius: var(--app-radius-sm);
     font-size: 11px;
     font-weight: 600;
     letter-spacing: 0.02em;
     min-width: 46px;
     text-align: center;
-    font-family: monospace;
+    font-family: var(--app-font-mono);
+    // One hue per method, mixed toward the text color so it stays legible in both themes.
+    color: color-mix(in srgb, var(--method) 72%, var(--app-text));
+    background: color-mix(in srgb, var(--method) 14%, transparent);
 
-    &.get { background: #e6f7e6; color: #1a7a32; }
-    &.post { background: #e6f0ff; color: #1a5cbf; }
-    &.put { background: #fff3e0; color: #b85c00; }
-    &.delete { background: #ffe6e6; color: #c41a1a; }
-    &.patch { background: #f3e6ff; color: #6b1abf; }
-    &.head { background: #e6f7f0; color: #1a7a5a; }
-    &.options { background: #f0f0f0; color: #555; }
+    &.get { --method: #12a06f; }
+    &.post { --method: #2f6fe4; }
+    &.put { --method: #d9820f; }
+    &.delete { --method: #dc3545; }
+    &.patch { --method: #8250df; }
+    &.head { --method: #0f97a8; }
+    &.options { --method: #7a8699; }
   }
 }
 </style>

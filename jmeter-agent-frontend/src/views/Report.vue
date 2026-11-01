@@ -292,7 +292,7 @@ const trendOption = computed(() => ({
   ],
   series: [
     { name: L('平均响应时间', 'Avg response time'), type: 'line', showSymbol: false, data: timeline.value.map(s => s.avg_response_time), color: cssVar('--app-primary') },
-    { name: 'TPS', type: 'line', yAxisIndex: 1, showSymbol: false, data: timeline.value.map(s => s.throughput), color: cssVar('--app-success') },
+    { name: 'TPS', type: 'line', yAxisIndex: 1, showSymbol: false, data: timeline.value.map(s => s.throughput), color: cssVar('--app-text-muted') },
     { name: L('错误率', 'Error rate'), type: 'line', yAxisIndex: 1, showSymbol: false, data: timeline.value.map(s => s.error_rate), color: cssVar('--app-danger') },
   ],
 }))
@@ -417,13 +417,11 @@ onMounted(loadReport)
   padding: 14px 18px;
   border-radius: var(--app-radius-lg);
   border: 1px solid var(--app-border);
-  border-left-width: 4px;
   background: var(--app-surface);
 
-  &.pass { border-left-color: var(--app-success); .verdict-label { color: var(--app-success); } }
-  &.fail { border-left-color: var(--app-danger); .verdict-label { color: var(--app-danger); } }
-  &.incomplete { border-left-color: var(--app-warning); .verdict-label { color: var(--app-warning); } }
-  &.neutral { border-left-color: var(--app-border-strong); }
+  &.pass { border-color: transparent; background: var(--app-success-soft); .verdict-label { color: var(--app-success); } }
+  &.fail { border-color: transparent; background: var(--app-danger-soft); .verdict-label { color: var(--app-danger); } }
+  &.incomplete { border-color: transparent; background: var(--app-warning-soft); .verdict-label { color: var(--app-warning); } }
 
   .verdict-main { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
   .verdict-label { font-size: 17px; font-weight: 600; color: var(--app-text); }
@@ -460,7 +458,7 @@ onMounted(loadReport)
 
   .kpi { padding: 12px 16px; border-right: 1px solid var(--app-border); &:last-child { border-right: none; } }
   .kpi-label { font-size: 12px; color: var(--app-text-muted); }
-  .kpi-value { font-size: 22px; font-weight: 600; color: var(--app-text); margin-top: 2px; }
+  .kpi-value { font-size: 24px; font-weight: 600; line-height: 1.3; letter-spacing: -0.01em; color: var(--app-text); margin-top: 2px; font-variant-numeric: tabular-nums; }
   .kpi-value.bad { color: var(--app-danger); }
   .kpi-delta { margin-top: 2px; font-size: 12px; color: var(--app-text-muted); white-space: nowrap; }
   .kpi-delta.bad { color: var(--app-danger); font-weight: 600; }

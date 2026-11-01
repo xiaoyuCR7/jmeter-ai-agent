@@ -5,7 +5,7 @@
         <el-button type="primary" @click="handleSave" :loading="saving">
           <el-icon><DocumentChecked /></el-icon> {{ t('jmxEditor.save') }}
         </el-button>
-        <el-button type="success" @click="handleRun" :loading="running">
+        <el-button type="primary" @click="handleRun" :loading="running">
           <el-icon><VideoPlay /></el-icon> {{ t('jmxEditor.run') }}
         </el-button>
         <el-button @click="handleAddChild" :disabled="!canAddChild">

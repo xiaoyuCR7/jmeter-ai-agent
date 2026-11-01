@@ -111,7 +111,7 @@ onUnmounted(() => {
 
 <style scoped lang="scss">
 .app-shell {
-  --sidebar-width: 220px;
+  --sidebar-width: 224px;
   display: flex;
   min-height: 100vh;
   background: var(--app-bg);
@@ -125,7 +125,7 @@ onUnmounted(() => {
     display: block;
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.3);
+    background: rgba(14, 20, 29, 0.5);
     z-index: 999;
   }
 }
@@ -141,15 +141,15 @@ onUnmounted(() => {
   gap: 4px;
   padding: 12px 10px;
   box-sizing: border-box;
-  background: var(--app-surface);
-  border-right: 1px solid var(--app-border);
+  background: var(--app-sidebar);
+  border-right: 1px solid var(--app-sidebar-border);
   transition: width 0.18s ease;
 
   @media (max-width: 768px) {
     position: fixed;
     left: 0;
     z-index: 1000;
-    width: 220px;
+    width: 224px;
     transform: translateX(-100%);
     transition: transform 0.2s ease;
     &.mobile-open { transform: none; box-shadow: var(--app-shadow-lg); }
@@ -170,11 +170,11 @@ onUnmounted(() => {
     flex-shrink: 0;
     border-radius: var(--app-radius);
     background: var(--app-primary);
-    color: #fff;
+    color: var(--app-on-primary);
     display: grid;
     place-items: center;
   }
-  .brand-name { font-weight: 600; font-size: 15px; color: var(--app-text); white-space: nowrap; }
+  .brand-name { font-weight: 600; font-size: 15px; color: var(--app-sidebar-text-strong); white-space: nowrap; }
 }
 
 .start-btn, .nav-item {
@@ -194,24 +194,26 @@ onUnmounted(() => {
 .start-btn {
   margin-bottom: 8px;
   background: var(--app-primary);
-  color: #fff;
+  color: var(--app-on-primary);
   font-weight: 500;
+  transition: background-color 0.12s;
   &:hover { background: var(--app-primary-hover); }
 }
 
 .nav { display: flex; flex-direction: column; gap: 2px; flex: 1; }
 
 .nav-item {
-  color: var(--app-text-secondary);
-  &:hover { background: var(--app-hover); color: var(--app-text); }
-  &.active { background: var(--app-primary-soft); color: var(--app-primary); font-weight: 500; }
+  color: var(--app-sidebar-text);
+  transition: background-color 0.12s, color 0.12s;
+  &:hover { background: var(--app-sidebar-hover); color: var(--app-sidebar-text-strong); }
+  &.active { background: var(--app-sidebar-active); color: var(--app-sidebar-active-text); font-weight: 500; }
 }
 
 .sidebar-footer {
   display: flex;
   align-items: center;
   gap: 6px;
-  border-top: 1px solid var(--app-border);
+  border-top: 1px solid var(--app-sidebar-border);
   padding-top: 10px;
 
   .ai-status {
@@ -222,7 +224,7 @@ onUnmounted(() => {
     gap: 8px;
     padding: 0 6px;
     font-size: 12px;
-    color: var(--app-text-muted);
+    color: var(--app-sidebar-text);
     text-decoration: none;
     white-space: nowrap;
     overflow: hidden;
@@ -238,11 +240,11 @@ onUnmounted(() => {
     border: none;
     border-radius: var(--app-radius);
     background: transparent;
-    color: var(--app-text-muted);
+    color: var(--app-sidebar-text);
     cursor: pointer;
     display: grid;
     place-items: center;
-    &:hover { background: var(--app-hover); color: var(--app-text); }
+    &:hover { background: var(--app-sidebar-hover); color: var(--app-sidebar-text-strong); }
     .rotated { transform: rotate(180deg); }
     @media (max-width: 768px) { display: none; }
   }
@@ -304,10 +306,10 @@ onUnmounted(() => {
 
     .res-item {
       padding: 2px 8px;
-      border-radius: 999px;
+      border-radius: var(--app-radius-pill);
       background: var(--app-surface-muted);
       color: var(--app-text-secondary);
-      &.warn { color: var(--app-warning); }
+      &.warn { color: var(--app-warning); background: var(--app-warning-soft); }
       &.danger { color: var(--app-danger); background: var(--app-danger-soft); }
     }
   }

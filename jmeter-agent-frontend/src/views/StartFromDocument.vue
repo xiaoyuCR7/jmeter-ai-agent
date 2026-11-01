@@ -226,7 +226,7 @@ function reviewRequirements() {
       font-size: 12px;
       font-weight: 600;
     }
-    &.active { color: var(--app-text); font-weight: 500; .index { background: var(--app-primary); border-color: var(--app-primary); color: #fff; } }
+    &.active { color: var(--app-text); font-weight: 500; .index { background: var(--app-primary); border-color: var(--app-primary); color: var(--app-on-primary); } }
     &.done .index { background: var(--app-success-soft); border-color: transparent; color: var(--app-success); }
   }
 }

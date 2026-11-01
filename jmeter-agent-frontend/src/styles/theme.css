@@ -1,6 +1,7 @@
 /* ============================================
    Theme: a restrained tool UI.
    Solid surfaces, 1px borders, one accent color; green / red / amber only mean pass / fail / check.
+   Radii step up with size: 6 tags, 8 controls, 12 panels, 16 dialogs.
    Colors come from tokens.css, so light and dark (html.dark) share every rule below.
    ============================================ */
 
@@ -87,10 +88,10 @@ html.dark {
   --el-box-shadow-lighter: var(--app-shadow);
   --el-box-shadow-dark: var(--app-shadow-lg);
   --el-mask-color: color-mix(in srgb, var(--app-bg) 70%, transparent);
-  --el-overlay-color-lighter: rgba(0, 0, 0, 0.4);
+  --el-overlay-color-lighter: rgba(14, 20, 29, 0.5);
 
   --el-border-radius-base: var(--app-radius);
-  --el-border-radius-small: 4px;
+  --el-border-radius-small: var(--app-radius-sm);
   --el-border-radius-round: 999px;
   --el-card-border-radius: var(--app-radius-lg);
   --el-card-padding: 16px;
@@ -98,10 +99,11 @@ html.dark {
 
 html.dark {
   color-scheme: dark;
+  --el-color-white: var(--app-on-primary); /* text on solid buttons, which are light in this theme */
 }
 
 :root {
-  --app-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
+  --app-font: 'Segoe UI', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
 }
 
 /* ── Base ── */
@@ -115,7 +117,7 @@ body {
 }
 
 ::selection {
-  background: var(--app-primary-soft);
+  background: color-mix(in srgb, var(--app-primary) 24%, transparent);
 }
 
 h1, h2, h3, h4 {
@@ -126,6 +128,11 @@ h1, h2, h3, h4 {
 
 a {
   color: var(--app-primary);
+}
+
+:where(a, button, [role='tab'], [tabindex]):focus-visible {
+  outline: 2px solid var(--app-primary);
+  outline-offset: 2px;
 }
 
 /* ── Components ── */
@@ -144,7 +151,7 @@ a {
 
 .el-table {
   --el-table-header-bg-color: var(--app-surface-muted);
-  --el-table-header-text-color: var(--app-text-muted);
+  --el-table-header-text-color: var(--app-text-secondary);
   --el-table-text-color: var(--app-text);
   --el-table-row-hover-bg-color: var(--app-hover);
   --el-table-border-color: var(--app-border);
@@ -155,12 +162,18 @@ a {
 }
 
 .el-table th.el-table__cell {
-  font-weight: 500;
+  font-weight: 600;
   font-size: 12px;
 }
 
 .el-table .el-table__cell {
-  padding: 8px 0;
+  padding: 10px 0;
+}
+
+/* Long plan names break between words, not in the middle of one. */
+.el-table .cell {
+  word-break: normal;
+  overflow-wrap: anywhere;
 }
 
 .el-table--striped .el-table__body tr.el-table__row--striped td.el-table__cell {
@@ -196,20 +209,39 @@ a {
 
 .el-button {
   font-weight: 500;
+  transition: background-color 0.12s, border-color 0.12s, color 0.12s;
 }
 
-.el-button:not(.is-text):not(.is-link):not(.is-circle) {
-  border-radius: var(--app-radius);
+/* An icon placed in the button's slot gets no margin from Element Plus. */
+.el-button > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.el-button--default:not(.is-text):not(.is-link) {
+  --el-button-text-color: var(--app-text);
+  --el-button-border-color: var(--app-border-strong);
+  --el-button-hover-text-color: var(--app-primary);
+  --el-button-hover-border-color: var(--app-primary);
+  --el-button-hover-bg-color: var(--app-primary-soft);
+  --el-button-active-border-color: var(--app-primary-hover);
 }
 
 .el-button--primary {
   --el-button-hover-bg-color: var(--app-primary-hover);
   --el-button-hover-border-color: var(--app-primary-hover);
   --el-button-active-bg-color: var(--app-primary-hover);
+  --el-button-active-border-color: var(--app-primary-hover);
+}
+
+.el-button--small {
+  border-radius: var(--app-radius-sm);
 }
 
 .el-tag {
-  border-radius: 4px;
+  --el-tag-border-color: transparent;
+  border-radius: var(--app-radius-sm);
   font-weight: 500;
 }
 
@@ -217,10 +249,17 @@ a {
 .el-textarea__inner,
 .el-select__wrapper {
   background-color: var(--app-surface);
+  transition: box-shadow 0.12s;
+}
+
+.el-input__wrapper.is-focus,
+.el-select__wrapper.is-focused,
+.el-textarea__inner:focus {
+  box-shadow: 0 0 0 1px var(--app-primary) inset, var(--app-focus-ring);
 }
 
 .el-dialog {
-  border-radius: var(--app-radius-lg);
+  --el-dialog-border-radius: var(--app-radius-xl);
   border: 1px solid var(--app-border);
 }
 
@@ -229,7 +268,18 @@ a {
 }
 
 .el-message-box {
-  border-radius: var(--app-radius-lg);
+  --el-messagebox-border-radius: var(--app-radius-xl);
+  border: 1px solid var(--app-border);
+}
+
+.el-dropdown-menu {
+  --el-dropdown-menuItem-hover-fill: var(--app-primary-soft);
+  --el-dropdown-menuItem-hover-color: var(--app-primary);
+}
+
+.el-popper.is-light {
+  border-color: var(--app-border);
+  border-radius: var(--app-radius);
 }
 
 .el-form-item__label {
@@ -239,7 +289,12 @@ a {
 
 .el-segmented {
   --el-segmented-item-selected-bg-color: var(--app-primary);
+  --el-segmented-item-selected-color: var(--app-on-primary);
   --el-segmented-bg-color: var(--app-surface-muted);
+}
+
+.el-switch {
+  --el-color-white: #ffffff;
 }
 
 .el-alert {
