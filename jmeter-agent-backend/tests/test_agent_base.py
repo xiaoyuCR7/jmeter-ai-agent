@@ -1,14 +1,12 @@
-"""Tests for the BaseAgent plan -> react -> observe -> reflect loop.
+"""Tests for the BaseAgent loop: each run is one ReAct step, retried while its failure is transient.
 
-All LLM traffic is stubbed by FakeAdapter; the planner is replaced with
-AsyncMock. No network access, no real model calls.
+All LLM traffic is stubbed by FakeAdapter. No network access, no real model calls.
 """
 
 import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
-import pytest_asyncio
 
 from app.models.schemas import AIChatMessage
 from app.services.ai.adapters.base import (
@@ -54,35 +52,6 @@ class FakeAdapter(BaseAIAdapter):
         return ToolCallResponse(text="step concluded")
 
 
-def test_planner_preserves_braces_and_escaped_quotes_inside_arguments():
-    import json
-    from app.services.ai.agent.planner import TaskPlanner
-    data = {'steps': [{'step_id': 1, 'description': 'read template', 'tool_name': 'echo_tool',
-                       'tool_args': {'msg': 'literal } and " quote text'}}]}
-    plan = TaskPlanner(FakeAdapter())._parse_plan(json.dumps(data))
-    assert len(plan) == 1
-    assert plan[0].tool_args == data['steps'][0]['tool_args']
-
-
-@pytest.mark.parametrize('payload', ['{"steps": null}', '{"steps": [null]}', '{"steps": "bad"}',
-    '{"steps":[{"description":""}]}', '{"steps":[{"step_id":true,"description":"bad"}]}',
-    '{"steps":[{"description":"bad","tool_args":[]}]}',
-    '{"steps":[{"step_id":1,"description":"a"},{"step_id":1,"description":"b"}]}'])
-def test_invalid_planner_shapes_return_no_executable_plan(payload):
-    from app.services.ai.agent.planner import TaskPlanner
-    assert TaskPlanner(FakeAdapter())._parse_plan(payload) == []
-
-
-@pytest.mark.asyncio
-async def test_thinking_step_checks_budget_after_appending_instruction():
-    adapter = FakeAdapter()
-    adapter.max_tokens = 1000
-    agent = make_agent(adapter)
-    with pytest.raises(ValueError, match='context budget'):
-        await agent._execute_thinking_step(PlanStep(1, 'large step ' * 1000), 0)
-    assert not adapter.chat_calls
-
-
 def make_echo_tool(calls: list) -> Tool:
     async def handler(msg: str = "") -> dict:
         calls.append(msg)
@@ -109,6 +78,30 @@ def make_agent(adapter: FakeAdapter, tools: ToolRegistry | None = None,
     )
 
 
+def talking_agent(adapter: FakeAdapter | None = None, **kwargs) -> BaseAgent:
+    """An agent whose task needs no tool call: the model's reply finishes it."""
+    registry = ToolRegistry()
+    registry.register(make_echo_tool([]))
+    agent = make_agent(adapter or FakeAdapter(), registry, **kwargs)
+    agent.requires_tools = False
+    return agent
+
+
+def pause_steps(agent: BaseAgent):
+    """Hold each step until released. Returns (entered, release, steps run)."""
+    entered, release, steps = asyncio.Event(), asyncio.Event(), []
+    original = agent._execute_react_step
+
+    async def paused(step):
+        steps.append(step)
+        entered.set()
+        await release.wait()
+        return await original(step)
+
+    agent._execute_react_step = paused
+    return entered, release, steps
+
+
 def event_types(agent: BaseAgent) -> list[str]:
     return [e.type for e in agent._events]
 
@@ -116,27 +109,20 @@ def event_types(agent: BaseAgent) -> list[str]:
 @pytest.fixture
 def registered_agent(monkeypatch):
     import importlib
-    from app.models.schemas import FactSheet, ValidationResult
+    from app.models.schemas import FactSheet
     from app.services.ai.agents.analysis_agent import AnalysisAgent
-    from app.services.ai.agent.memory import ConversationMemory
     module = importlib.import_module('app.services.ai.agents.analysis_agent')
     provenance = importlib.import_module('app.services.ai.memory.provenance')
-    adapter = FakeAdapter(tool_responses=[ToolCallResponse(text='{"overall_assessment":"Measured report"}')])
+    adapter = FakeAdapter(tool_responses=[ToolCallResponse(text='Measured answer')])
     tools = ToolRegistry()
     tools.register(make_echo_tool([]))
-    agent = AnalysisAgent(adapter, tools=tools, session_id='registered-session')
+    agent = AnalysisAgent(adapter, tools=tools)
     fact = FactSheet(execution_id='run-A', module='plan-A', version='unknown', test_type='baseline',
                      total_requests=10, context_scope='scope', jtl_path='fixture.jtl', jtl_sha256='digest')
     agent._build_fact_sheet = AsyncMock(return_value=fact)
     monkeypatch.setattr(provenance, 'load_execution_scope', AsyncMock(return_value='scope'))
     monkeypatch.setattr(module.fact_ledger, 'get_facts_for_module_version', AsyncMock(return_value=[]))
     monkeypatch.setattr(module.hypothesis_ledger, 'list_for_module', AsyncMock(return_value=[]))
-    monkeypatch.setattr(module.hypothesis_ledger, 'evaluate_module_hypotheses', AsyncMock(return_value=[]))
-    monkeypatch.setattr(ConversationMemory, 'load', AsyncMock(return_value=None))
-    monkeypatch.setattr(ConversationMemory, 'save', AsyncMock(return_value=True))
-    agent.archiver.archive_analysis_result = AsyncMock(return_value={
-        'fact_archived': True, 'validation': ValidationResult(is_valid=True),
-        'hypotheses_archived': [], 'errors': []})
     evidence = dict(execution_id='run-A', jtl_path='fixture.jtl', module='plan-A', version='unknown',
                     test_type='baseline', context_scope='scope')
     return agent, evidence, fact
@@ -155,68 +141,76 @@ async def test_registered_ledger_read_contract_does_not_change_legacy_failure_be
     db.execute.side_effect = OSError('fixture')
     ledger._get_db = AsyncMock(return_value=db)
     monkeypatch.setattr(module.analysis_context, 'fact_ledger', ledger)
-    result = await agent.analyze_with_rag(execution_id=evidence['execution_id'], module=evidence['module'])
+    result = await agent.analyze_with_rag(execution_id=evidence['execution_id'], module=evidence['module'],
+                                          user_task='why?')
     assert result['success'] and not result['rag']['history_found']
     assert agent.adapter.chat_with_tools_calls == 1
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('phase', ['preparation', 'extraction', 'archive'])
-async def test_registered_analysis_manual_cancel_is_not_reset_by_inner_loop(registered_agent, phase):
+@pytest.mark.parametrize('phase', ['preparation', 'validation'])
+async def test_registered_analysis_manual_cancel_is_not_reset_by_inner_loop(registered_agent, monkeypatch, phase):
+    import importlib
+    module = importlib.import_module('app.services.ai.agents.analysis_agent')
     agent, evidence, _ = registered_agent
-    target, method = {'preparation': (agent, '_build_fact_sheet'),
-                      'extraction': (agent, '_extract_structured_analysis'),
-                      'archive': (agent.archiver, 'archive_analysis_result')}[phase]
-    original = getattr(target, method)
-    async def cancel_here(*args, **kwargs):
-        result = await original(*args, **kwargs)
-        agent.cancel()
-        return result
-    setattr(target, method, cancel_here)
+    if phase == 'preparation':
+        original = agent._build_fact_sheet
+        async def cancel_here(*args, **kwargs):
+            result = await original(*args, **kwargs)
+            agent.cancel()
+            return result
+        agent._build_fact_sheet = cancel_here
+    else:
+        original = module.fact_validator.validate
+        def cancel_here(*args, **kwargs):
+            result = original(*args, **kwargs)
+            agent.cancel()
+            return result
+        monkeypatch.setattr(module.fact_validator, 'validate', cancel_here)
     result = await agent.run_analysis('cancel task', evidence)
     assert not result.success and result.error == 'Cancelled by user'
     assert agent.state == AgentState.CANCELLED and not agent._run_active
-    if phase == 'preparation':
-        assert not agent.adapter.chat_with_tools_calls
-    if phase == 'archive':
-        assert result.analysis['archive']['fact_archived']
-    else:
-        agent.archiver.archive_analysis_result.assert_not_awaited()
+    assert agent.adapter.chat_with_tools_calls == (0 if phase == 'preparation' else 1)
 
 
 @pytest.mark.asyncio
-async def test_registered_analysis_runs_fact_model_archive_and_retains_task_context(registered_agent):
+async def test_a_question_is_answered_from_the_registered_evidence_and_archives_nothing(registered_agent):
     import json
     agent, evidence, fact = registered_agent
-    result = await agent.run_analysis('Explain the regression', evidence, context='USER_CONTEXT')
-    assert result.success and result.task == 'Explain the regression' and len(result.plan) == 1
-    assert result.output == '{"overall_assessment":"Measured report"}'
+    result = await agent.run_analysis('为什么慢？', evidence, context='REPORT')
+    assert result.success and result.task == '为什么慢？' and len(result.plan) == 1
+    assert result.output == 'Measured answer'
     assert result.analysis['fact']['execution_id'] == 'run-A'
-    assert result.analysis['archive']['fact_archived']
-    assert result.analysis['archive']['validation']['is_valid']
+    assert result.analysis['validation'] is not None
+    assert 'archive' not in result.analysis and 'structured' not in result.analysis
     assert result.events[0].type == 'analysis_phase'
     json.dumps(result.analysis, allow_nan=False)
     sent = '\n'.join(message.content for message in agent.adapter.tool_messages[0])
-    assert 'Explain the regression' in sent and 'USER_CONTEXT' in sent and 'scope' in sent
-    assert agent.adapter.chat_with_tools_calls == 1 and not agent.adapter.chat_calls  # No second pass over the analysis.
-    assert not agent._run_active and agent.session_id not in BaseAgent._active_sessions
+    assert '为什么慢？' in sent and '不要重写整份报告' in sent and 'REPORT' in sent and 'scope' in sent
+    assert agent.adapter.chat_with_tools_calls == 1 and not agent.adapter.chat_calls
+    assert not agent._run_active
 
 
 @pytest.mark.asyncio
-async def test_a_follow_up_answers_the_question_and_archives_nothing_again(registered_agent):
+async def test_an_empty_answer_is_not_a_success(registered_agent):
     agent, evidence, _ = registered_agent
-    agent.adapter._tool_responses = [ToolCallResponse(text='P99 为 0ms')]
-    result = await agent.run_analysis('为什么慢？', evidence, context='REPORT', follow_up=True)
-    assert result.success and result.output == 'P99 为 0ms'
-    sent = '\n'.join(message.content for message in agent.adapter.tool_messages[0])
-    assert '为什么慢？' in sent and '不要重写整份报告' in sent and 'REPORT' in sent
-    assert '深度分析报告' not in sent and '增强分析要求' not in sent
-    agent.archiver.archive_analysis_result.assert_not_awaited()
-    assert result.analysis['validation'] is not None and not agent.adapter.chat_calls
+    agent.adapter._tool_responses = [ToolCallResponse(text='')] * agent.max_react_per_step
+    result = await agent.run_analysis('为什么慢？', evidence)
+    assert not result.success and result.error == 'The model did not answer'
+    assert result.analysis['validation'] is None
 
 
 @pytest.mark.asyncio
-async def test_a_model_that_only_announces_its_work_is_reminded_once_not_replanned():
+async def test_a_number_the_facts_do_not_hold_is_reported_with_the_answer(registered_agent):
+    agent, evidence, _ = registered_agent
+    agent.adapter._tool_responses = [ToolCallResponse(text='错误率为 87.5%')]
+    result = await agent.run_analysis('错误率多少？', evidence)
+    assert result.success and result.output == '错误率为 87.5%'
+    assert any(m['metric'] == 'error_rate' for m in result.analysis['validation']['mismatches'])
+
+
+@pytest.mark.asyncio
+async def test_a_model_that_only_announces_its_work_is_reminded_once():
     calls = []
     registry = ToolRegistry()
     registry.register(make_echo_tool(calls))
@@ -225,7 +219,6 @@ async def test_a_model_that_only_announces_its_work_is_reminded_once_not_replann
         ToolCallResponse(tool_calls=[ToolCallRequest('c1', 'echo_tool', {'msg': 'hi'})]),
         ToolCallResponse(text='All done.')])
     agent = make_agent(adapter, registry)
-    agent.plans_steps = False
     result = await agent.run('do it')
     assert result.success and calls == ['hi'] and result.output == 'All done.'
     assert adapter.chat_with_tools_calls == 3 and not adapter.chat_calls
@@ -235,35 +228,37 @@ async def test_a_model_that_only_announces_its_work_is_reminded_once_not_replann
 async def test_a_task_needing_tools_still_fails_without_a_tool_call():
     agent = make_agent(FakeAdapter(tool_responses=[ToolCallResponse(text='done, trust me')]))
     agent.tools.register(make_echo_tool([]))
-    agent.plans_steps = False
     assert not (await agent.run('create the plan')).success
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('phase', ['preparation', 'archive'])
-async def test_registered_analysis_holds_session_through_entire_operation(registered_agent, phase):
+@pytest.mark.parametrize('phase', ['preparation', 'validation'])
+async def test_registered_analysis_holds_the_agent_through_entire_operation(registered_agent, monkeypatch, phase):
+    import importlib
+    module = importlib.import_module('app.services.ai.agents.analysis_agent')
     agent, evidence, fact = registered_agent
     entered, release = asyncio.Event(), asyncio.Event()
-    target, method = (agent, '_build_fact_sheet') if phase == 'preparation' else (agent.archiver, 'archive_analysis_result')
-    original = getattr(target, method)
-    async def pause(*args, **kwargs):
-        entered.set()
-        await release.wait()
-        return await original(*args, **kwargs)
-    setattr(target, method, pause)
+    if phase == 'preparation':
+        original = agent._build_fact_sheet
+        async def pause(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            return await original(*args, **kwargs)
+        agent._build_fact_sheet = pause
+    else:
+        # Validation is synchronous, so hold the model step that comes just before it.
+        step_entered, step_release, _ = pause_steps(agent)
+        entered, release = step_entered, step_release
     running = asyncio.create_task(agent.run_analysis('first', evidence))
     try:
         await asyncio.wait_for(entered.wait(), 5)
         assert not (await agent.run('overlap')).success
         assert not (await agent.run_analysis('overlap', evidence)).success
-        other = make_agent(FakeAdapter(), session_id=agent.session_id)
-        assert not (await other.run('same session')).success
         assert agent._run_active
     finally:
         release.set()
         result = await running
-    assert result.success
-    assert agent.session_id not in BaseAgent._active_sessions
+    assert result.success and not agent._run_active
 
 
 @pytest.mark.asyncio
@@ -278,8 +273,7 @@ async def test_registered_analysis_never_models_changed_scope_or_empty_evidence(
         fact.total_requests = 0
     result = await agent.run_analysis('analyze', evidence)
     assert not result.success and result.error
-    assert not agent.adapter.chat_calls
-    agent.archiver.archive_analysis_result.assert_not_awaited()
+    assert not agent.adapter.chat_calls and not agent.adapter.chat_with_tools_calls
 
 
 @pytest.mark.parametrize('message,expected', [
@@ -316,13 +310,10 @@ async def test_system_tool_failure_stops_current_batch_and_later_react_rounds(pr
         ToolCallRequest(str(i), 'action', {'phase': phase}) for i, phase in enumerate(phases)]),
         ToolCallResponse(tool_calls=[ToolCallRequest('retry', 'action', {'phase': 'must-not-retry'})])])
     agent = make_agent(adapter, registry)
-    agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'act', 'action')])
-    agent.planner.replan = AsyncMock()
     result = await agent.run('act safely')
     assert not result.success and agent.state == AgentState.FAILED
     assert calls == (['create'] if prior_success else []) + ['fail']
     assert adapter.chat_with_tools_calls == 1
-    agent.planner.replan.assert_not_awaited()
     data = result.plan[0].result.data
     assert data['total_calls'] == len(calls)
     assert data['passed'] == int(prior_success) and data['failed'] == 1
@@ -332,16 +323,12 @@ async def test_system_tool_failure_stops_current_batch_and_later_react_rounds(pr
 
 @pytest.mark.asyncio
 async def test_overlapping_stream_cannot_replace_or_detach_first_stream_queue():
-    release = asyncio.Event()
-    agent = make_agent(FakeAdapter())
-    async def plan(**kwargs):
-        await release.wait()
-        return [PlanStep(1, 'think')]
-    agent.planner.plan = AsyncMock(side_effect=plan)
+    agent = talking_agent()
+    _, release, steps = pause_steps(agent)
     first = agent.run_stream('first')
     second = agent.run_stream('second')
     try:
-        assert (await asyncio.wait_for(anext(first), 2)).type == 'planning'
+        assert (await asyncio.wait_for(anext(first), 2)).type == 'step_start'
         original_queue = agent._stream_queue
         rejected = await asyncio.wait_for(anext(second), 2)
         assert rejected.type == 'done' and rejected.data['success'] is False
@@ -351,8 +338,7 @@ async def test_overlapping_stream_cannot_replace_or_detach_first_stream_queue():
         release.set()
         events = await asyncio.wait_for(_collect_agent_events(first), 2)
         assert events[-1].type == 'done' and events[-1].data['success'] is True
-        assert any(e.type == 'plan_ready' for e in events)
-        assert agent.planner.plan.await_count == 1
+        assert len(steps) == 1
     finally:
         release.set()
         await second.aclose()
@@ -365,15 +351,15 @@ async def _collect_agent_events(stream):
 
 @pytest.mark.asyncio
 async def test_stream_owns_agent_until_final_event_is_consumed_or_closed():
-    agent = make_agent(FakeAdapter())
-    agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'think')])
+    adapter = FakeAdapter()
+    agent = talking_agent(adapter)
     stream = agent.run_stream('first')
     try:
         while (await asyncio.wait_for(anext(stream), 2)).type != 'done':
             pass
         # The async generator is paused at its final yield, not yet cleaned up.
         result = await agent.run('overlap')
-        assert not result.success and agent.planner.plan.await_count == 1
+        assert not result.success and adapter.chat_with_tools_calls == 1
     finally:
         await stream.aclose()
     assert agent._stream_queue is None
@@ -382,13 +368,8 @@ async def test_stream_owns_agent_until_final_event_is_consumed_or_closed():
 
 @pytest.mark.asyncio
 async def test_stream_rejects_active_plain_run_without_attaching_queue():
-    entered, release = asyncio.Event(), asyncio.Event()
-    agent = make_agent(FakeAdapter())
-    async def plan(**kwargs):
-        entered.set()
-        await release.wait()
-        return [PlanStep(1, 'think')]
-    agent.planner.plan = AsyncMock(side_effect=plan)
+    agent = talking_agent()
+    entered, release, _ = pause_steps(agent)
     running = asyncio.create_task(agent.run('plain'))
     stream = agent.run_stream('overlap')
     try:
@@ -403,93 +384,6 @@ async def test_stream_rejects_active_plain_run_without_attaching_queue():
 
 
 @pytest.mark.asyncio
-async def test_failed_session_load_aborts_before_work_and_does_not_save(monkeypatch):
-    from app.services.ai.agent.memory import ConversationMemory
-    adapter = FakeAdapter()
-    agent = make_agent(adapter, session_id='unreadable')
-    agent.memory.add_user('unsaved local data')
-    before = agent.memory.to_dict()
-    load = AsyncMock(side_effect=RuntimeError('database unavailable'))
-    save = AsyncMock(return_value=True)
-    monkeypatch.setattr(ConversationMemory, 'load', load)
-    monkeypatch.setattr(ConversationMemory, 'save', save)
-    agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'think')])
-    result = await agent.run('do work')
-    assert not result.success and agent._state == AgentState.FAILED
-    assert 'memory' in result.error.lower()
-    assert agent.memory.to_dict() == before
-    agent.planner.plan.assert_not_awaited()
-    save.assert_not_awaited()
-    assert not adapter.chat_calls and adapter.chat_with_tools_calls == 0
-    assert not agent._run_active and agent.session_id not in BaseAgent._active_sessions
-    load.side_effect = None
-    load.return_value = ConversationMemory(session_id=agent.session_id)
-    assert (await agent.run('retry after recovery')).success
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize('persistent', [True, False])
-async def test_missing_session_discards_stale_memory_only_when_persistent(monkeypatch, persistent):
-    from app.core.config import settings
-    from app.services.ai.agent.memory import ConversationMemory
-    monkeypatch.setattr(settings, 'MEMORY_PERSIST_ENABLED', persistent)
-    monkeypatch.setattr(ConversationMemory, 'load', AsyncMock(return_value=None))
-    monkeypatch.setattr(ConversationMemory, 'save', AsyncMock(return_value=True))
-    adapter = FakeAdapter()
-    agent = make_agent(adapter, session_id='expired')
-    agent.memory = ConversationMemory(session_id=agent.session_id, max_messages=12, summary_trigger=8, summary_keep=3)
-    agent.memory.add_user('STALE_HISTORY_MUST_EXPIRE')
-    agent.memory._summary = 'STALE_SUMMARY_MUST_EXPIRE'
-    agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'think')])
-    assert (await agent.run('current task')).success
-    prompt = '\n'.join(m.content for m in adapter.chat_calls[0])
-    assert ('STALE_HISTORY_MUST_EXPIRE' in prompt) is not persistent
-    assert ('STALE_SUMMARY_MUST_EXPIRE' in prompt) is not persistent
-    assert (agent.memory.max_messages, agent.memory.summary_trigger, agent.memory.summary_keep) == (12, 8, 3)
-
-
-@pytest.mark.asyncio
-async def test_save_exception_emits_warning_without_replaying_work(monkeypatch):
-    from app.services.ai.agent.memory import ConversationMemory
-    monkeypatch.setattr(ConversationMemory, 'load', AsyncMock(return_value=None))
-    monkeypatch.setattr(ConversationMemory, 'save', AsyncMock(side_effect=OSError('disk full')))
-    adapter = FakeAdapter()
-    agent = make_agent(adapter, session_id='save-failed')
-    agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'think')])
-    result = await agent.run('task')
-    assert result.success and len(adapter.chat_calls) == 2
-    assert 'memory_not_saved' in event_types(agent)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize('payload', [{'prefix': 'measured data ' * 60, 'tail': 'TAIL_ARTIFACT_42'},
-                                   ['observations ' * 60, 'TAIL_ARTIFACT_42'], 0, False])
-@pytest.mark.parametrize('success', [True, False])
-async def test_summary_preserves_structured_partial_and_falsy_results(payload, success):
-    import json
-    adapter = FakeAdapter()
-    agent = make_agent(adapter)
-    step = PlanStep(1, 'work', success=success,
-                    result=ToolResult(success, data=payload, error=None if success else 'later validation failed'))
-    await agent._generate_final_response('task', [step])
-    prompt = adapter.chat_calls[0][-1].content
-    assert json.dumps(payload, ensure_ascii=False, separators=(',', ':')) in prompt
-    if not success:
-        assert 'later validation failed' in prompt and '失败' in prompt
-
-
-@pytest.mark.asyncio
-async def test_structured_summary_over_budget_does_not_send_incomplete_evidence():
-    adapter = FakeAdapter()
-    adapter.max_tokens = 1000
-    agent = make_agent(adapter)
-    step = PlanStep(1, 'work', success=True, result=ToolResult(True, data={'facts': '中文证据' * 2000}))
-    with pytest.raises(ValueError, match='context budget'):
-        await agent._generate_final_response('task', [step])
-    assert not adapter.chat_calls
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize('ids', [['', 'ok'], ['same', 'same'], ['   ', 'ok']])
 async def test_invalid_native_call_ids_rejected_before_any_tool_execution(ids):
     calls = []
@@ -498,7 +392,7 @@ async def test_invalid_native_call_ids_rejected_before_any_tool_execution(ids):
     adapter = FakeAdapter(tool_responses=[ToolCallResponse(tool_calls=[
         ToolCallRequest(call_id, 'echo_tool', {'msg': call_id}) for call_id in ids])])
     agent = make_agent(adapter, registry)
-    result = await agent._execute_react_step(PlanStep(1, 'echo', 'echo_tool'), 0)
+    result = await agent._execute_react_step(PlanStep(1, 'echo'))
     assert not result.success and result.error_category == ErrorCategory.INPUT_ERROR
     assert not calls and not agent.memory.messages
 
@@ -525,11 +419,9 @@ async def test_mixed_tool_batch_preserves_success_and_closes_cancelled_calls(cat
     adapter = FakeAdapter(tool_responses=[ToolCallResponse(tool_calls=requested),
                                           ToolCallResponse(text='PARTIAL_ONLY')])
     agent = make_agent(adapter, registry)
-    agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'create and validate', 'artifact')])
-    agent.planner.replan = AsyncMock(return_value=[PlanStep(1, 'repeat', 'artifact')])
     result = await agent.run('create artifacts')
-    assert not result.success and calls == ['create', 'fail']
-    agent.planner.replan.assert_not_awaited()
+    # A step with completed work is never replayed, whatever its failure.
+    assert not result.success and calls == ['create', 'fail'] and result.plan[0].retries == 0
     data = result.plan[0].result.data
     assert data['total_calls'] == 2 and data['passed'] == 1 and data['failed'] == 1
     assert data['tool_statuses'][1]['success'] is False
@@ -540,7 +432,8 @@ async def test_mixed_tool_batch_preserves_success_and_closes_cancelled_calls(cat
         assert len(group) == 4 and 'Not executed' in group[-1].content
         assert adapter.chat_with_tools_calls == 1
     else:
-        assert data['final_text'] == 'PARTIAL_ONLY'
+        assert data['final_text'] == 'PARTIAL_ONLY' and result.output == 'PARTIAL_ONLY'
+        assert 'partial_results' in event_types(agent)
 
 
 @pytest.mark.asyncio
@@ -553,58 +446,10 @@ async def test_transient_model_failure_before_tools_still_retries_once():
         ToolCallResponse(tool_calls=[ToolCallRequest('one', 'echo_tool', {'msg': 'only once'})]),
         ToolCallResponse(text='done')])
     agent = make_agent(adapter, registry)
-    agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'echo', 'echo_tool')])
     result = await agent.run('echo')
     assert result.success and calls == ['only once'] and result.plan[0].retries == 1
     assert len(result.plan[0].result.data['tool_results']) == 1
-
-
-@pytest.mark.asyncio
-async def test_session_load_failure_is_a_failed_stream_terminal_event(monkeypatch):
-    from app.services.ai.agent.memory import ConversationMemory
-    monkeypatch.setattr(ConversationMemory, 'load', AsyncMock(side_effect=RuntimeError('unavailable')))
-    save = AsyncMock(return_value=True)
-    monkeypatch.setattr(ConversationMemory, 'save', save)
-    agent = make_agent(FakeAdapter(), session_id='stream-read-failed')
-    agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'think')])
-    events = [event async for event in agent.run_stream('task')]
-    assert events[-1].type == 'done' and events[-1].data['success'] is False
-    assert any(event.type == 'error' for event in events)
-    agent.planner.plan.assert_not_awaited()
-    save.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_planning_failure_sets_terminal_failed_state():
-    agent = make_agent(FakeAdapter())
-    agent.planner.plan = AsyncMock(side_effect=RuntimeError('planner unavailable'))
-    result = await agent.run('task')
-    assert not result.success and agent._state == AgentState.FAILED
-    assert 'error' in event_types(agent)
-
-
-@pytest.mark.asyncio
-async def test_thinking_result_reaches_final_summary_without_silent_tail_loss():
-    report = 'Measured observations. ' * 30 + 'TAIL_EVIDENCE_DO_NOT_OMIT'
-    adapter = FakeAdapter(chat_responses=[report, 'final report'])
-    agent = make_agent(adapter)
-    agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'analyze')])
-    result = await agent.run('analyze supplied facts')
-    assert result.success and result.plan[0].result.data == report
-    assert report in adapter.chat_calls[-1][-1].content
-    assert len(adapter.chat_calls) == 2 and adapter.chat_with_tools_calls == 0
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize('response', ['', '   ', None])
-async def test_empty_thinking_output_does_not_become_success(response):
-    adapter = FakeAdapter(chat_responses=[response, 'no result was produced'])
-    agent = make_agent(adapter)
-    agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'analyze')])
-    result = await agent.run('analyze facts')
-    assert not result.success and not result.plan[0].success
-    assert result.plan[0].result.error
-    assert all(isinstance(m.content, str) and m.content.strip() for m in agent.memory.messages)
+    assert result.iterations == 2 and 'step_retry' in event_types(agent)
 
 
 @pytest.mark.asyncio
@@ -629,11 +474,11 @@ async def test_generating_plans_needs_only_the_tools_that_create_them():
     from app.services.ai.agents.workflow_agent import PLAN_ONLY_ROUNDS, WorkflowAgent
     agent = WorkflowAgent(FakeAdapter())
     assert set(agent.tools._tools) == {'create_project', 'create_jmx'}
-    assert not agent.plans_steps and agent.max_react_per_step == PLAN_ONLY_ROUNDS
+    assert agent.max_react_per_step == PLAN_ONLY_ROUNDS
 
 
 @pytest.mark.asyncio
-async def test_a_generated_plan_comes_from_one_conversation_without_a_planner():
+async def test_a_generated_plan_comes_from_one_conversation():
     from app.services.ai.agents.workflow_agent import WorkflowAgent
     registry = ToolRegistry()
     calls = []
@@ -671,184 +516,13 @@ async def test_generating_plans_asks_for_no_resource_checks():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('summary', [RuntimeError('summary unavailable'), '', '   '])
-async def test_summary_failure_preserves_completed_effects_but_fails_run(summary):
-    calls = []
-    registry = ToolRegistry()
-    registry.register(make_echo_tool(calls))
-    adapter = FakeAdapter(tool_responses=[ToolCallResponse(tool_calls=[
-        ToolCallRequest('one', 'echo_tool', {'msg': 'performed once'})]), ToolCallResponse(text='done')])
-    adapter.chat = AsyncMock(side_effect=summary if isinstance(summary, Exception) else None,
-                             return_value=summary if isinstance(summary, str) else '')
-    agent = make_agent(adapter, registry)
-    agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'echo', 'echo_tool')])
-    events = [event async for event in agent.run_stream('echo once')]
-    assert calls == ['performed once']
-    assert agent.state == AgentState.FAILED
-    assert events[-1].type == 'done' and not events[-1].data['success']
-    assert 'summary' in events[-1].data['error'].lower()
-    assert 'complete' not in [event.type for event in events]
-    assert agent.planner.plan.return_value[0].success  # Actual work is not rolled back/replayed.
-    adapter.chat.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_planner_format_retry_keeps_original_task_and_reserves_output(monkeypatch):
-    import json
-    from app.core.config import settings
-    from app.services.ai.agent.planner import PLANNER_RESPONSE_TOKENS
-    adapter = FakeAdapter(chat_responses=['x' * 500, '{"steps":[{"description":"explain"}]}'])
-    planner = make_agent(adapter).planner
-    await planner.plan('ORIGINAL_TASK', 'tool schema')
-    retry = adapter.chat_calls[1]
-    cost = lambda messages: sum(adapter.estimate_tokens(json.dumps(m.to_wire(), ensure_ascii=False)) + 8
-                                for m in messages)
-    # Fit the required policy/task/correction, but not the malformed response.
-    total_budget = cost([m for m in retry if m.role != 'assistant']) + PLANNER_RESPONSE_TOKENS + 256 + 5
-    monkeypatch.setattr(settings, 'AGENT_CONTEXT_TOKEN_BUDGET', total_budget)
-    adapter._chat_responses = ['x' * 500, '{"steps":[{"description":"explain"}]}']
-    assert await planner.plan('ORIGINAL_TASK', 'tool schema')
-    sent = adapter.chat_calls[-1]
-    assert any('ORIGINAL_TASK' in m.content for m in sent)
-    assert cost(sent) + adapter.chat_kwargs[-1]['max_tokens'] + 256 <= total_budget
-
-
-@pytest.mark.asyncio
-async def test_thinking_reserves_existing_output_limit_before_selecting_history(monkeypatch):
-    import json
-    from app.core.config import settings
-    monkeypatch.setattr(settings, 'AGENT_CONTEXT_TOKEN_BUDGET', 10000)
-    adapter = FakeAdapter()
-    agent = make_agent(adapter)
-    agent.memory.add_assistant('old observation ' * 1000)
-    await agent._execute_thinking_step(PlanStep(1, 'explain'), 0)
-    sent = adapter.chat_calls[0]
-    cost = sum(adapter.estimate_tokens(json.dumps(m.to_wire(), ensure_ascii=False)) + 8 for m in sent)
-    assert cost + adapter.chat_kwargs[0].get('max_tokens', 8000) + 256 <= 10000
-
-
-@pytest.mark.asyncio
-async def test_extraction_uses_safety_system_and_does_not_silently_slice_report(monkeypatch):
-    from app.models.schemas import FactSheet
-    from app.services.ai.agents.analysis_agent import AnalysisAgent
-    adapter = FakeAdapter(chat_responses=['{"overall_assessment":"extracted"}'])
-    agent = AnalysisAgent(adapter, tools=ToolRegistry())
-    text = 'a' * 12001 + ' END_EVIDENCE'
-    await agent._extract_structured_analysis(text, FactSheet(execution_id='fixture', module='api'))
-    sent = adapter.chat_calls[0]
-    assert sent[0].role == 'system' and 'untrusted' in sent[0].content
-    assert 'END_EVIDENCE' in sent[-1].content
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize('path', ['direct', 'model'])
-@pytest.mark.parametrize('missing', ['all', 'hypothesis_id', 'source_execution_id', 'module'])
-async def test_structured_extraction_fills_server_metadata_without_losing_predictions(path, missing):
-    import json
-    from app.models.schemas import FactSheet
-    from app.services.ai.agents.analysis_agent import AnalysisAgent
-    hyp = dict(hypothesis_id='provided', source_execution_id='run', module='api',
-               category='recommendation', statement='A controlled retest may show lower latency.',
-               confidence=0.72, supporting_facts=['p99'], testable_prediction='p99 decrease',
-               falsification_design='Repeat the same workload and compare the measured percentile.')
-    expected = dict(hyp)
-    for field in ('hypothesis_id', 'source_execution_id', 'module'):
-        if missing in ('all', field):
-            hyp.pop(field)
-            if field == 'hypothesis_id':
-                expected[field] = ''
-    payload = json.dumps({'overall_assessment': 'Original assessment', 'hypotheses': [hyp]})
-    adapter = FakeAdapter(chat_responses=[payload])
-    agent = AnalysisAgent(adapter, tools=ToolRegistry())
-    result = await agent._extract_structured_analysis(
-        payload if path == 'direct' else 'Narrative analysis', FactSheet(execution_id='run', module='api'))
-    assert result.overall_assessment == 'Original assessment' and len(result.hypotheses) == 1
-    saved = result.hypotheses[0].model_dump(mode='json')
-    assert {key: saved[key] for key in expected} == expected
-    assert result.hypotheses[0].status.value == 'untested'
-    assert len(adapter.chat_calls) == (0 if path == 'direct' else 1)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize('hypotheses', [None, 'invalid', [None],
-    [{'category': 'invalid', 'statement': 'Invalid category'}],
-    [{'category': 'risk', 'statement': 'Invalid confidence', 'confidence': 2}]])
-async def test_structured_extraction_does_not_repair_invalid_hypothesis_content(hypotheses):
-    import json
-    from app.models.schemas import FactSheet
-    from app.services.ai.agents.analysis_agent import AnalysisAgent
-    adapter = FakeAdapter(chat_responses=[json.dumps({'hypotheses': hypotheses})])
-    result = await AnalysisAgent(adapter, tools=ToolRegistry())._extract_structured_analysis(
-        'Narrative analysis without hypothesis markers', FactSheet(execution_id='run', module='api'))
-    assert result.overall_assessment == '见原始分析文本' and result.hypotheses == []
-    assert len(adapter.chat_calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_structured_extraction_keeps_explicit_identity_conflicts_for_archival_validation():
-    import json
-    from app.models.schemas import FactSheet
-    from app.services.ai.agents.analysis_agent import AnalysisAgent
-    adapter = FakeAdapter()
-    payload = {'execution_id': 'other', 'module': 'other-api', 'version': 'other-version',
-               'overall_assessment': 'Explicit conflict must remain visible'}
-    result = await AnalysisAgent(adapter, tools=ToolRegistry())._extract_structured_analysis(
-        json.dumps(payload), FactSheet(execution_id='run', module='api', version='v1'))
-    assert all(getattr(result, key) == value for key, value in payload.items())
-    assert not adapter.chat_calls
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize('path', ['direct', 'model'])
-@pytest.mark.parametrize('fence', ['```json', '```', '```JSON'])
-async def test_structured_extraction_accepts_complete_json_fences_without_extra_calls(path, fence):
-    import json
-    from app.models.schemas import FactSheet
-    from app.services.ai.agents.analysis_agent import AnalysisAgent
-    data = {'overall_assessment': 'Fenced result', 'recommendations': ['Preserve literal ``` inside a string']}
-    payload = fence + '\n' + json.dumps(data) + '\n```'
-    adapter = FakeAdapter(chat_responses=[payload if path == 'model' else '{"overall_assessment":"unnecessary fallback"}'])
-    result = await AnalysisAgent(adapter, tools=ToolRegistry())._extract_structured_analysis(
-        payload if path == 'direct' else 'Narrative analysis', FactSheet(execution_id='run', module='api'))
-    assert result.overall_assessment == data['overall_assessment']
-    assert result.recommendations == data['recommendations']
-    assert len(adapter.chat_calls) == (0 if path == 'direct' else 1)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize('payload', ['Unverified prose\n```json\n{}\n```',
-                                   '```json\n{}\n```\nUnverified prose', '```python\n{}\n```'])
-async def test_structured_extraction_does_not_silently_discard_text_outside_json(payload):
-    from app.models.schemas import FactSheet
-    from app.services.ai.agents.analysis_agent import AnalysisAgent
-    adapter = FakeAdapter(chat_responses=[payload])
-    result = await AnalysisAgent(adapter, tools=ToolRegistry())._extract_structured_analysis(
-        'Narrative analysis', FactSheet(execution_id='run', module='api'))
-    assert result.overall_assessment == '见原始分析文本'
-    assert len(adapter.chat_calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_extraction_oversized_input_uses_existing_heuristic_without_model(monkeypatch):
-    from app.core.config import settings
-    from app.models.schemas import FactSheet
-    from app.services.ai.agents.analysis_agent import AnalysisAgent
-    monkeypatch.setattr(settings, 'AGENT_CONTEXT_TOKEN_BUDGET', 2100)
-    adapter = FakeAdapter()
-    result = await AnalysisAgent(adapter, tools=ToolRegistry())._extract_structured_analysis(
-        'narrative text', FactSheet(execution_id='fixture', module='api'))
-    assert not adapter.chat_calls
-    assert result.execution_id == 'fixture' and result.overall_assessment == '见原始分析文本'
-
-
-@pytest.mark.asyncio
 async def test_oversized_tool_batch_is_rejected_before_any_side_effect():
     calls = []
     registry = ToolRegistry(); registry.register(make_echo_tool(calls))
     adapter = FakeAdapter(tool_responses=[ToolCallResponse(tool_calls=[
         ToolCallRequest(id=f'call-{i}', name='echo_tool', arguments={'msg': str(i)}) for i in range(9)])])
     agent = make_agent(adapter, registry)
-    result = await agent._execute_react_step(PlanStep(1, 'echo', tool_name='echo_tool'), 0)
+    result = await agent._execute_react_step(PlanStep(1, 'echo'))
     assert not result.success
     assert not calls
     assert 'batch' in result.error.lower()
@@ -856,7 +530,6 @@ async def test_oversized_tool_batch_is_rejected_before_any_side_effect():
 
 @pytest.mark.asyncio
 async def test_dangerous_tool_timeout_is_not_automatically_retried(monkeypatch):
-    from app.services.ai.agent import base as base_mod
     registry = ToolRegistry()
     registry.register(Tool('danger', 'danger', {}, AsyncMock(), risk='write'))
     registry.execute = AsyncMock(side_effect=asyncio.TimeoutError)
@@ -872,7 +545,7 @@ async def test_context_budget_reserves_tool_schema_and_response_before_llm(monke
     monkeypatch.setattr(settings, 'AGENT_CONTEXT_TOKEN_BUDGET', 100, raising=False)
     registry = ToolRegistry(); registry.register(make_echo_tool([]))
     adapter = FakeAdapter()
-    result = await make_agent(adapter, registry)._execute_react_step(PlanStep(1, 'echo', tool_name='echo_tool'), 0)
+    result = await make_agent(adapter, registry)._execute_react_step(PlanStep(1, 'echo'))
     assert not result.success
     assert 'budget' in result.error.lower()
     assert adapter.chat_with_tools_calls == 0
@@ -886,7 +559,6 @@ class TestRunMainFlow:
         registry.register(make_echo_tool(echo_calls))
 
         adapter = FakeAdapter(
-            chat_responses=["最终总结"],
             tool_responses=[
                 ToolCallResponse(tool_calls=[
                     ToolCallRequest(id="1", name="echo_tool", arguments={"msg": "hello"})
@@ -895,52 +567,22 @@ class TestRunMainFlow:
             ],
         )
         agent = make_agent(adapter, registry)
-        agent.planner.plan = AsyncMock(return_value=[
-            PlanStep(step_id=1, description="回声测试", tool_name="echo_tool"),
-        ])
 
         result = await agent.run("执行回声测试")
 
         assert result.success is True
-        assert result.output == "最终总结"
+        assert result.output == "步骤完成"  # The model's closing reply; no extra summary call.
+        assert not adapter.chat_calls
         assert echo_calls == ["hello"]  # tool executed with LLM-chosen args
-        assert result.plan[0].success is True
+        assert len(result.plan) == 1 and result.plan[0].success is True
         types = event_types(agent)
-        for expected in ("planning", "plan_ready", "step_start",
-                         "tool_call", "tool_result", "react_done", "complete"):
+        for expected in ("step_start", "tool_call", "tool_result", "react_done", "complete"):
             assert expected in types, f"missing event {expected}"
         assert types.index("step_start") < types.index("tool_call") < types.index("complete")
         assert agent.state == AgentState.COMPLETED
 
     @pytest.mark.asyncio
-    async def test_run_thinking_step_without_tools(self):
-        adapter = FakeAdapter(chat_responses=["思考结果", "最终总结"])
-        agent = make_agent(adapter)
-        agent.planner.plan = AsyncMock(return_value=[
-            PlanStep(step_id=1, description="纯推理步骤", tool_name=None),
-        ])
-
-        result = await agent.run("思考一下")
-
-        assert result.success is True
-        assert result.plan[0].success is True
-        # thinking step chat + final response chat
-        assert len(adapter.chat_calls) >= 2
-
-    @pytest.mark.asyncio
-    async def test_planner_failure_returns_error(self):
-        adapter = FakeAdapter()
-        agent = make_agent(adapter)
-        agent.planner.plan = AsyncMock(side_effect=RuntimeError("LLM down"))
-
-        result = await agent.run("任意任务")
-
-        assert result.success is False
-        assert "Planning failed" in result.error
-        assert result.error_traceback
-
-    @pytest.mark.asyncio
-    async def test_tool_error_classified_and_replan_invoked(self):
+    async def test_tool_error_is_classified_and_ends_the_run(self):
         async def failing_handler() -> dict:
             raise FileNotFoundError("plan.jmx not found")
 
@@ -951,7 +593,6 @@ class TestRunMainFlow:
             handler=failing_handler,
         ))
         adapter = FakeAdapter(
-            chat_responses=["总结"],
             tool_responses=[
                 ToolCallResponse(tool_calls=[
                     ToolCallRequest(id="1", name="bad_tool", arguments={})
@@ -960,51 +601,41 @@ class TestRunMainFlow:
             ],
         )
         agent = make_agent(adapter, registry)
-        agent.planner.plan = AsyncMock(return_value=[
-            PlanStep(step_id=1, description="会失败的步骤", tool_name="bad_tool"),
-        ])
-        agent.planner.replan = AsyncMock(return_value=None)  # no better plan
 
         result = await agent.run("执行会失败的任务")
 
-        # A failed plan must remain failed even if a summary can be generated.
         assert result.plan[0].success is False
         assert result.plan[0].result.error_category == ErrorCategory.INPUT_ERROR
-        agent.planner.replan.assert_awaited_once()
-        assert result.success is False
-        assert result.error
+        assert result.success is False and 'not found' in result.error
+        assert result.output == "放弃该步骤"  # What the model said it did stays visible.
+        assert adapter.chat_with_tools_calls == 2 and agent.state == AgentState.FAILED
 
     @pytest.mark.asyncio
-    async def test_max_iterations_caps_execution(self):
-        adapter = FakeAdapter(chat_responses=["x"] * 20)
-        agent = make_agent(adapter, max_iterations=2)
-        agent.planner.plan = AsyncMock(return_value=[
-            PlanStep(step_id=i, description=f"步骤{i}", tool_name=None)
-            for i in range(1, 6)
-        ])
-
-        result = await agent.run("多步任务")
-
-        assert result.iterations == 2  # capped, not all 5 steps
-        executed = [s for s in result.plan if s.success]
-        assert len(executed) == 2
-        assert result.success is False
+    async def test_a_transient_failure_is_retried_up_to_its_limit(self):
+        agent = talking_agent()
+        execute = AsyncMock(return_value=ToolResult(False, error='timeout', error_category=ErrorCategory.RETRYABLE))
+        agent._execute_react_step = execute
+        result = await agent.run('task')
+        assert execute.await_count == 1 + result.plan[0].max_retries
+        assert result.iterations == execute.await_count
+        assert event_types(agent).count('step_retry') == result.plan[0].max_retries
+        assert not result.success and result.error == 'timeout'
 
     @pytest.mark.asyncio
-    async def test_cancel_during_run(self):
-        adapter = FakeAdapter()
-        agent = make_agent(adapter)
+    async def test_cancel_between_retries_stops_the_run(self):
+        agent = talking_agent()
 
-        async def plan_then_cancel(**kwargs):
+        async def fail_then_cancel(step):
             agent.cancel()
-            return [PlanStep(step_id=1, description="s", tool_name=None)]
+            return ToolResult(False, error='timeout', error_category=ErrorCategory.RETRYABLE)
 
-        agent.planner.plan = AsyncMock(side_effect=plan_then_cancel)
+        agent._execute_react_step = AsyncMock(side_effect=fail_then_cancel)
 
         result = await agent.run("任务")
 
         assert result.success is False
         assert result.error == "Cancelled by user"
+        agent._execute_react_step.assert_awaited_once()
 
 
 class TestRunStream:
@@ -1013,7 +644,6 @@ class TestRunStream:
         registry = ToolRegistry()
         registry.register(make_echo_tool([]))
         adapter = FakeAdapter(
-            chat_responses=["总结"],
             tool_responses=[
                 ToolCallResponse(tool_calls=[
                     ToolCallRequest(id="1", name="echo_tool", arguments={"msg": "m"})
@@ -1022,9 +652,6 @@ class TestRunStream:
             ],
         )
         agent = make_agent(adapter, registry)
-        agent.planner.plan = AsyncMock(return_value=[
-            PlanStep(step_id=1, description="回声", tool_name="echo_tool"),
-        ])
 
         streamed = [e async for e in agent.run_stream("任务")]
 
@@ -1032,10 +659,10 @@ class TestRunStream:
         last = streamed[-1]
         assert last.type == "done"
         assert last.data["success"] is True
-        assert last.data["output"] == "总结"
+        assert last.data["output"] == "done"
         # events arrive in execution order, not all at the end
         types = [e.type for e in streamed]
-        assert types.index("plan_ready") < types.index("step_start") < types.index("done")
+        assert types.index("step_start") < types.index("tool_call") < types.index("done")
         # stream queue is detached after the run
         assert agent._stream_queue is None
 
@@ -1043,26 +670,18 @@ class TestRunStream:
 class TestReactLoop:
 
     @pytest.mark.asyncio
-    async def test_parallel_runs_cannot_overwrite_same_session(self):
-        first = make_agent(FakeAdapter(), session_id='same-session')
-        second = make_agent(FakeAdapter(), session_id='same-session')
-        entered = asyncio.Event()
-        release = asyncio.Event()
-        async def plan(**kwargs):
-            entered.set()
-            await release.wait()
-            return [PlanStep(1, 'explain')]
-        first.planner.plan = plan
-        second.planner.plan = AsyncMock(return_value=[PlanStep(1, 'explain')])
-        running = asyncio.create_task(first.run('first'))
+    async def test_overlapping_runs_of_one_agent_are_rejected(self):
+        agent = talking_agent()
+        entered, release, steps = pause_steps(agent)
+        running = asyncio.create_task(agent.run('first'))
         await entered.wait()
         try:
-            result = await asyncio.wait_for(second.run('second'), timeout=1)
-            assert not result.success and 'session' in result.error.lower()
-            second.planner.plan.assert_not_awaited()
+            result = await asyncio.wait_for(agent.run('second'), timeout=1)
+            assert not result.success and 'running task' in result.error
+            assert len(steps) == 1
         finally:
             release.set()
-            await running
+            assert (await running).success
 
     def test_subclasses_share_agent_concurrency_budget(self, monkeypatch):
         class First(BaseAgent):
@@ -1073,13 +692,25 @@ class TestReactLoop:
         assert First._get_concurrency_semaphore() is Second._get_concurrency_semaphore()
 
     @pytest.mark.asyncio
+    async def test_a_run_waits_for_a_free_agent_slot(self, monkeypatch):
+        monkeypatch.setattr(BaseAgent, '_concurrency_semaphore', asyncio.Semaphore(1))
+        first, second = talking_agent(), talking_agent()
+        entered, release, _ = pause_steps(first)
+        running = asyncio.create_task(first.run('first'))
+        await entered.wait()
+        waiting = asyncio.create_task(second.run('second'))
+        await asyncio.sleep(0.05)
+        assert not waiting.done() and second.adapter.chat_with_tools_calls == 0
+        release.set()
+        assert (await running).success and (await waiting).success
+
+    @pytest.mark.asyncio
     async def test_react_preserves_native_call_ids_in_observation(self):
         registry = ToolRegistry()
         registry.register(make_echo_tool([]))
         adapter = FakeAdapter(tool_responses=[ToolCallResponse(tool_calls=[ToolCallRequest('native-1', 'echo_tool', {'msg': 'hi'})]),
                                                ToolCallResponse(text='done')])
         agent = make_agent(adapter, registry)
-        agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'echo', 'echo_tool')])
         assert (await agent.run('echo')).success
         messages = adapter.tool_messages[1]
         assert messages[-2].tool_calls[0]['id'] == 'native-1'
@@ -1098,9 +729,6 @@ class TestReactLoop:
             for i in range(10)
         ])
         agent = make_agent(adapter, registry, max_react_per_step=2)
-        agent.planner.plan = AsyncMock(return_value=[
-            PlanStep(step_id=1, description="无限调用", tool_name="echo_tool"),
-        ])
 
         result = await agent.run("任务")
 
@@ -1111,55 +739,23 @@ class TestReactLoop:
 
 class TestAuditRegressions:
     @pytest.mark.asyncio
-    async def test_empty_plan_falls_back_to_actual_tool_execution(self):
+    async def test_a_run_executes_the_task_with_its_tools(self):
         calls = []
         registry = ToolRegistry()
         registry.register(make_echo_tool(calls))
         adapter = FakeAdapter(tool_responses=[ToolCallResponse(tool_calls=[
             ToolCallRequest('1', 'echo_tool', {'msg': 'created'})]), ToolCallResponse(text='done')])
         agent = make_agent(adapter, registry)
-        agent.planner.plan = AsyncMock(return_value=[])
         result = await agent.run('Use the echo tool')
         assert calls == ['created']
         assert result.success
 
     @pytest.mark.asyncio
-    async def test_empty_plan_without_tools_fails(self):
-        agent = make_agent(FakeAdapter())
-        agent.planner.plan = AsyncMock(return_value=[])
-        assert not (await agent.run('task')).success
-
-    @pytest.mark.asyncio
-    async def test_replan_replaces_failed_step_without_repeating_it(self):
-        registry = ToolRegistry()
-        registry.register(make_echo_tool([]))
-        agent = make_agent(FakeAdapter(), registry, max_iterations=2)
-        agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'bad', 'echo_tool')])
-        agent.planner.replan = AsyncMock(return_value=[PlanStep(2, 'replacement', 'echo_tool')])
-        seen = []
-
-        async def execute(step, iteration):
-            seen.append(step.description)
-            return (ToolResult(False, error='bad input', error_category=ErrorCategory.INPUT_ERROR)
-                    if step.description == 'bad' else ToolResult(True, data={'done': True}))
-
-        agent._execute_react_step = execute
-        result = await agent.run('task')
-        assert seen == ['bad', 'replacement']
-        assert result.success
-
-    @pytest.mark.asyncio
-    async def test_retry_attempts_count_toward_iteration_budget(self):
-        registry = ToolRegistry()
-        registry.register(make_echo_tool([]))
-        agent = make_agent(FakeAdapter(), registry, max_iterations=1)
-        agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'retry', 'echo_tool')])
-        execute = AsyncMock(return_value=ToolResult(False, error='timeout', error_category=ErrorCategory.RETRYABLE))
-        agent._execute_react_step = execute
-        result = await agent.run('task')
-        assert execute.await_count == 1
-        assert result.iterations == 1
-        assert not result.success
+    async def test_a_run_without_tools_fails_before_the_model(self):
+        adapter = FakeAdapter()
+        result = await make_agent(adapter).run('task')
+        assert not result.success and 'No tools' in result.error
+        assert adapter.chat_with_tools_calls == 0 and not adapter.chat_calls
 
     @pytest.mark.asyncio
     async def test_react_receives_task_context_history_and_prior_results(self):
@@ -1167,18 +763,15 @@ class TestAuditRegressions:
         registry.register(make_echo_tool([]))
         adapter = FakeAdapter(tool_responses=[
             ToolCallResponse(tool_calls=[ToolCallRequest('1', 'echo_tool', {'msg': 'RESOURCE_ID_17'})]),
-            ToolCallResponse(text='done'),
-            ToolCallResponse(tool_calls=[ToolCallRequest('2', 'echo_tool', {'msg': 'done'})]),
             ToolCallResponse(text='done')])
         agent = make_agent(adapter, registry)
         agent.memory.add_user('OLD_SESSION_SENTINEL')
-        agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'first', 'echo_tool'), PlanStep(2, 'second', 'echo_tool')])
         result = await agent.run('ORIGINAL_TASK_SENTINEL', context='CONTEXT_SENTINEL')
         assert result.success
-        text = '\n'.join(m.content for m in adapter.tool_messages[2])
+        text = '\n'.join(m.content for m in adapter.tool_messages[1])
         for marker in ['OLD_SESSION_SENTINEL', 'ORIGINAL_TASK_SENTINEL', 'CONTEXT_SENTINEL', 'RESOURCE_ID_17']:
             assert marker in text
-        assert sum(m.role == 'system' for m in adapter.tool_messages[2]) == 1
+        assert sum(m.role == 'system' for m in adapter.tool_messages[1]) == 1
         assert not any(m.role == 'system' for m in agent.memory.messages)
 
     @pytest.mark.asyncio
@@ -1188,43 +781,35 @@ class TestAuditRegressions:
         registry.register(make_echo_tool([]))
         adapter = FakeAdapter(tool_responses=[
             ToolCallResponse(tool_calls=[ToolCallRequest('1', 'echo_tool', {'msg': 'first'})]),
-            ToolCallResponse(text='done'),
             ToolCallResponse(tool_calls=[ToolCallRequest('2', 'echo_tool', {'msg': 'second'})]),
             ToolCallResponse(text='done')])
         agent = make_agent(adapter, registry)
         agent.memory = ConversationMemory(max_messages=3)
-        agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'first', 'echo_tool'), PlanStep(2, 'second', 'echo_tool')])
         result = await agent.run('PINNED_CURRENT_TASK', context='PINNED_CURRENT_CONSTRAINT')
         assert result.success
-        second_step = '\n'.join(m.content for m in adapter.tool_messages[2])
-        assert second_step.count('PINNED_CURRENT_TASK') == 1
-        assert second_step.count('PINNED_CURRENT_CONSTRAINT') == 1
+        last_round = '\n'.join(m.content for m in adapter.tool_messages[2])
+        assert last_round.count('PINNED_CURRENT_TASK') == 1
+        assert last_round.count('PINNED_CURRENT_CONSTRAINT') == 1
 
     @pytest.mark.asyncio
     async def test_no_tool_action_cannot_complete_a_tool_step(self):
         registry = ToolRegistry()
         registry.register(make_echo_tool([]))
-        agent = make_agent(FakeAdapter(), registry, max_iterations=1)
-        agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'create artifact', 'echo_tool')])
-        agent.planner.replan = AsyncMock(return_value=None)
+        agent = make_agent(FakeAdapter(), registry)
         result = await agent.run('task')
         assert not result.success
         assert 'No tool' in result.plan[0].result.error
 
     @pytest.mark.asyncio
-    async def test_cancelled_tool_is_not_replanned(self):
-        registry = ToolRegistry()
-        registry.register(make_echo_tool([]))
-        agent = make_agent(FakeAdapter(), registry)
-        agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'cancelled', 'echo_tool')])
-        agent.planner.replan = AsyncMock(return_value=None)
+    async def test_a_cancelled_step_is_not_retried(self):
+        agent = talking_agent()
         agent._execute_react_step = AsyncMock(return_value=ToolResult(
             False, error='Cancelled by user', error_category=ErrorCategory.CANCELLED))
         result = await agent.run('task')
         assert not result.success
         assert result.error == 'Cancelled by user'
         assert agent.state == AgentState.CANCELLED
-        agent.planner.replan.assert_not_awaited()
+        agent._execute_react_step.assert_awaited_once()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize('cancel_via_result', [False, True])
@@ -1244,61 +829,17 @@ class TestAuditRegressions:
             ToolCallRequest('1', 'echo_tool', {'msg': 'first'}),
             ToolCallRequest('2', 'echo_tool', {'msg': 'must not run'})])])
         agent = make_agent(adapter, registry)
-        agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'task', 'echo_tool')])
-        agent.planner.replan = AsyncMock(return_value=None)
         result = await agent.run('task')
         assert calls == ['first']
         assert not result.success
         assert agent.state == AgentState.CANCELLED
-        agent.planner.replan.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_failed_run_summary_prompt_does_not_assert_completion(self):
-        adapter = FakeAdapter()
-        agent = make_agent(adapter, max_iterations=0)
-        agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'pending')])
-        result = await agent.run('task')
-        assert not result.success
-        assert '任务已完成' not in adapter.chat_calls[-1][-1].content
-
-    @pytest.mark.asyncio
-    async def test_final_summary_retains_shared_policy(self):
-        adapter = FakeAdapter()
-        agent = make_agent(adapter)
-        await agent._generate_final_response('summarize', [PlanStep(1, 'read', success=True)])
-        assert adapter.chat_calls[-1][0].role == 'system'
-        assert 'untrusted' in adapter.chat_calls[-1][0].content
-
-    @pytest.mark.asyncio
-    async def test_session_with_only_a_summary_is_loaded(self, monkeypatch):
-        from app.services.ai.agent.memory import ConversationMemory
-        memory = ConversationMemory(session_id='summary-session')
-        memory._summary = 'SUMMARY_ONLY_CONTEXT'
-        monkeypatch.setattr(ConversationMemory, 'load', AsyncMock(return_value=memory))
-        monkeypatch.setattr(ConversationMemory, 'save', AsyncMock(return_value=True))
-        adapter = FakeAdapter()
-        agent = make_agent(adapter, session_id='summary-session')
-        agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'explain')])
-        await agent.run('continue')
-        assert any('SUMMARY_ONLY_CONTEXT' in m.content for m in adapter.chat_calls[0])
+        assert adapter.chat_with_tools_calls == 1
 
     def test_specialized_prompt_keeps_shared_safety_rules(self):
         agent = make_agent(FakeAdapter(), system_prompt='Only analyze results.')
         assert 'Only analyze results.' in agent.system_prompt
         assert 'NEVER delete' in agent.system_prompt
         assert 'untrusted' in agent.system_prompt
-
-    @pytest.mark.asyncio
-    async def test_valid_thinking_plan_does_not_trigger_format_retry(self):
-        from app.services.ai.agent.planner import TaskPlanner
-        adapter = FakeAdapter(chat_responses=['{"steps":[{"step_id":1,"description":"explain","tool_name":null}]}'])
-        plan = await TaskPlanner(adapter).plan('explain', '')
-        assert plan[0].description == 'explain'
-        assert len(adapter.chat_calls) == 1
-
-    def test_invalid_planner_text_is_not_a_successful_thinking_step(self):
-        from app.services.ai.agent.planner import TaskPlanner
-        assert TaskPlanner(FakeAdapter())._parse_plan('not JSON') == []
 
     @pytest.mark.parametrize('nested', [False, True])
     def test_workflow_extracts_raw_tool_results(self, nested):
@@ -1322,16 +863,16 @@ class TestAuditRegressions:
     def test_workflow_counts_a_plan_once_even_when_other_tools_return_its_path(self):
         from app.services.ai.agents.workflow_agent import WorkflowAgent
         from app.services.ai.agent.types import AgentResult
-        created = {'tool_statuses': [{'tool': 'create_jmx', 'success': True, 'error': None},
-                                     {'tool': 'get_jmx_content', 'success': True, 'error': None}],
-                   'tool_results': [{'jmx_path': 'test_plans/p/a1.jmx', 'test_plan_id': 'plan-a'},
-                                    {'jmx_path': 'test_plans/p/a1.jmx', 'content': '<jmeterTestPlan/>'}]}
-        read_first = {'jmx_path': 'test_plans/p/b2.jmx'}
+        created = {'tool_statuses': [{'tool': 'get_jmx_content', 'success': True, 'error': None},
+                                     {'tool': 'create_jmx', 'success': True, 'error': None},
+                                     {'tool': 'get_jmx_content', 'success': True, 'error': None},
+                                     {'tool': 'create_jmx', 'success': True, 'error': None}],
+                   'tool_results': [{'jmx_path': 'test_plans/p/b2.jmx'},
+                                    {'jmx_path': 'test_plans/p/a1.jmx', 'test_plan_id': 'plan-a'},
+                                    {'jmx_path': 'test_plans/p/a1.jmx', 'content': '<jmeterTestPlan/>'},
+                                    {'jmx_path': 'test_plans/p/b2.jmx', 'test_plan_id': 'plan-b'}]}
         result = AgentResult(True, 'task', plan=[
-            PlanStep(1, 'read b', success=True, result=ToolResult(True, data=read_first)),
-            PlanStep(2, 'create a', success=True, result=ToolResult(True, data=created)),
-            PlanStep(3, 'create b', success=True, result=ToolResult(True, data={
-                'jmx_path': 'test_plans/p/b2.jmx', 'test_plan_id': 'plan-b'}))])
+            PlanStep(1, 'create plans', success=True, result=ToolResult(True, data=created))])
         assert WorkflowAgent._extract_workflow_results(result)['test_plan_ids'] == ['plan-b', 'plan-a']
 
 
@@ -1361,7 +902,6 @@ class TestToolResultContract:
 class TestToolTimeout:
     @pytest.mark.asyncio
     async def test_closing_stream_awaits_runner_cleanup(self):
-        from app.services.ai.agent.types import AgentEvent
         agent = make_agent(FakeAdapter())
         cleaned = []
         async def run(*args):
@@ -1403,29 +943,34 @@ class TestToolTimeout:
 
 
 @pytest.mark.asyncio
-async def test_later_steps_see_the_task_before_earlier_results_and_are_told_not_to_redo_them():
-    # Regression: with the task after the history, each step re-ran the whole task (duplicate projects).
+async def test_a_retry_sees_the_task_before_its_earlier_results_and_is_told_not_to_redo_them():
+    # Regression: with the task after the history, the model re-ran the whole task (duplicate projects).
     calls = []
+
+    async def flaky(msg: str = '') -> dict:
+        calls.append(msg)
+        if len(calls) == 1:
+            raise ConnectionError('connection refused')
+        return {'echo': msg}
+
     registry = ToolRegistry()
-    registry.register(make_echo_tool(calls))
+    registry.register(Tool('echo_tool', 'echo', {'type': 'object', 'properties': {'msg': {'type': 'string'}}}, flaky))
     adapter = FakeAdapter(tool_responses=[
-        ToolCallResponse(tool_calls=[ToolCallRequest('c1', 'echo_tool', {'msg': 'project p1 created'})]),
-        ToolCallResponse(text='step 1 done'),
-        ToolCallResponse(tool_calls=[ToolCallRequest('c2', 'echo_tool', {'msg': 'plan for p1'})]),
-        ToolCallResponse(text='step 2 done'),
+        ToolCallResponse(tool_calls=[ToolCallRequest('c1', 'echo_tool', {'msg': 'first try'})]),
+        ToolCallResponse(text='the tool was unreachable'),
+        ToolCallResponse(tool_calls=[ToolCallRequest('c2', 'echo_tool', {'msg': 'second try'})]),
+        ToolCallResponse(text='done'),
     ])
     agent = make_agent(adapter, registry)
-    agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'create project', 'echo_tool'),
-                                                 PlanStep(2, 'create plan', 'echo_tool')])
-    result = await agent.run('TASK: create project then plan')
-    assert result.success and calls == ['project p1 created', 'plan for p1']
-    second_step = adapter.tool_messages[2]
-    contents = [m.content or '' for m in second_step]
+    result = await agent.run('TASK: create the project')
+    assert result.success and calls == ['first try', 'second try'] and result.plan[0].retries == 1
+    retry = adapter.tool_messages[2]
+    contents = [m.content or '' for m in retry]
     task_at = next(i for i, c in enumerate(contents) if c.startswith('TASK:'))
-    result_at = next(i for i, m in enumerate(second_step) if m.role == 'tool' and 'project p1 created' in (m.content or ''))
-    assert task_at < result_at
-    assert contents.count('TASK: create project then plan') == 1
-    assert contents[-1].startswith('Current step 2: create plan') and 'Do only this step' in contents[-1]
+    failed_at = next(i for i, m in enumerate(retry) if m.role == 'tool' and 'connection refused' in (m.content or ''))
+    assert task_at < failed_at
+    assert contents.count('TASK: create the project') == 1
+    assert contents[-1].startswith('Complete the task above') and 'instead of repeating those calls' in contents[-1]
 
 
 @pytest.mark.asyncio
@@ -1447,7 +992,7 @@ async def test_workflow_stream_yields_step_events_then_the_result():
 
 
 @pytest.mark.asyncio
-async def test_run_error_names_the_failed_step_and_its_error():
+async def test_run_error_carries_the_failed_tool_error():
     calls = []
     registry = ToolRegistry()
     registry.register(make_echo_tool(calls))
@@ -1461,26 +1006,9 @@ async def test_run_error_names_the_failed_step_and_its_error():
                                      ToolCallRequest('b', 'validate', {'path': 'wrong.jmx'})]),
         ToolCallResponse(text='done')])
     agent = make_agent(adapter, registry)
-    agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'create and validate the plan', 'echo_tool')])
     result = await agent.run('task')
     assert not result.success and calls == ['created']
-    assert result.error.startswith('Step 1 failed (create and validate the plan):')
-    assert 'wrong.jmx' in result.error
-
-
-@pytest.mark.asyncio
-async def test_summary_keeps_tool_receipts_but_drops_the_step_narration():
-    adapter = FakeAdapter()
-    agent = make_agent(adapter)
-    data = {'tool_statuses': [{'tool': 'create_jmx', 'success': True, 'error': None}],
-            'final_text': 'NARRATION ' * 50, 'tool_results': [{'jmx_path': 'RECEIPT_PATH'}]}
-    await agent._generate_final_response('task', [PlanStep(1, 'make plan', success=True, result=ToolResult(True, data=data))])
-    prompt = adapter.chat_calls[0][-1].content
-    assert 'RECEIPT_PATH' in prompt and 'NARRATION' not in prompt
-    # With no receipts, the narration is all there is and stays.
-    only_text = {'tool_statuses': [], 'final_text': 'ONLY_TEXT', 'message': 'ONLY_TEXT'}
-    await agent._generate_final_response('task', [PlanStep(1, 'x', success=False, result=ToolResult(False, data=only_text))])
-    assert 'ONLY_TEXT' in adapter.chat_calls[1][-1].content
+    assert 'wrong.jmx' in result.error and result.output == 'done'
 
 
 def _flaky_registry(calls, first_error):
@@ -1507,7 +1035,6 @@ async def test_an_input_error_the_model_fixes_in_the_same_step_does_not_fail_it(
     calls = []
     agent = make_agent(FakeAdapter(tool_responses=_retry_responses()),
                        _flaky_registry(calls, '1 validation error for ProjectEnvironment'))
-    agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'create project', 'create_project')])
     result = await agent.run('task')
     assert calls == ['bad', 'fixed'] and result.success and result.plan[0].success
 
@@ -1517,7 +1044,6 @@ async def test_a_failure_that_is_not_an_input_error_still_fails_the_step():
     calls = []
     agent = make_agent(FakeAdapter(tool_responses=_retry_responses()),
                        _flaky_registry(calls, 'unexpected crash while writing files'))
-    agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'create project', 'create_project')])
     result = await agent.run('task')
     assert calls == ['bad', 'fixed'] and not result.success
 

@@ -37,10 +37,6 @@ PLAN_ONLY_ROUNDS = 8
 class WorkflowAgent(BaseAgent):
     """Drafts a project and test plans from an API document; the start-from-document page streams it."""
 
-    final_instructions = "只写结果，不复述步骤：创建了哪些项目和计划（含 ID）、失败及原因、下一步。"
-    # One conversation: create the project, then one create_jmx per test type and any corrections.
-    plans_steps = False
-
     def __init__(self, adapter: BaseAIAdapter, tools: Optional[ToolRegistry] = None):
         if tools is None:
             tools = ToolRegistry()
@@ -50,7 +46,6 @@ class WorkflowAgent(BaseAgent):
             adapter=adapter,
             tools=tools,
             system_prompt=WORKFLOW_SYSTEM_PROMPT,
-            max_iterations=15,
             max_react_per_step=PLAN_ONLY_ROUNDS,
         )
 

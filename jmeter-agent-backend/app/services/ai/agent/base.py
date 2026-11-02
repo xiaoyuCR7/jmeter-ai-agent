@@ -1,14 +1,12 @@
-"""BaseAgent — core agent loop: plan -> react -> observe -> reflect.
+"""BaseAgent — core agent loop: one ReAct step per run.
 
-Each step runs a ReAct loop: the LLM reasons about the step, decides which
-tools to call, observes results, and iterates until the step is complete or
-max_react_per_step is reached. This replaces the old one-shot tool-calling
-with a proper multi-turn reasoning cycle.
+The LLM reasons about the task, decides which tools to call, observes results,
+and iterates until it concludes or max_react_per_step is reached.
 
 Robust error handling: every exception is logged with full traceback,
 stored in AgentResult.error_traceback, and surfaced in events.
-Errors are classified (retryable / input_error / system_error / tool_error)
-so the planner can make intelligent replanning decisions.
+Errors are classified (retryable / input_error / system_error / tool_error):
+a retryable failure reruns the step, the others end the run.
 
 Timeout control: every tool execution is wrapped in asyncio.wait_for
 with configurable AGENT_TOOL_TIMEOUT_SECONDS.
@@ -20,10 +18,8 @@ asyncio.Semaphore.
 import json
 import time
 import asyncio
-import re
 import traceback
 import logging
-import hashlib
 from contextlib import aclosing
 from typing import Optional, AsyncIterator, Callable, Awaitable
 
@@ -34,7 +30,6 @@ from app.services.ai.agent.types import (
 )
 from app.services.ai.agent.tool_registry import ToolRegistry
 from app.services.ai.agent.memory import ConversationMemory
-from app.services.ai.agent.planner import TaskPlanner
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -52,7 +47,7 @@ AGENT_SYSTEM_PROMPT = """Performance test agent. Use tools to: generate JMX plan
 """ + AGENT_SAFETY_RULES + """
 
 ## Workflow
-Understand task → plan steps → execute with tools → observe results → adapt or conclude.
+Understand task → execute with tools → observe results → adapt or conclude.
 Use compare_runs for comparisons (never manual). Validate results then report."""
 
 REACT_RESPONSE_TOKENS = 8000
@@ -62,36 +57,28 @@ REACT_RESPONSE_TOKENS = 8000
 
 
 class BaseAgent:
-    """Core agent with a plan -> react -> observe -> reflect loop.
-
-    Each step in the plan executes as a ReAct (Reasoning + Acting) loop:
-    1. LLM receives step description + available tools
+    """Core agent that runs each task as one ReAct (Reasoning + Acting) step:
+    1. LLM receives the task + available tools
     2. LLM decides which tool(s) to call (or responds with text)
     3. Tool results are fed back to LLM as observations
-    4. LLM decides: call more tools, or conclude the step
+    4. LLM decides: call more tools, or conclude
     5. Loop continues until LLM concludes or max_react_per_step reached
 
     Error handling:
     - Tool errors are classified (retryable / input_error / system_error)
       and fed back to the LLM so it can adapt its strategy.
-    - The planner uses error_category to decide: retry, fix args, skip, or abort.
+    - A retryable step failure reruns the step, up to its max_retries.
 
     Timeout control:
     - Every tool call is wrapped in asyncio.wait_for with timeout from
       settings.AGENT_TOOL_TIMEOUT_SECONDS (default 600s).
     """
 
-    # Whether to plan steps first. A plan pays for itself on multi-stage work; one tool call
-    # with a planner around it costs a plan, a closing call per step and a summary.
-    plans_steps = True
     # Whether a task must end in a tool call. Evidence already in the prompt may be enough to answer.
     requires_tools = True
-    final_instructions = ("请给出：\n1. 任务完成情况总结\n2. 关键结果（如果有数据请列出来）\n"
-                          "3. 后续建议（如果有的话）")
 
     # Module-level semaphore to cap concurrent agent runs
     _concurrency_semaphore: Optional[asyncio.Semaphore] = None
-    _active_sessions: set[str] = set()
 
     def __init__(
         self,
@@ -99,21 +86,15 @@ class BaseAgent:
         adapter: BaseAIAdapter,
         tools: Optional[ToolRegistry] = None,
         system_prompt: Optional[str] = None,
-        max_iterations: int = 15,
         max_react_per_step: int = 5,
-        session_id: Optional[str] = None,
     ):
         self.name = name
         self.adapter = adapter
         self.tools = tools or ToolRegistry()
-        self.memory = ConversationMemory(session_id=session_id)
-        # The planner decides what happens, so it needs the agent's domain rules too.
-        self.planner = TaskPlanner(adapter, safety_prompt=AGENT_SAFETY_RULES, domain_prompt=system_prompt or "")
+        self.memory = ConversationMemory()
         self.system_prompt = (system_prompt + "\n\n" + AGENT_SAFETY_RULES
                               if system_prompt else AGENT_SYSTEM_PROMPT)
-        self.max_iterations = max_iterations
         self.max_react_per_step = max_react_per_step
-        self.session_id = session_id
         self._state = AgentState.IDLE
         self._events: list[AgentEvent] = []
         self._cancel_flag = False
@@ -162,23 +143,18 @@ class BaseAgent:
         return await self._run_guarded(task, lambda: self._run_impl(task, context))
 
     async def _run_guarded(self, task: str, operation: Callable[[], Awaitable[AgentResult]]) -> AgentResult:
-        """Serialize each conversation; reject overlapping writers before mutating memory."""
-        if (self._run_active or (self.session_id and self.session_id in BaseAgent._active_sessions)
-                or (self._stream_runner is not None and self._stream_runner is not asyncio.current_task())):
-            return AgentResult(False, task, error='This session already has a running task; wait or cancel it first')
+        """Serialize runs of one agent; reject overlapping writers before mutating memory."""
+        if self._run_active or (self._stream_runner is not None and self._stream_runner is not asyncio.current_task()):
+            return AgentResult(False, task, error='This agent already has a running task; wait or cancel it first')
         self._run_active = True
-        if self.session_id:
-            BaseAgent._active_sessions.add(self.session_id)
         try:
             return await operation()
         finally:
             self._run_active = False
-            if self.session_id:
-                BaseAgent._active_sessions.discard(self.session_id)
 
     async def _run_impl(self, task: str, context: Optional[str] = None,
                         *, _preserve_events: bool = False) -> AgentResult:
-        """Main entry point. Run the agent loop to completion.
+        """Run the task as one ReAct step, rerunning it while its failure is transient.
 
         Args:
             task: The user's task description.
@@ -208,69 +184,9 @@ class BaseAgent:
                 duration_seconds=time.time() - start_time,
             )
 
-        plan = []
-        memory_writable = False
+        step = PlanStep(step_id=1, description="Complete the task above")  # The task itself is pinned in context.
+        plan = [step]
         try:
-            # Load persisted memory if session_id is provided
-            if self.session_id:
-                try:
-                    loaded = await ConversationMemory.load(self.session_id)
-                    if loaded is not None:
-                        self.memory = loaded
-                        self._emit("memory_loaded", f"Loaded conversation memory for session {self.session_id}")
-                    elif settings.MEMORY_PERSIST_ENABLED:
-                        # A reused agent must not revive expired/deleted persistent history.
-                        self.memory = ConversationMemory(
-                            session_id=self.session_id, max_messages=self.memory.max_messages,
-                            summary_trigger=self.memory.summary_trigger, summary_keep=self.memory.summary_keep)
-                    memory_writable = True
-                except Exception as e:
-                    logger.warning(f"[{self.name}] Failed to load memory for session {self.session_id}: {e}")
-                    self._state = AgentState.FAILED
-                    error = 'Conversation memory could not be loaded; no work was executed or history overwritten'
-                    self._emit('error', error)
-                    return AgentResult(False, task, events=self._events, error=error,
-                                       duration_seconds=time.time() - start_time)
-
-            self._state = AgentState.PLANNING
-            self._emit("planning", "Decomposing task into steps...")
-
-            # Step 1: Plan
-            try:
-                if self.plans_steps:
-                    plan = await self.planner.plan(
-                        task=task,
-                        tools_description=self.tools.get_tools_description(),
-                        context=context,
-                    )
-            except Exception as e:
-                logger.exception(f"[{self.name}] Planner failed:")
-                self._last_error_traceback = traceback.format_exc()
-                self._state = AgentState.FAILED
-                self._emit('error', f'Planning failed: {str(e)}')
-                return AgentResult(
-                    success=False, task=task, plan=[],
-                    events=self._events, iterations=0,
-                    error=f"Planning failed: {str(e)}",
-                    error_traceback=self._last_error_traceback,
-                    duration_seconds=time.time() - start_time,
-                )
-
-            self._emit("plan_ready", f"Plan has {len(plan)} steps", {
-                "steps": [{"step_id": s.step_id, "description": s.description} for s in plan]
-            })
-
-            # ── Fallback: if planner produced no effective steps, run task directly ──
-            direct_react = not plan and bool(self.tools)
-            if direct_react:
-                self._emit("planning", "No effective plan — executing task directly with tools")
-                plan = [PlanStep(
-                    step_id=1, description="Complete the task above",  # The task itself is pinned in context.
-                    tool_name=None,  # LLM decides which tool
-                    expected_outcome="Task completed",
-                )]
-
-            # Step 2: Execute plan
             self._state = AgentState.EXECUTING
 
             # Initialize conversation memory for the run
@@ -291,9 +207,7 @@ class BaseAgent:
                     pass
 
             iterations = 0
-            step_index = 0
-
-            while step_index < len(plan) and iterations < self.max_iterations:
+            while True:
                 if self._cancel_flag:
                     return AgentResult(
                         success=False, task=task, plan=plan,
@@ -303,141 +217,63 @@ class BaseAgent:
                         duration_seconds=time.time() - start_time,
                     )
 
-                step = plan[step_index]
-                iterations += 1  # Retries consume the same finite run budget.
-                self._emit("step_start",
-                          f"Step {step.step_id}/{len(plan)}: {step.description}",
-                          {"step_id": step.step_id})
+                iterations += 1
+                self._emit("step_start", step.description, {"step_id": step.step_id})
+                result = await self._execute_react_step(step)
+                step.result = result
+                step.success = result.success
+                if result.success:
+                    break
 
-                if step.tool_name or direct_react:
-                    # ── ReAct execution ───────────────────────
-                    result = await self._execute_react_step(step, iterations - 1)
-                    step.result = result
-                    step.success = result.success
+                category = result.error_category or ErrorCategory.TOOL_ERROR
+                logger.warning("[%s] Step failed (%s): %s", self.name, category.value, result.error)
 
-                    if not result.success:
-                        category = result.error_category or ErrorCategory.TOOL_ERROR
-                        logger.warning("[%s] Step %s failed (%s): %s", self.name, step.step_id,
-                                       category.value, result.error)
+                if category == ErrorCategory.CANCELLED:
+                    self._state = AgentState.CANCELLED
+                    return AgentResult(
+                        success=False, task=task, plan=plan, events=self._events,
+                        iterations=iterations, error="Cancelled by user",
+                        duration_seconds=time.time() - start_time,
+                    )
 
-                        if category == ErrorCategory.CANCELLED:
-                            self._state = AgentState.CANCELLED
-                            return AgentResult(
-                                success=False, task=task, plan=plan, events=self._events,
-                                iterations=iterations, error="Cancelled by user",
-                                duration_seconds=time.time() - start_time,
-                            )
+                if isinstance(result.data, dict) and any(
+                    status.get('success') is True for status in result.data.get('tool_statuses', [])
+                    if isinstance(status, dict)
+                ):
+                    # No tool purity/idempotency contract exists. Replaying the whole
+                    # step can duplicate artifacts or executions that already succeeded.
+                    self._emit('partial_results',
+                               'Retained completed tool results; automatic step replay was skipped',
+                               {'step_id': step.step_id, 'error': result.error})
+                    break
 
-                        if isinstance(result.data, dict) and any(
-                            status.get('success') is True for status in result.data.get('tool_statuses', [])
-                            if isinstance(status, dict)
-                        ):
-                            # No tool purity/idempotency contract exists. Replaying the whole
-                            # step can duplicate artifacts or executions that already succeeded.
-                            self._emit('partial_results',
-                                       'Retained completed tool results; automatic step replay was skipped',
-                                       {'step_id': step.step_id, 'error': result.error})
-                            break
+                if category == ErrorCategory.RETRYABLE and step.retries < step.max_retries:
+                    step.retries += 1
+                    self._emit("step_retry", f"Retrying ({step.retries}/{step.max_retries}) — {result.error}")
+                    continue
 
-                        if category == ErrorCategory.RETRYABLE and step.retries < step.max_retries:
-                            step.retries += 1
-                            self._emit("step_retry",
-                                       f"Retrying step {step.step_id} ({step.retries}/{step.max_retries}) — {result.error}")
-                            continue
+                if category == ErrorCategory.SYSTEM_ERROR:
+                    # System errors: unrecoverable, abort the run
+                    self._state = AgentState.FAILED
+                    self._emit("error", f"System error: {result.error}")
+                    return AgentResult(
+                        success=False, task=task, plan=plan,
+                        events=self._events, iterations=iterations,
+                        output=f"Aborted due to system error: {result.error}",
+                        error=result.error,
+                        error_traceback="System error in the agent step",
+                        duration_seconds=time.time() - start_time,
+                    )
+                break
 
-                        if category == ErrorCategory.INPUT_ERROR:
-                            # Input errors: try replanning with better args
-                            self._emit("replanning",
-                                       f"Step {step.step_id} had input error, adjusting plan...")
-                            try:
-                                new_steps = await self.planner.replan(
-                                    original_plan=plan,
-                                    failed_step=step,
-                                    error_message=f"[INPUT_ERROR] {result.error}",
-                                    tools_description=self.tools.get_tools_description(),
-                                )
-                            except Exception as e:
-                                logger.exception(f"[{self.name}] Replanning failed:")
-                                new_steps = None
-
-                            if new_steps:
-                                plan = plan[:step_index] + new_steps
-                                direct_react = False
-                            else:
-                                break
-
-                        elif category == ErrorCategory.SYSTEM_ERROR:
-                            # System errors: unrecoverable, abort the run
-                            self._state = AgentState.FAILED
-                            self._emit("error", f"System error in step {step.step_id}: {result.error}")
-                            return AgentResult(
-                                success=False, task=task, plan=plan,
-                                events=self._events, iterations=iterations,
-                                output=f"Aborted due to system error: {result.error}",
-                                error=result.error,
-                                error_traceback=f"System error in step {step.step_id}",
-                                duration_seconds=time.time() - start_time,
-                            )
-
-                        else:
-                            # TOOL_ERROR or unknown: try replanning
-                            self._emit("replanning", f"Step {step.step_id} failed, adjusting plan...")
-                            try:
-                                new_steps = await self.planner.replan(
-                                    original_plan=plan,
-                                    failed_step=step,
-                                    error_message=result.error or "Unknown error",
-                                    tools_description=self.tools.get_tools_description(),
-                                )
-                            except Exception as e:
-                                logger.exception(f"[{self.name}] Replanning failed:")
-                                new_steps = None
-
-                            if new_steps:
-                                plan = plan[:step_index] + new_steps
-                                direct_react = False
-                            else:
-                                break
-                    else:
-                        step_index += 1
-                else:
-                    # No tool — LLM thinking/response step
-                    try:
-                        await self._execute_thinking_step(step, iterations - 1)
-                        step.success = True
-                    except Exception as e:
-                        logger.exception(f"[{self.name}] Thinking step failed:")
-                        step.success = False
-                        step.result = ToolResult(success=False, error=str(e))
-                    step_index += 1
-
-            # Step 3: Generate final response
-            succeeded = bool(plan) and step_index == len(plan) and all(s.success for s in plan)
-            failed_step = next((s for s in plan if not s.success and s.result is not None), None)
-            run_error = None if succeeded else (
-                "Iteration budget exhausted before task completion"
-                if iterations >= self.max_iterations and step_index < len(plan)
-                # Name the step and its error; a bare "did not complete" left nothing to act on.
-                else f"Step {failed_step.step_id} failed ({failed_step.description[:120]}): "
-                     f"{failed_step.result.error or 'stopped before confirming completion'}"
-                if failed_step is not None
-                else "Task did not complete successfully"
-            )
-            self._state = AgentState.REFLECTING
-            try:
-                # A task done in one step ends with the model's own closing report; asking
-                # for a summary of that would be one more call to say the same thing.
-                closing = (plan[0].result.data.get('final_text') if direct_react and succeeded
-                           and isinstance(plan[0].result.data, dict) else None)
-                final_output = closing or await self._generate_final_response(task, plan)
-            except Exception as e:
-                logger.exception(f"[{self.name}] Final response generation failed:")
-                final_output = f"Summary generation failed: {str(e)}"
-                succeeded = False
-                run_error = f"{run_error}; {final_output}" if run_error else final_output
+            # The model's own closing report is the output; on failure it still says what was done.
+            succeeded = step.success
+            final_output = (step.result.data.get('final_text') or '') if isinstance(step.result.data, dict) else ''
+            run_error = None if succeeded else (step.result.error or "Task did not complete successfully")
 
             self._state = AgentState.COMPLETED if succeeded else AgentState.FAILED
-            self._emit("complete" if succeeded else "error", final_output[:200], {"success": succeeded})
+            self._emit("complete" if succeeded else "error", (final_output or run_error or '')[:200],
+                       {"success": succeeded})
 
             return AgentResult(
                 success=succeeded,
@@ -467,16 +303,6 @@ class BaseAgent:
         finally:
             if acquired:
                 sem.release()
-            # Persist memory if session_id is provided
-            if self.session_id and memory_writable:
-                try:
-                    if await self.memory.save():
-                        self._emit("memory_saved", f"Saved conversation memory for session {self.session_id}")
-                    else:
-                        self._emit("memory_not_saved", "Conversation memory was not persisted")
-                except Exception as e:
-                    logger.warning(f"[{self.name}] Failed to save memory for session {self.session_id}: {e}")
-                    self._emit("memory_not_saved", "Conversation memory was not persisted")
 
     async def run_stream(self, task: str, context: Optional[str] = None) -> AsyncIterator[AgentEvent]:
         async with aclosing(self._stream_operation(lambda: self.run(task, context))) as stream:
@@ -492,11 +318,10 @@ class BaseAgent:
         """
         # Reject before attaching a queue: even a rejected run must not redirect
         # another request's events or detach its queue when this generator closes.
-        if (self._stream_queue is not None or self._stream_runner is not None or self._run_active
-                or (self.session_id and self.session_id in BaseAgent._active_sessions)):
+        if self._stream_queue is not None or self._stream_runner is not None or self._run_active:
             yield AgentEvent(type='done', message='Agent busy', data={
                 'success': False, 'output': '', 'iterations': 0,
-                'error': 'This session already has an active task or stream; wait or close it first',
+                'error': 'This agent already has an active task or stream; wait or close it first',
                 'error_traceback': None,
             })
             return
@@ -561,16 +386,12 @@ class BaseAgent:
 
     # ── ReAct step execution ──────────────────────────────────
 
-    async def _execute_react_step(self, step: PlanStep, iteration: int) -> "ToolResult":
-        """Execute a plan step using the ReAct pattern.
+    async def _execute_react_step(self, step: PlanStep) -> "ToolResult":
+        """Execute the run's step using the ReAct pattern.
 
         Builds a conversation with system prompt + tools, then loops:
           LLM reasons -> calls tool(s) -> observes results -> repeats
         until the LLM concludes the step or max_react_per_step is hit.
-
-        This is the core improvement over the old one-shot tool calling:
-        the LLM can chain multiple tools within a single step and adapt
-        its strategy based on intermediate results.
         """
         from app.services.ai.agent.types import ToolResult
 
@@ -585,28 +406,14 @@ class BaseAgent:
                               tool_name='react_loop', error_category=ErrorCategory.SYSTEM_ERROR)
 
         if not tools_schema:
-            # No tools registered — try direct execution fallback
-            if step.tool_name in self.tools:
-                tr = await self._execute_tool_with_timeout(step.tool_name, step.tool_args or {})
-                self.memory.add_tool_result(step.tool_name, tr.to_message())
-                return tr
-            return ToolResult(
-                success=False,
-                error=f"Tool '{step.tool_name}' not found in registry",
-                tool_name=step.tool_name or "unknown",
-                error_category=ErrorCategory.INPUT_ERROR,
-            )
+            # Providers reject a tool-calling request with no tools.
+            return ToolResult(False, error='No tools are registered for this agent',
+                              tool_name='react_loop', error_category=ErrorCategory.SYSTEM_ERROR)
 
-        # Schemas still count toward model context. Keep the current policy once,
-        # then pass bounded history so resource IDs survive across steps.
-        step_prompt = (f"Current step {step.step_id}: {step.description}\n"
-                       "Do only this step. Earlier steps are already done: their tool calls and results are "
-                       "above, so reuse the IDs and paths they returned instead of repeating those calls. "
-                       "Reply without a tool call once this step is complete.")
-        if step.tool_name:
-            step_prompt += f"\nSuggested tool: {step.tool_name}"
-            if step.tool_args:
-                step_prompt += f"\nSuggested args: {json.dumps(step.tool_args, ensure_ascii=False)}"
+        # A retried step sees its earlier tool calls in history; reuse what they returned.
+        step_prompt = (f"{step.description}. Tool calls and results already in this conversation are done: "
+                       "reuse the IDs and paths they returned instead of repeating those calls. "
+                       "Reply without a tool call once the task is complete.")
 
         conversation: list[AIChatMessage] = [
             *self._conversation_context(),
@@ -713,7 +520,7 @@ class BaseAgent:
             elif not (response.text or "").strip() and react_i + 1 < self.max_react_per_step:
                 # A thinking model that ran out of budget returns nothing; that is not a conclusion.
                 logger.warning("[%s] Empty model reply in step %s", self.name, step.step_id)
-            elif (self.requires_tools and not step.tool_name and not all_results and not reminded
+            elif (self.requires_tools and not all_results and not reminded
                     and react_i + 1 < self.max_react_per_step):
                 # A model often opens by saying what it will do. Replanning that costs far more than asking.
                 reminded = True
@@ -732,10 +539,7 @@ class BaseAgent:
                 break
         else:
             # Hit max_react_per_step — return partial results
-            logger.warning(
-                f"[{self.name}] ReAct hit max iterations ({self.max_react_per_step}) "
-                f"for step: {step.description}"
-            )
+            logger.warning(f"[{self.name}] ReAct hit max iterations ({self.max_react_per_step})")
             self._emit("react_max", f"Reached max ReAct iterations for this step", {
                 "max": self.max_react_per_step,
             })
@@ -775,7 +579,7 @@ class BaseAgent:
         """Execute a tool with configurable timeout and automatic error classification.
 
         Returns ToolResult with error_category populated so the ReAct loop
-        and planner can make intelligent decisions about retry vs skip vs abort.
+        can decide between retrying and stopping.
         """
         from app.services.ai.agent.types import ToolResult
 
@@ -817,78 +621,6 @@ class BaseAgent:
                 duration_ms=elapsed * 1000,
                 error_category=self._classify_error(str(e)),
             )
-
-    # ── Thinking step (no tools) ──────────────────────────────
-
-    async def _execute_thinking_step(self, step: PlanStep, iteration: int) -> None:
-        """Execute a step that needs pure LLM reasoning (no tools)."""
-        messages = self._conversation_context()
-        messages.append(AIChatMessage(
-            role="user",
-            content=f"请完成以下步骤（不需要使用工具）: {step.description}"
-        ))
-        messages = self.adapter.prepare_chat_messages(messages, response_tokens=8000)
-
-        response = await self.adapter.chat(messages, temperature=0.3, max_tokens=8000)
-        if not isinstance(response, str) or not response.strip():
-            raise ValueError('Thinking response was empty')
-        step.result = ToolResult(success=True, data=response)
-        self.memory.add_assistant(response)
-        self._emit("think", response[:300], {"step_id": step.step_id})
-
-    # ── Final response generation ─────────────────────────────
-
-    async def _generate_final_response(self, task: str, plan: list[PlanStep]) -> str:
-        """Generate a summary of what was accomplished."""
-        steps_summary_lines = []
-        for s in plan:
-            status = "✓ 成功" if s.success else "✗ 失败"
-            detail = ""
-            if s.result:
-                if s.result.data is not None:
-                    # Include partial receipts and false/zero values. Never silently
-                    # drop evidence; the complete request is budget-checked below.
-                    data = s.result.data
-                    if isinstance(data, dict) and 'tool_statuses' in data and (
-                            data.get('tool_results') or data.get('results')):
-                        # A ReAct step's closing narration restates its tool receipts, which stay;
-                        # on long plans it alone pushed the summary past the context budget.
-                        data = {k: v for k, v in data.items() if k != 'final_text'}
-                    data_str = data if isinstance(data, str) else json.dumps(
-                        data, ensure_ascii=False, separators=(',', ':'), default=str, allow_nan=False)
-                    detail = f" ({data_str})"
-                if s.result.error:
-                    cat = s.result.error_category.value if s.result.error_category else "unknown"
-                    detail += f" (错误[{cat}]: {s.result.error})"
-            steps_summary_lines.append(f"Step {s.step_id}: {s.description} — {status}{detail}")
-
-        steps_summary = "\n".join(steps_summary_lines)
-
-        prompt = f"""任务执行已结束。请用中文如实总结，未完成或失败不得描述为成功：
-
-## 原始任务
-{task}
-
-## 执行步骤
-{steps_summary}
-
-{self.final_instructions}"""
-
-        # Self-contained prompt: it already carries the task and the per-step
-        # results, so there is no need to resend the whole conversation memory
-        # (system prompt + task + every tool result) — that duplicates the same
-        # information and can cost thousands of tokens per run.
-        messages = [
-            AIChatMessage(role="system", content=AGENT_SAFETY_RULES),
-            AIChatMessage(role="user", content=prompt),
-        ]
-
-        messages = self.adapter.prepare_chat_messages(messages, response_tokens=2000)
-        response = await self.adapter.chat(messages, temperature=0.3, max_tokens=2000)
-        if not isinstance(response, str) or not response.strip():
-            raise ValueError('Summary response was empty')
-        self.memory.add_assistant(response)
-        return response
 
 
 # Re-export for backward compatibility

@@ -94,10 +94,6 @@ class Settings(BaseSettings):
     AGENT_CONTEXT_TOKEN_BUDGET: int = 16384      # fallback for models whose context window is unknown
     AGENT_MAX_TOOL_CALLS_PER_RESPONSE: int = 8
 
-    # Conversation Memory Persistence
-    MEMORY_PERSIST_ENABLED: bool = True
-    MEMORY_DB_PATH: str = ""                     # empty = auto-generate under BASE_DIR
-
     # RAG Store — LanceDB
     RAG_LANCEDB_PATH: str = ""                   # empty = auto-generate under BASE_DIR
 

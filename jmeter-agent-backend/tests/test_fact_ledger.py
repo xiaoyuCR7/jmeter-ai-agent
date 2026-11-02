@@ -103,44 +103,35 @@ def registered_evidence(tmp_path, monkeypatch, sample_jtl):
 
 
 @pytest.mark.asyncio
-async def test_registered_analysis_end_to_end_jtl_to_scoped_persistence(registered_evidence, temp_ledger, tmp_path, monkeypatch):
+async def test_registered_question_end_to_end_from_jtl_to_a_checked_answer(registered_evidence, temp_ledger, monkeypatch):
     import importlib
-    import json
     from unittest.mock import Mock, AsyncMock
     from app.services.ai.adapters.base import ToolCallResponse
     from app.services.ai.memory.provenance import snapshot_scope
     from app.services.storage import store as execution_cache
     analysis_mod = importlib.import_module('app.services.ai.agents.analysis_agent')
-    archiver_mod = importlib.import_module('app.services.ai.rag.archiver')
-    rag_mod = importlib.import_module('app.services.ai.rag.store')
-    rag = rag_mod.LanceRAGStore(db_path=str(tmp_path / 'rag'))
-    monkeypatch.setattr(archiver_mod, 'rag_store', rag)
     monkeypatch.setattr(analysis_mod, 'fact_ledger', temp_ledger)
     monkeypatch.setattr(analysis_mod.analysis_context, 'fact_ledger', temp_ledger)
-    monkeypatch.setattr(archiver_mod, 'fact_ledger', temp_ledger)
     monkeypatch.setattr(analysis_mod.hypothesis_ledger, 'list_for_module', AsyncMock(return_value=[]))
-    monkeypatch.setattr(analysis_mod.hypothesis_ledger, 'evaluate_module_hypotheses', AsyncMock(return_value=[]))
     monkeypatch.setattr(execution_cache, 'get_execution', lambda _: None)
     adapter = Mock()
     adapter.prepare_chat_messages.side_effect = lambda messages, **kwargs: messages
     adapter.context_budget = adapter.max_tokens = 100000
     adapter.estimate_tokens = len
     adapter._truncate_messages = lambda messages, max_tokens: messages
-    adapter.chat_with_tools = AsyncMock(return_value=ToolCallResponse(text='Measured observation'))
-    adapter.chat = AsyncMock(side_effect=[json.dumps({'overall_assessment':
-        'The measured results provide a baseline; additional experiments are required to establish any root cause.'})])
+    adapter.chat_with_tools = AsyncMock(return_value=ToolCallResponse(text='Measured observation; 错误率为 99.9%'))
+    adapter.chat = AsyncMock()
     evidence = await analysis_mod.AnalysisAgent.resolve_execution('run-A')
     result = await analysis_mod.AnalysisAgent(adapter).run_analysis(
         'Explain this run', evidence, context='module=untrusted, version=untrusted, jtl_path=untrusted')
     assert result.success, result.error
-    fact = await temp_ledger.load('run-A')
-    assert fact and fact.total_requests == ReportParser().parse_jtl(str(registered_evidence[3])).total_requests
-    assert (fact.module, fact.version, fact.test_type) == ('plan-A', 'unknown', 'baseline')
-    assert fact.context_scope == snapshot_scope(registered_evidence[0]['context_snapshot'])
-    for key in ('conclusion_archived', 'raw_report_archived'):
-        doc = rag.get(result.analysis['archive'][key])
-        assert doc and doc.context_scope == fact.context_scope and doc.source_execution_id == 'run-A'
-    assert adapter.chat_with_tools.await_count == 1 and adapter.chat.await_count == 1
+    fact = result.analysis['fact']
+    assert fact['total_requests'] == ReportParser().parse_jtl(str(registered_evidence[3])).total_requests
+    assert (fact['module'], fact['version'], fact['test_type']) == ('plan-A', 'unknown', 'baseline')
+    assert fact['context_scope'] == snapshot_scope(registered_evidence[0]['context_snapshot'])
+    assert any(m['metric'] == 'error_rate' for m in result.analysis['validation']['mismatches'])
+    assert await temp_ledger.load('run-A') is None  # Answering a question archives nothing.
+    assert adapter.chat_with_tools.await_count == 1 and adapter.chat.await_count == 0
 
 
 @pytest.mark.asyncio
@@ -400,42 +391,28 @@ async def test_fact_history_zero_limit_does_not_open_database(temp_ledger, monke
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('failure_phase', ['extraction', 'archive', 'evaluation', 'reported_write', 'policy_skip'])
-async def test_post_analysis_failure_is_visible_without_losing_partial_results(monkeypatch, failure_phase):
+@pytest.mark.parametrize('outcome', ['answered', 'empty', 'model_failed'])
+async def test_an_answer_is_checked_only_when_the_model_gave_one(monkeypatch, outcome):
     import importlib
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
-    from app.models.schemas import FactSheet, StructuredAnalysis
+    from app.models.schemas import FactSheet
     module = importlib.import_module('app.services.ai.agents.analysis_agent')
     agent = object.__new__(module.AnalysisAgent)
     agent._build_fact_sheet = AsyncMock(return_value=FactSheet(execution_id='fixture', module='api'))
-    agent.run = AsyncMock(return_value=SimpleNamespace(success=True, output='analysis text', error=None,
+    output = {'answered': 'answer text', 'empty': '  ', 'model_failed': ''}[outcome]
+    agent.run = AsyncMock(return_value=SimpleNamespace(success=outcome != 'model_failed', output=output,
+                                                     error='model down' if outcome == 'model_failed' else None,
                                                      plan=[], iterations=1))
-    agent._extract_structured_analysis = AsyncMock(return_value=StructuredAnalysis(overall_assessment='assessment'))
-    agent.archiver = SimpleNamespace(archive_analysis_result=AsyncMock(return_value={'fact_archived': True}))
-    evaluation = AsyncMock(return_value=[])
     monkeypatch.setattr(module.hypothesis_ledger, 'list_for_module', AsyncMock(return_value=[]))
-    monkeypatch.setattr(module.hypothesis_ledger, 'evaluate_module_hypotheses', evaluation)
-    if failure_phase in ('reported_write', 'policy_skip'):
-        agent.archiver.archive_analysis_result.return_value = {
-            'fact_archived': False, 'rejected_reason': 'fixture rejection',
-            'errors': ['Fact persistence failed'] if failure_phase == 'reported_write' else []}
+    result = await agent.analyze_with_rag(module='api', user_task='why?')
+    assert result['fact']['execution_id'] == 'fixture' and result['output'] == output
+    if outcome == 'answered':
+        assert result['success'] and result['error'] is None and result['validation'] is not None
     else:
-        failing = {'extraction': agent._extract_structured_analysis,
-                   'archive': agent.archiver.archive_analysis_result, 'evaluation': evaluation}[failure_phase]
-        failing.side_effect = RuntimeError('fixture postprocessing failure')
-    result = await agent.analyze_with_rag(module='api')
-    if failure_phase == 'policy_skip':
-        assert result['success'] and result['error'] is None
-    else:
-        assert not result['success'] and result['error']
-    assert result['output'] == 'analysis text' and result['fact']['execution_id'] == 'fixture'
-    if failure_phase in ('reported_write', 'policy_skip'):
-        evaluation.assert_not_awaited()
-    if failure_phase == 'evaluation':
-        assert result['archive']['fact_archived'] is True
-    if failure_phase == 'extraction':
-        agent.archiver.archive_analysis_result.assert_not_awaited()
+        assert not result['success'] and result['validation'] is None
+        assert result['error'] == ('The model did not answer' if outcome == 'empty' else 'model down')
+    assert 'archive' not in result and 'structured' not in result
 
 
 @pytest.mark.asyncio
@@ -452,8 +429,6 @@ async def test_analysis_context_preparation_failure_stops_before_model_and_keeps
     fact = FactSheet(execution_id='run', module='api', total_requests=42)
     agent._build_fact_sheet = AsyncMock(return_value=fact)
     agent.run = AsyncMock()
-    agent._extract_structured_analysis = AsyncMock()
-    agent.archiver = SimpleNamespace(archive_analysis_result=AsyncMock())
     calls = {key: AsyncMock(return_value=value) for key, value in
              [('scope', 'scope-a'), ('facts', []), ('hypotheses', [])]}
     calls.update({key: Mock(return_value='context') for key in ['heuristics', 'rag_context', 'base_task']})
@@ -473,8 +448,6 @@ async def test_analysis_context_preparation_failure_stops_before_model_and_keeps
         assert 'private fixture detail' not in result['error']
         assert result['fact']['execution_id'] == 'run' and result['fact']['total_requests'] == 42
     agent.run.assert_not_awaited()
-    agent._extract_structured_analysis.assert_not_awaited()
-    agent.archiver.archive_analysis_result.assert_not_awaited()
 
 
 @pytest.mark.asyncio

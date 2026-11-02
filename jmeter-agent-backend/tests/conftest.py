@@ -13,12 +13,11 @@ _DATA = Path(tempfile.mkdtemp(prefix='jmeter-agent-tests-'))
 
 os.environ.update({
     'DATABASE_URL': f'sqlite+aiosqlite:///{(_DATA / "jmeter_agent.db").as_posix()}',
-    # BASE_DIR roots facts.db, hypotheses.db, conversation memory, RAG data and test_data.
+    # BASE_DIR roots facts.db, hypotheses.db, RAG data and test_data.
     'BASE_DIR': str(_DATA),
     'TEST_PLANS_DIR_DEFAULT': str(_DATA / 'test_plans'),
     'REPORTS_DIR_DEFAULT': str(_DATA / 'reports'),
     'AI_MODELS_CONFIG_FILE': str(_DATA / 'ai_models_config.json'),
-    'MEMORY_DB_PATH': str(_DATA / 'conversation_memory.db'),
     'RAG_LANCEDB_PATH': str(_DATA / 'rag_lancedb'),
 })
 

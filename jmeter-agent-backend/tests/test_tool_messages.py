@@ -120,14 +120,13 @@ async def test_anthropic_translates_calls_and_observations_to_content_blocks():
     await adapter.client.close()
 
 
-def test_memory_roundtrip_preserves_tool_message_fields():
+def test_memory_keeps_tool_message_fields():
     from app.services.ai.agent.memory import ConversationMemory
     memory = ConversationMemory()
     for message in tool_exchange():
         memory.add(message)
-    restored = ConversationMemory.from_dict(memory.to_dict())
-    assert restored.messages[1].tool_calls[0]['id'] == 'call-A'
-    assert restored.messages[2].tool_call_id == 'call-A'
+    assert memory.messages[1].tool_calls[0]['id'] == 'call-A'
+    assert memory.messages[2].tool_call_id == 'call-A'
 
 
 def test_tool_results_remain_json_objects_and_keep_resource_ids():

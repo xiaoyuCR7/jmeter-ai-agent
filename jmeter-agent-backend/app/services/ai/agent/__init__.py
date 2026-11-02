@@ -1,9 +1,8 @@
-"""JMeter Agent Framework — lightweight agent loop with tool calling, memory, and planning."""
+"""JMeter Agent Framework — lightweight agent loop with tool calling and memory."""
 
 from app.services.ai.agent.types import AgentState, AgentEvent, ToolResult, PlanStep, AgentResult
 from app.services.ai.agent.tool_registry import Tool, ToolRegistry
 from app.services.ai.agent.memory import ConversationMemory
-from app.services.ai.agent.planner import TaskPlanner
 from app.services.ai.agent.base import BaseAgent
 
 __all__ = [
@@ -15,6 +14,5 @@ __all__ = [
     "Tool",
     "ToolRegistry",
     "ConversationMemory",
-    "TaskPlanner",
     "BaseAgent",
 ]

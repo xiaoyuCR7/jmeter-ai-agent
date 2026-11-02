@@ -789,7 +789,7 @@ async def ask_about_execution(execution_id: str, request: RunQuestion):
         agent = AnalysisAgent(AIAdapterFactory.create(request.model))
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
-    result = await agent.run_analysis(request.question, evidence, context=context, follow_up=True)
+    result = await agent.run_analysis(request.question, evidence, context=context)
     if not result.success:
         raise HTTPException(status_code=502, detail=result.error or "The model did not answer")
     validation = (result.analysis or {}).get('validation') or {}

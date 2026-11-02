@@ -190,7 +190,6 @@ async def test_a_question_is_answered_and_kept_with_the_analysis(run_with_report
     response = await post_question(run_with_report.app)
     assert response.status_code == 200 and response.json()['answer'] == '慢在建连'
     assert response.json()['mismatches'][0]['metric'] == 'p95'
-    assert run_with_report.ask.call_args.kwargs['follow_up'] is True
     assert '还行' in run_with_report.ask.call_args.kwargs['context']
     stored = run_with_report.saved[0].ai_analysis.follow_ups
     assert stored[0]['question'] == '为什么慢？'

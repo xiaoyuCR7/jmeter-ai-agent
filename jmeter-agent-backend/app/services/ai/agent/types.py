@@ -9,7 +9,6 @@ from datetime import datetime
 
 class AgentState(str, Enum):
     IDLE = "idle"
-    PLANNING = "planning"
     EXECUTING = "executing"
     REFLECTING = "reflecting"
     WAITING = "waiting"  # waiting for user input
@@ -19,7 +18,7 @@ class AgentState(str, Enum):
 
 
 class ErrorCategory(str, Enum):
-    """Classifies tool errors so the planner can decide: retry, fix input, skip, or abort."""
+    """Classifies tool errors so the agent can decide: retry, fix input, or stop."""
     RETRYABLE = "retryable"        # transient: timeout, rate-limit, connection refused
     INPUT_ERROR = "input_error"    # bad args: file not found, invalid format, missing field
     SYSTEM_ERROR = "system_error"  # env issue: JMeter not installed, disk full, permission denied
@@ -44,7 +43,7 @@ class ToolResult:
     error: Optional[str] = None
     tool_name: str = ""
     duration_ms: float = 0.0
-    error_category: Optional[ErrorCategory] = None  # classified error for smart replanning
+    error_category: Optional[ErrorCategory] = None  # classified error: retry or stop
 
     def to_message(self) -> str:
         """Human-readable tool result for conversation memory."""
@@ -112,12 +111,9 @@ def _compact_tool_data(value, budget=1800, depth=0):
 
 @dataclass
 class PlanStep:
-    """Single step in a task plan."""
+    """The step an agent run executes, with its result and retry count."""
     step_id: int
     description: str
-    tool_name: Optional[str] = None
-    tool_args: Optional[dict] = None
-    expected_outcome: str = ""
     success: bool = False
     result: Optional[ToolResult] = None
     retries: int = 0
@@ -167,10 +163,10 @@ _SYSTEM_ERROR_PATTERNS = [
 
 
 def classify_error(error_message: str) -> ErrorCategory:
-    """Classify an error message into a category for smart replanning.
+    """Classify an error message into a category for retry decisions.
 
     Used by both tool_registry and BaseAgent to consistently categorize
-    tool failures so the planner can make intelligent decisions.
+    tool failures so the agent can decide whether to retry.
     """
     if not error_message:
         return ErrorCategory.TOOL_ERROR

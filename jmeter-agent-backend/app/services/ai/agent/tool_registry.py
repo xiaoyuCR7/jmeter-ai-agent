@@ -103,32 +103,6 @@ class ToolRegistry:
         """Get all tool schemas in Anthropic format."""
         return [t.to_anthropic_schema() for t in self._tools.values()]
 
-    def get_tools_description(self) -> str:
-        """Compact tool summary for the planner prompt.
-
-        The planner only needs to pick a tool and rough args — the ReAct
-        executor re-sends full JSON schemas via native function calling and
-        finalizes the arguments. So we render name + one-line description +
-        param list (name:type, *=required, enums inlined) instead of dumping
-        full indented JSON schemas (~10x fewer tokens).
-        """
-        lines = []
-        for tool in self._tools.values():
-            props = tool.parameters.get("properties", {}) or {}
-            required = set(tool.parameters.get("required", []) or [])
-            parts = []
-            for pname, pschema in props.items():
-                ptype = pschema.get("type", "any")
-                enum = pschema.get("enum")
-                if enum:
-                    ptype = "|".join(str(e) for e in enum)
-                mark = "*" if pname in required else ""
-                parts.append(f"{pname}{mark}:{ptype}")
-            param_str = ", ".join(parts) if parts else "none"
-            short_desc = tool.description.split(". ")[0].split("\n")[0]
-            lines.append(f"- {tool.name}: {short_desc}. params({param_str})")
-        return "\n".join(lines)
-
     def validate_arguments(self, name: str, args: Any) -> Optional[str]:
         """Validate protocol input without running a handler or requesting approval."""
         if name not in self._validators:
