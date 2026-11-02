@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, model_validator, field_validator
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 from enum import Enum
@@ -350,6 +350,10 @@ class ReportAnalysis(BaseModel):
     follow_ups: List[Dict[str, Any]] = Field(default_factory=list, description="用户对这份分析的追问和回答")
 
 
+class ReanalyzeRequest(BaseModel):
+    model: Optional[str] = Field(None, description="使用的 AI 模型ID")
+
+
 class RunQuestion(BaseModel):
     question: str = Field(..., min_length=1, max_length=2000, description="对这次运行的追问")
     model: Optional[str] = Field(None, description="使用的 AI 模型ID")
@@ -395,6 +399,9 @@ class TestReport(BaseModel):
     evidence: Optional[Dict[str, Any]] = Field(None, description="需求达标、基线对比、服务端指标等确定性证据")
     failure_diagnosis: Optional[Dict[str, Any]] = Field(None, description="运行失败时从错误信息和日志得出的诊断")
     status: TestExecutionStatus
+    report_status: str = Field("pending", description="结果解析和运行后分析的状态：running 时 AI 分析还在写")
+    report_error: Optional[str] = None
+    analysis_enabled: bool = Field(True, description="运行结束后是否自动写 AI 分析")
 
 
 class AIChatMessage(BaseModel):
@@ -434,51 +441,6 @@ class UpdateJMXTreeRequest(BaseModel):
     """保存 JMX 树请求"""
     tree: JMXTreeNode
     name: Optional[str] = None
-
-
-# ===== Agent Framework Schemas =====
-
-class AgentRunRequest(BaseModel):
-    """请求运行 Agent"""
-    agent_type: str = Field("test_plan", description="Agent 类型: test_plan / analysis / workflow")
-    task: str = Field(..., description="任务描述")
-    context: Optional[str] = Field(None, description="附加上下文信息")
-    model: Optional[str] = Field(None, description="使用的 AI 模型ID")
-    stream: bool = Field(False, description="是否使用 SSE 流式返回")
-    session_id: Optional[str] = Field(None, description="会话 ID，用于多轮记忆持久化")
-    execution_id: Optional[str] = Field(None, min_length=1, max_length=50,
-        description="仅 analysis 可用：分析已登记执行的 JTL；省略时保留通用 Agent 行为")
-
-    @model_validator(mode='after')
-    def execution_requires_analysis(self):
-        if self.execution_id is not None and self.agent_type != 'analysis':
-            raise ValueError('execution_id is only supported by the analysis agent')
-        return self
-
-
-class AgentRunResponse(BaseModel):
-    """Agent 运行结果"""
-    agent_type: str
-    task: str
-    success: bool
-    output: str
-    plan_steps: Optional[list[dict]] = Field(None, description="执行步骤列表")
-    iterations: int = 0
-    error: Optional[str] = None
-    duration_seconds: float = 0.0
-
-
-class AgentAnalysisRunResponse(AgentRunResponse):
-    """Optional registered analysis payload; legacy workflow responses stay unchanged."""
-    analysis: Optional[dict] = None
-    receipt: Optional[dict] = None
-
-
-class AgentListItem(BaseModel):
-    """可用 Agent 列表项"""
-    name: str
-    description: str
-    agent_type: str
 
 
 # ===== Anti-Pollution Memory Schemas =====

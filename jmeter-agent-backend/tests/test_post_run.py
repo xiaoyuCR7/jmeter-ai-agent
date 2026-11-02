@@ -217,3 +217,104 @@ def test_questions_are_bounded():
         RunQuestion(question='')
     with pytest.raises(ValueError):
         RunQuestion(question='x' * 2001)
+
+
+@pytest.mark.asyncio
+async def test_a_run_deleted_while_answering_keeps_nothing(run_with_report, monkeypatch):
+    from app.api import routes
+    reads = iter([run_with_report.execution, None])
+    monkeypatch.setattr(routes.store, 'get_execution', lambda execution_id: next(reads))
+    assert (await post_question(run_with_report.app)).status_code == 409
+    assert not run_with_report.saved
+
+
+@pytest.mark.asyncio
+async def test_a_run_cannot_be_questioned_while_its_analysis_is_written(run_with_report):
+    run_with_report.execution.report_status = 'running'
+    assert (await post_question(run_with_report.app)).status_code == 409
+    run_with_report.ask.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_questions_asked_together_are_both_kept(run_with_report, monkeypatch):
+    import asyncio
+    from app.api import routes
+    latest = {'run': run_with_report.execution}
+    monkeypatch.setattr(routes.store, 'get_execution', lambda execution_id: latest['run'])
+    async def persist(updated):
+        await asyncio.sleep(0)  # A database write gives the other request its turn.
+        latest['run'] = updated
+    monkeypatch.setattr(routes, 'persist_execution', persist)
+    responses = await asyncio.gather(post_question(run_with_report.app, '一'), post_question(run_with_report.app, '二'))
+    assert [r.status_code for r in responses] == [200, 200]
+    assert sorted(item['question'] for item in latest['run'].ai_analysis.follow_ups) == ['一', '二']
+
+
+@pytest.fixture
+def stored_run(monkeypatch, tmp_path):
+    """One run in the store; persisting replaces it, as the real store does."""
+    from app.services import execution_lifecycle
+    run = Execution(id='run', test_plan_id='plan', status=Status.COMPLETED, jmx_path='a.jmx',
+                    report_dir=str(tmp_path), summary=summary(), report_status='completed')
+    held = {'run': run}
+    saved = []
+    async def persist(updated):
+        saved.append(updated.model_copy(deep=True))
+        held['run'] = updated.model_copy(deep=True)
+    monkeypatch.setattr(execution_lifecycle, 'persist_execution', persist)
+    monkeypatch.setattr(post_run.store, 'get_execution', lambda execution_id: held.get(execution_id))
+    monkeypatch.setattr(type(post_run.store), 'executions', property(lambda self: dict(held)))
+    from app.services.ai.memory import fact_ledger
+    monkeypatch.setattr(fact_ledger, 'load', AsyncMock(return_value=None))
+    return SimpleNamespace(held=held, saved=saved)
+
+
+@pytest.mark.asyncio
+async def test_an_analysis_can_be_written_again(stored_run, monkeypatch):
+    async def analyze(execution, ai_model):
+        execution.ai_analysis = ReportAnalysis(overall_assessment=f'by {ai_model}', conclusion='done')
+    monkeypatch.setattr(post_run, '_write_analysis', analyze)
+    started = await post_run.start_reanalysis('run', 'model-b')
+    assert started.report_status == 'running' and stored_run.saved[0].report_status == 'running'
+    await post_run._reanalyses['run']
+    final = stored_run.held['run']
+    assert final.report_status == 'completed' and final.ai_analysis.overall_assessment == 'by model-b'
+    assert 'run' not in post_run._reanalyses
+
+
+@pytest.mark.asyncio
+async def test_a_failed_reanalysis_says_why(stored_run, monkeypatch):
+    monkeypatch.setattr(post_run, '_write_analysis', AsyncMock(side_effect=RuntimeError('model down')))
+    await post_run.start_reanalysis('run')
+    await post_run._reanalyses['run']
+    assert stored_run.held['run'].report_status == 'failed' and stored_run.held['run'].report_error == 'model down'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('change, error', [
+    ({'status': Status.FAILED}, ValueError), ({'summary': None}, ValueError), ({'report_status': 'running'}, RuntimeError)])
+async def test_only_a_finished_idle_run_can_be_analysed_again(stored_run, change, error):
+    for key, value in change.items():
+        setattr(stored_run.held['run'], key, value)
+    with pytest.raises(error):
+        await post_run.start_reanalysis('run')
+    assert not stored_run.saved
+
+
+@pytest.mark.asyncio
+async def test_a_restart_ends_analyses_that_were_running(stored_run):
+    stored_run.held['run'].report_status = 'running'
+    await post_run.recover_interrupted()
+    assert stored_run.held['run'].report_status == 'failed'
+    assert stored_run.held['run'].report_error == post_run.INTERRUPTED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure, status', [(LookupError('run'), 404), (ValueError('no'), 409), (RuntimeError('busy'), 409)])
+async def test_the_analysis_endpoint_reports_why_it_cannot_start(monkeypatch, failure, status):
+    from app.api import routes
+    monkeypatch.setattr(routes.post_run, 'start_reanalysis', AsyncMock(side_effect=failure))
+    app = FastAPI()
+    app.include_router(routes.router)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://fixture') as client:
+        assert (await client.post('/executions/run/analysis')).status_code == status

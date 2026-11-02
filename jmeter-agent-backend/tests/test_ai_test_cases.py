@@ -319,8 +319,7 @@ def test_reports_name_what_is_wrong_with_the_plan_that_ran(tmp_path):
 
 
 def test_scenario_rules_reach_every_generation_path():
-    from app.services.ai.agents.test_plan_agent import TEST_PLAN_SYSTEM_PROMPT
     from app.services.ai.agents.workflow_agent import WORKFLOW_SYSTEM_PROMPT
     from app.services.ai.prompts.jmx_generator import SCENARIO_RULES, SCENARIO_SYSTEM_PROMPT
-    for prompt in (TEST_PLAN_SYSTEM_PROMPT, WORKFLOW_SYSTEM_PROMPT, SCENARIO_SYSTEM_PROMPT):
+    for prompt in (WORKFLOW_SYSTEM_PROMPT, SCENARIO_SYSTEM_PROMPT):
         assert SCENARIO_RULES in prompt

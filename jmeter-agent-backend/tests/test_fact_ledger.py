@@ -103,21 +103,16 @@ def registered_evidence(tmp_path, monkeypatch, sample_jtl):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('stream', [False, True])
-async def test_registered_analysis_end_to_end_jtl_to_scoped_persistence(registered_evidence, temp_ledger, tmp_path, monkeypatch, stream):
+async def test_registered_analysis_end_to_end_jtl_to_scoped_persistence(registered_evidence, temp_ledger, tmp_path, monkeypatch):
     import importlib
     import json
-    import httpx
     from unittest.mock import Mock, AsyncMock
-    from fastapi import FastAPI
-    from app.api import routes
     from app.services.ai.adapters.base import ToolCallResponse
     from app.services.ai.memory.provenance import snapshot_scope
     from app.services.storage import store as execution_cache
     analysis_mod = importlib.import_module('app.services.ai.agents.analysis_agent')
     archiver_mod = importlib.import_module('app.services.ai.rag.archiver')
     rag_mod = importlib.import_module('app.services.ai.rag.store')
-    monkeypatch.setattr(rag_mod, '_compute_embedding', lambda _: [0.01] * rag_mod.LanceRAGStore.VECTOR_DIM)
     rag = rag_mod.LanceRAGStore(db_path=str(tmp_path / 'rag'))
     monkeypatch.setattr(archiver_mod, 'rag_store', rag)
     monkeypatch.setattr(analysis_mod, 'fact_ledger', temp_ledger)
@@ -134,28 +129,18 @@ async def test_registered_analysis_end_to_end_jtl_to_scoped_persistence(register
     adapter.chat_with_tools = AsyncMock(return_value=ToolCallResponse(text='Measured observation'))
     adapter.chat = AsyncMock(side_effect=[json.dumps({'overall_assessment':
         'The measured results provide a baseline; additional experiments are required to establish any root cause.'})])
-    monkeypatch.setattr(routes.AIAdapterFactory, 'create', lambda _: adapter)
-    app = FastAPI()
-    app.include_router(routes.router)
-    try:
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://fixture') as client:
-            response = await client.post('/agent/run' + ('/stream' if stream else ''), json={
-                'agent_type': 'analysis', 'execution_id': 'run-A', 'task': 'Explain this run',
-                'context': 'module=untrusted, version=untrusted, jtl_path=untrusted'})
-        assert response.status_code == 200
-        result = (json.loads(response.text.strip().split('\n\n')[-1].removeprefix('data: '))['data']
-                  if stream else response.json())
-        assert result['success'], result
-        fact = await temp_ledger.load('run-A')
-        assert fact and fact.total_requests == ReportParser().parse_jtl(str(registered_evidence[3])).total_requests
-        assert (fact.module, fact.version, fact.test_type) == ('plan-A', 'unknown', 'baseline')
-        assert fact.context_scope == snapshot_scope(registered_evidence[0]['context_snapshot'])
-        for key in ('conclusion_archived', 'raw_report_archived'):
-            doc = rag.get(result['analysis']['archive'][key])
-            assert doc and doc.context_scope == fact.context_scope and doc.source_execution_id == 'run-A'
-        assert adapter.chat_with_tools.await_count == 1 and adapter.chat.await_count == 1
-    finally:
-        rag_mod._ZERO_VECTOR_IDS.clear()
+    evidence = await analysis_mod.AnalysisAgent.resolve_execution('run-A')
+    result = await analysis_mod.AnalysisAgent(adapter).run_analysis(
+        'Explain this run', evidence, context='module=untrusted, version=untrusted, jtl_path=untrusted')
+    assert result.success, result.error
+    fact = await temp_ledger.load('run-A')
+    assert fact and fact.total_requests == ReportParser().parse_jtl(str(registered_evidence[3])).total_requests
+    assert (fact.module, fact.version, fact.test_type) == ('plan-A', 'unknown', 'baseline')
+    assert fact.context_scope == snapshot_scope(registered_evidence[0]['context_snapshot'])
+    for key in ('conclusion_archived', 'raw_report_archived'):
+        doc = rag.get(result.analysis['archive'][key])
+        assert doc and doc.context_scope == fact.context_scope and doc.source_execution_id == 'run-A'
+    assert adapter.chat_with_tools.await_count == 1 and adapter.chat.await_count == 1
 
 
 @pytest.mark.asyncio

@@ -126,7 +126,15 @@
         </el-tab-pane>
 
         <el-tab-pane :label="L('AI 分析', 'AI analysis')" name="ai" lazy>
-          <section v-if="ai" class="panel ai-analysis">
+          <section v-if="analysisRunning" class="panel analysis-state">
+            <el-alert type="info" :closable="false" show-icon
+              :title="L('AI 分析正在生成', 'The AI analysis is being written')"
+              :description="L('通常需要几十秒，完成后这里会自动显示。', 'This usually takes under a minute; it will show here when done.')" />
+          </section>
+          <section v-else-if="ai" class="panel ai-analysis">
+            <div v-if="ai.analysis_status !== 'completed' && canReanalyze" class="button-row">
+              <el-button type="primary" :loading="reanalyzing" @click="reanalyze">{{ L('重新分析', 'Analyse again') }}</el-button>
+            </div>
             <el-alert v-if="staleVerdict" type="error" :closable="false" show-icon
               :title="L('需求判定已变化，这份分析可能过时', 'The requirement verdict has changed since this analysis was written')"
               :description="L(`生成分析时：${staleVerdict.then}；现在：${staleVerdict.now}。`, `When written: ${staleVerdict.then}. Now: ${staleVerdict.now}.`)" />
@@ -154,7 +162,15 @@
               <p>{{ ai.conclusion }}</p>
             </div>
           </section>
-          <section v-else class="panel"><el-empty :description="t('report.aiNotEnabled')" /></section>
+          <section v-else class="panel analysis-state">
+            <el-alert v-if="report.report_status === 'failed' && report.report_error" type="error" :closable="false" show-icon
+              :title="L('AI 分析没有完成', 'The AI analysis did not finish')" :description="report.report_error" />
+            <el-empty :description="missingAnalysis">
+              <el-button v-if="canReanalyze" type="primary" :loading="reanalyzing" @click="reanalyze">
+                {{ L('生成 AI 分析', 'Write the AI analysis') }}
+              </el-button>
+            </el-empty>
+          </section>
           <RunQuestions v-if="ai?.analysis_status === 'completed'" :execution-id="report.execution_id" :follow-ups="ai.follow_ups" />
         </el-tab-pane>
       </el-tabs>
@@ -165,7 +181,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { use } from 'echarts/core'
@@ -194,6 +210,18 @@ const timeline = computed<any[]>(() => summary.value.timeline_segments || [])
 const errors = computed<any[]>(() => summary.value.error_details || [])
 const transactions = computed(() => Object.entries(summary.value.per_label || {}).map(([label, stats]: [string, any]) => ({ label, ...stats })))
 const ai = computed(() => report.value?.ai_analysis || null)
+const analysisRunning = computed(() => report.value?.report_status === 'running')
+const canReanalyze = computed(() => report.value?.status === 'completed' && summary.value.total_requests > 0)
+const missingAnalysis = computed(() => {
+  if (report.value?.status !== 'completed') return L('运行没有成功完成，不生成 AI 分析。', 'Runs that did not complete get no AI analysis.')
+  if (!summary.value.total_requests) return L('这次运行没有请求结果，无法分析。', 'This run has no request results to analyse.')
+  if (report.value?.analysis_enabled === false) return L('自动 AI 分析已关闭，可以手动生成。', 'Automatic AI analysis is off; you can write one now.')
+  return L('这次运行还没有 AI 分析。', 'This run has no AI analysis yet.')
+})
+const reanalyzing = ref(false)
+const POLL_MS = 4000
+let pollTimer: ReturnType<typeof setTimeout> | undefined
+let disposed = false
 const errorLabels = (row: any) => Object.entries(row.labels || {}).map(([label, count]) => `${label} (${count})`).join(', ') || '-'
 
 const banner = computed(() => {
@@ -375,15 +403,30 @@ const aiLists = computed(() => {
   ].filter(block => block.items?.length)
 })
 
-async function loadReport() {
+async function loadReport(quiet = false) {
   const id = route.params.id as string
-  loading.value = true
+  if (!quiet) loading.value = true
   try {
     report.value = (await api.getReport(id)).data
   } catch {
-    report.value = null
+    if (!quiet) report.value = null
   } finally {
     loading.value = false
+  }
+  // Keep checking while the analysis is written, so it appears without a manual refresh.
+  clearTimeout(pollTimer)
+  if (!disposed && analysisRunning.value) pollTimer = setTimeout(() => loadReport(true), POLL_MS)
+}
+
+async function reanalyze() {
+  reanalyzing.value = true
+  try {
+    await api.reanalyzeRun(report.value.execution_id)
+    await loadReport(true)
+  } catch (error: any) {
+    ElMessage.error(error?.response?.data?.detail || L('无法开始分析', 'Could not start the analysis'))
+  } finally {
+    reanalyzing.value = false
   }
 }
 
@@ -412,7 +455,11 @@ async function downloadAnalysis() {
   }
 }
 
-onMounted(loadReport)
+onMounted(() => loadReport())
+onUnmounted(() => {
+  disposed = true
+  clearTimeout(pollTimer)
+})
 </script>
 
 <style scoped lang="scss">
@@ -513,7 +560,7 @@ onMounted(loadReport)
 .bad { color: var(--app-danger); }
 .mono { font-family: var(--app-font-mono); font-size: 12px; }
 
-.ai-analysis { display: flex; flex-direction: column; gap: 16px; }
+.ai-analysis, .analysis-state { display: flex; flex-direction: column; gap: 16px; }
 .ai-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
 .ai-block {
   h4 { margin: 0 0 6px; font-size: 14px; font-weight: 600; color: var(--app-text); }

@@ -23,6 +23,7 @@ os.environ.update({
 })
 
 import pytest  # noqa: E402
+import pytest_asyncio  # noqa: E402
 
 from app.core import config, local_access  # noqa: E402  (must follow the environment above)
 from app.services.jmeter import jmx_lint  # noqa: E402
@@ -43,6 +44,15 @@ def _trusted_caller(request, monkeypatch):
     if request.module.__name__ != 'test_local_access':
         monkeypatch.setattr(local_access, 'is_authorized', lambda scope: True)
         monkeypatch.setattr(local_access, 'is_loopback_client', lambda scope: True)
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _close_ledgers():
+    """Close on the test's own loop: an open connection's thread keeps pytest from exiting."""
+    yield
+    from app.services.ai.memory import fact_ledger, hypothesis_ledger
+    await fact_ledger.close()
+    await hypothesis_ledger.close()
 
 
 def pytest_sessionfinish(session, exitstatus):

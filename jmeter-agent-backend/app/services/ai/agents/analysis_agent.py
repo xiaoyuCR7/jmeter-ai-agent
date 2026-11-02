@@ -17,8 +17,7 @@ import asyncio
 import logging
 import uuid
 import time
-from contextlib import aclosing
-from typing import Optional, Callable, Awaitable, AsyncIterator
+from typing import Optional, Callable, Awaitable
 from pydantic import TypeAdapter
 
 from app.services.ai.adapters.base import BaseAIAdapter
@@ -244,12 +243,6 @@ class AnalysisAgent(BaseAgent):
         if owner is not None and not owner.done() and owner is not asyncio.current_task():
             owner.get_loop().call_soon_threadsafe(owner.cancel)
 
-    async def run_analysis_stream(self, task: str, evidence: dict,
-                                  context: Optional[str] = None) -> AsyncIterator[AgentEvent]:
-        async with aclosing(self._stream_operation(lambda: self.run_analysis(task, evidence, context))) as stream:
-            async for event in stream:
-                yield event
-
     async def _run_analysis_impl(self, task: str, evidence: dict, context: Optional[str],
                                  follow_up: bool = False) -> AgentResult:
         started = time.monotonic()
@@ -300,36 +293,6 @@ class AnalysisAgent(BaseAgent):
             result.events = self._events
             result.duration_seconds = time.monotonic() - started
         return result
-
-    async def analyze_execution(
-        self,
-        execution_id: str,
-        module: Optional[str] = None,
-        version: Optional[str] = None,
-    ) -> dict:
-        """Analyze a specific test execution with anti-pollution RAG."""
-        from app.services.execution_lifecycle import validate_id
-        validate_id(execution_id)
-        jtl_path = os.path.join(settings.REPORTS_DIR, execution_id, "result.jtl")
-        return await self.analyze_with_rag(
-            jtl_path=jtl_path,
-            execution_id=execution_id,
-            module=module or "unknown",
-            version=version or "unknown",
-        )
-
-    async def analyze_jtl(
-        self,
-        jtl_path: str,
-        module: Optional[str] = None,
-        version: Optional[str] = None,
-    ) -> dict:
-        """Analyze a JTL file directly."""
-        return await self.analyze_with_rag(
-            jtl_path=jtl_path,
-            module=module or "unknown",
-            version=version or "unknown",
-        )
 
     async def analyze_with_rag(
         self,
@@ -692,52 +655,3 @@ class AnalysisAgent(BaseAgent):
                 hypotheses=hypotheses,
                 recommendations=[],
             )
-
-    # === Legacy explicit archival helpers ===
-
-    def archive_defect(
-        self,
-        title: str,
-        root_cause: str,
-        module: str,
-        version: str,
-        severity: str = "medium",
-        execution_id: Optional[str] = None,
-    ) -> Optional[str]:
-        """Explicitly archive a defect retrospective."""
-        return self.archiver.archive_defect_retrospective(
-            defect_title=title,
-            root_cause=root_cause,
-            module=module,
-            version=version,
-            severity=severity,
-            execution_id=execution_id,
-        )
-
-    def archive_known_issue(
-        self,
-        title: str,
-        description: str,
-        module: str,
-        workaround: str = "",
-    ) -> Optional[str]:
-        """Explicitly archive a known issue."""
-        return self.archiver.archive_known_issue(
-            title=title,
-            description=description,
-            module=module,
-            workaround=workaround,
-        )
-
-    def archive_module_standard(
-        self,
-        module: str,
-        version: str,
-        standard_data: dict,
-    ) -> Optional[str]:
-        """Archive a module performance standard."""
-        return self.archiver.archive_module_standard(
-            module=module,
-            version=version,
-            standard_data=standard_data,
-        )

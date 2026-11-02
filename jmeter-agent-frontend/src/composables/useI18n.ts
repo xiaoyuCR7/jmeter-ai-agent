@@ -399,7 +399,6 @@ const messages: Translations = {
   'report.improvementPlan': { 'zh-CN': '分步改进计划', en: 'Step-by-step Improvement Plan' },
   'report.riskAreas': { 'zh-CN': '风险区域', en: 'Risk Areas' },
   'report.conclusion': { 'zh-CN': '最终结论', en: 'Conclusion' },
-  'report.aiNotEnabled': { 'zh-CN': '未启用AI分析或分析未完成', en: 'AI analysis not enabled or not completed' },
 
   // ── Analysis Reports view ──
   'report.downloadJtl': { 'zh-CN': '下载 JTL 结果文件', en: 'Download JTL Results' },

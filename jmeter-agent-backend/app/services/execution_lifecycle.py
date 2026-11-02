@@ -385,17 +385,23 @@ class ExecutionLifecycle:
                 previous_report_status = execution.report_status
                 execution.report_status = 'running'
                 await persist_execution(execution)
-                try:
-                    if postprocess:
-                        await postprocess(execution)
-                    if self._post_run:
-                        await self._post_run(execution, ai_model)
-                    if execution.report_status == 'running':
-                        execution.report_status = previous_report_status
-                except Exception as error:
-                    execution.report_status = 'failed'
-                    execution.report_error = str(error)
-                    logger.warning('Postprocessing failed for %s: %s', execution_id, error)
+                # Independent steps: a failed requirement check must not cost the run its AI report.
+                steps = []
+                if postprocess:
+                    steps.append(('postprocess', lambda: postprocess(execution)))
+                if self._post_run:
+                    steps.append(('post-run', lambda: self._post_run(execution, ai_model)))
+                failures = []
+                for step, call in steps:
+                    try:
+                        await call()
+                    except Exception as error:
+                        failures.append(str(error))
+                        logger.warning('%s failed for %s: %s', step, execution_id, error)
+                if failures:
+                    execution.report_status, execution.report_error = 'failed', '; '.join(failures)
+                elif execution.report_status == 'running':
+                    execution.report_status = previous_report_status
             await persist_execution(execution)
             return execution
         except asyncio.CancelledError:

@@ -170,3 +170,38 @@ test('a failed run says what stopped it', async ({ page }) => {
   await page.getByRole('tab', { name: 'AI analysis' }).click()
   await expect(page.getByRole('button', { name: 'Ask', exact: true })).toHaveCount(0)
 })
+
+test('an analysis being written appears without a reload', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('jmeter-agent-lang', 'en'))
+  await mockApi(page)
+  let calls = 0
+  await page.route(url => url.pathname.endsWith('/executions/run1/report'), route => {
+    calls += 1
+    return route.fulfill({ json: calls === 1 ? { ...report, ai_analysis: null, report_status: 'running' } : { ...report, report_status: 'completed' } })
+  })
+
+  await page.goto('/executions/run1')
+  await page.getByRole('tab', { name: 'AI analysis' }).click()
+  await expect(page.getByText('The AI analysis is being written')).toBeVisible()
+  await expect(page.getByText('Looks healthy')).toBeVisible({ timeout: 10000 })
+})
+
+test('a failed analysis says why and can be written again', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('jmeter-agent-lang', 'en'))
+  await mockApi(page)
+  let started = false
+  await page.route(url => url.pathname.endsWith('/executions/run1/analysis'), route => {
+    started = true
+    return route.fulfill({ status: 202, json: { report_status: 'running' } })
+  })
+  await page.route(url => url.pathname.endsWith('/executions/run1/report'), route => route.fulfill({ json: started
+    ? { ...report, ai_analysis: null, report_status: 'running' }
+    : { ...report, ai_analysis: null, report_status: 'failed', report_error: 'model quota used up' } }))
+
+  await page.goto('/executions/run1')
+  await page.getByRole('tab', { name: 'AI analysis' }).click()
+  await expect(page.getByText('model quota used up')).toBeVisible()
+  await page.getByRole('button', { name: 'Write the AI analysis' }).click()
+  await expect(page.getByText('The AI analysis is being written')).toBeVisible()
+  expect(started).toBe(true)
+})

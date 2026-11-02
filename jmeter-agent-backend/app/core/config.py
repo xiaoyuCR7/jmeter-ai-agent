@@ -100,9 +100,6 @@ class Settings(BaseSettings):
 
     # RAG Store — LanceDB
     RAG_LANCEDB_PATH: str = ""                   # empty = auto-generate under BASE_DIR
-    RAG_EMBEDDING_MODEL: str = "all-MiniLM-L6-v2"  # sentence-transformers model for embeddings
-    RAG_EMBEDDING_DEVICE: str = "cpu"            # cpu / cuda
-    RAG_EMBEDDING_MODEL_PATH: str = ""           # local model path — set to avoid huggingface download
 
     # i18n
     I18N_DEFAULT_LANG: str = "zh-CN"             # default language

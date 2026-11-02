@@ -267,55 +267,6 @@ async def test_registered_analysis_holds_session_through_entire_operation(regist
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('archive_fails', [False, True])
-async def test_registered_analysis_stream_finishes_only_after_archival(registered_agent, archive_fails):
-    import json
-    agent, evidence, fact = registered_agent
-    observed = []
-    async def archive(**kwargs):
-        observed.extend(event_types(agent))
-        assert agent.state != AgentState.COMPLETED
-        return {'fact_archived': True, 'errors': ['derived write failed'] if archive_fails else []}
-    agent.archiver.archive_analysis_result = archive
-    events = [event async for event in agent.run_analysis_stream('analyze', evidence)]
-    assert 'complete' not in observed and 'done' not in observed
-    assert 'analysis_ready' in observed
-    assert sum(event.type == 'done' for event in events) == 1
-    final = events[-1]
-    assert final.type == 'done' and final.data['success'] is (not archive_fails)
-    assert final.data['analysis']['archive']['fact_archived']
-    assert bool(final.data['error']) is archive_fails
-    assert agent.state == (AgentState.FAILED if archive_fails else AgentState.COMPLETED)
-    json.dumps(final.data, allow_nan=False)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize('phase', ['preparation', 'archive'])
-async def test_registered_analysis_stream_close_cancels_worker_and_releases_session(registered_agent, phase):
-    agent, evidence, fact = registered_agent
-    entered, stopped = asyncio.Event(), asyncio.Event()
-    target, method = (agent, '_build_fact_sheet') if phase == 'preparation' else (agent.archiver, 'archive_analysis_result')
-    async def pause(*args, **kwargs):
-        entered.set()
-        try:
-            await asyncio.Event().wait()
-        finally:
-            stopped.set()
-    setattr(target, method, pause)
-    stream = agent.run_analysis_stream('analyze', evidence)
-    try:
-        while not entered.is_set():
-            event = await asyncio.wait_for(anext(stream), 5)
-            assert event.type not in ('complete', 'done')
-    finally:
-        await stream.aclose()
-    assert stopped.is_set()
-    assert agent._stream_queue is None and agent._stream_runner is None
-    assert not agent._run_active and agent.session_id not in BaseAgent._active_sessions
-    assert agent.state == AgentState.CANCELLED
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize('bad_source', ['scope', 'zero_samples'])
 async def test_registered_analysis_never_models_changed_scope_or_empty_evidence(registered_agent, monkeypatch, bad_source):
     import importlib
@@ -657,26 +608,10 @@ async def test_empty_thinking_output_does_not_become_success(response):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('kind', ['test_plan', 'workflow'])
-async def test_document_generation_keeps_tail_and_rejects_oversized_input(kind):
-    from app.services.ai.agents.test_plan_agent import TestPlanAgent
+def test_document_task_keeps_the_whole_document_and_requirements():
     from app.services.ai.agents.workflow_agent import WorkflowAgent
-    adapter = FakeAdapter(chat_responses=['{"steps":[{"description":"review"}]}', 'analysis', 'summary'])
-    agent = (TestPlanAgent if kind == 'test_plan' else WorkflowAgent)(adapter, tools=ToolRegistry())
-    doc = 'x' * 8100 + ' GET /TAIL_ENDPOINT'
-    if kind == 'test_plan':
-        await agent.generate_from_doc(doc)
-    else:
-        await agent.run_from_doc(doc, testing_requirements='r' * 2100 + ' REQUIREMENT_TAIL')
-        assert 'REQUIREMENT_TAIL' in adapter.chat_calls[0][-1].content
-    assert 'GET /TAIL_ENDPOINT' in adapter.chat_calls[0][-1].content
-    adapter.chat_calls.clear()
-    if kind == 'test_plan':
-        result = await agent.generate_from_doc('x' * 100000)
-    else:
-        result = await agent.run_from_doc('x' * 100000)
-    assert not result['success'] and 'budget' in result['error'].lower()
-    assert not adapter.chat_calls and adapter.chat_with_tools_calls == 0
+    task = WorkflowAgent.build_task('x' * 8100 + ' GET /TAIL_ENDPOINT', 'r' * 2100 + ' REQUIREMENT_TAIL')
+    assert 'GET /TAIL_ENDPOINT' in task and 'REQUIREMENT_TAIL' in task
 
 
 @pytest.mark.asyncio
@@ -692,11 +627,9 @@ async def test_oversized_workflow_stream_fails_before_model_or_tools(monkeypatch
 @pytest.mark.asyncio
 async def test_generating_plans_needs_only_the_tools_that_create_them():
     from app.services.ai.agents.workflow_agent import PLAN_ONLY_ROUNDS, WorkflowAgent
-    agent = WorkflowAgent(FakeAdapter(), plan_only=True)
+    agent = WorkflowAgent(FakeAdapter())
     assert set(agent.tools._tools) == {'create_project', 'create_jmx'}
     assert not agent.plans_steps and agent.max_react_per_step == PLAN_ONLY_ROUNDS
-    full = WorkflowAgent(FakeAdapter())
-    assert 'execute_test' in full.tools and full.plans_steps
 
 
 @pytest.mark.asyncio
@@ -717,7 +650,7 @@ async def test_a_generated_plan_comes_from_one_conversation_without_a_planner():
         ToolCallResponse(tool_calls=[ToolCallRequest('c1', 'create_project', {'name': 'shop'})]),
         ToolCallResponse(tool_calls=[ToolCallRequest('c2', 'create_jmx', {'name': 'baseline'})]),
         ToolCallResponse(text='Created project p1 and plan plan1.')])
-    agent = WorkflowAgent(adapter, tools=registry, plan_only=True)
+    agent = WorkflowAgent(adapter, tools=registry)
     items = [item async for item in agent.stream_from_doc('GET /x', 'r')]
     result = items[-1][1]
     assert calls == ['project', 'plan'] and result['success']
@@ -727,17 +660,14 @@ async def test_a_generated_plan_comes_from_one_conversation_without_a_planner():
 
 
 @pytest.mark.asyncio
-async def test_workflow_leaves_resource_checks_to_execute_test():
+async def test_generating_plans_asks_for_no_resource_checks():
     from app.services.ai.agents.workflow_agent import WorkflowAgent
-    adapter = FakeAdapter(chat_responses=['{"steps":[{"description":"review request"}]}', 'review', 'summary'])
-    agent = WorkflowAgent(adapter, tools=ToolRegistry())
-    await agent.run_from_doc('GET /fixture', execute=True)  # Fake reasoning plan; no execution tools.
-    task = adapter.chat_calls[0][-1].content
-    policy = adapter.chat_calls[1][0].content
+    task = WorkflowAgent.build_task('GET /fixture')
+    policy = WorkflowAgent(FakeAdapter(), tools=ToolRegistry()).system_prompt
     assert 'CPU > 80%' not in task and '内存 > 85%' not in task
     assert 'CPU>80%' not in policy and 'mem>85%' not in policy
     assert 'check_system_resources' not in task and 'check_system_resources' not in policy
-    assert 'Do not check resources' in policy
+    assert 'Creating or inspecting a plan needs no resource check' in policy
 
 
 @pytest.mark.asyncio
@@ -1506,9 +1436,8 @@ async def test_workflow_stream_yields_step_events_then_the_result():
     registry.register(make_echo_tool(calls))
     adapter = FakeAdapter(tool_responses=[
         ToolCallResponse(tool_calls=[ToolCallRequest('c1', 'echo_tool', {'msg': 'hi'})]),
-        ToolCallResponse(text='done')], chat_responses=['## Summary\nAll good'])
+        ToolCallResponse(text='## Summary\nAll good')])
     agent = WorkflowAgent(adapter, tools=registry)
-    agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'echo', 'echo_tool')])
     items = [item async for item in agent.stream_from_doc('GET /x', 'r')]
     kinds = [kind for kind, _ in items]
     assert kinds[-1] == 'result' and kinds.count('result') == 1

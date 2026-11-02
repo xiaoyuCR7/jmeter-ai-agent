@@ -5,7 +5,6 @@ import json
 import asyncio
 import logging
 from dataclasses import asdict
-from contextlib import aclosing
 from datetime import datetime
 from typing import Optional, Any
 
@@ -31,7 +30,7 @@ from app.models.schemas import (
     CreateEnvironmentRequest, UpdateEnvironmentRequest,
     AIWorkflowRequest, AIWorkflowCreateResponse,
     APIEndpoint,
-    AgentRunRequest, AgentAnalysisRunResponse, AgentListItem, RunQuestion,
+    RunQuestion, ReanalyzeRequest,
 )
 from app.core.config import (
     get_all_model_configs, load_user_model_configs, save_user_model_configs,
@@ -50,14 +49,14 @@ from app.services.jmeter.component_registry import get_all_components, get_allow
 from app.services.jmeter.sla_engine import SLAEngine, SLAConfig
 from app.services.jmeter.function_registry import get_all_functions
 from app.services.ai.agent.tools.jmeter import resource_hooks
-from app.services.ai.agents import TestPlanAgent, AnalysisAgent, WorkflowAgent
+from app.services.ai.agents import AnalysisAgent
 from app.services.ai.agents.analysis_agent import AnalysisExecutionError
 from app.services.openapi_importer import OpenAPIImporter
 from app.services.ml_analysis import ml_detector
-from app.services.ai.agents.selfheal_agent import selfheal
 from app.services.storage import store
 from app.services.execution_lifecycle import execution_lifecycle, persist_project, persist_execution
 from app.services import run_diagnostics
+from app.services import post_run
 from app.services.post_run import save_analysis_markdown
 
 # JMeter executor — obtained lazily via get_executor() at each call site so
@@ -67,6 +66,7 @@ _report_parser = ReportParser()
 
 DEFAULT_PROJECT_ID = "default"
 MAX_FOLLOW_UP_CONTEXT = 3  # Earlier answers a follow-up question can build on.
+_question_locks: dict[str, asyncio.Lock] = {}  # One answer saved at a time per run.
 WORKFLOW_PROGRESS = {'create_project': (35, '正在创建项目...', 'Creating the project...'),
                      'create_jmx': (60, '正在生成测试计划...', 'Generating the test plan...')}
 
@@ -749,10 +749,25 @@ async def get_report(execution_id: str):
         sla_result=sla_result,
         evidence=evidence,
         failure_diagnosis=failure_diagnosis,
-        status=execution.status
+        status=execution.status,
+        report_status=execution.report_status,
+        report_error=execution.report_error,
+        analysis_enabled=settings.AUTO_ANALYSIS_ENABLED,
     )
 
     return report
+
+
+@router.post("/executions/{execution_id}/analysis", status_code=202)
+async def reanalyze_execution(execution_id: str, request: Optional[ReanalyzeRequest] = None):
+    """重新生成这次运行的 AI 分析；后台进行，报告页轮询 report_status"""
+    try:
+        execution = await post_run.start_reanalysis(execution_id, request.model if request else None)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Execution not found") from None
+    except (ValueError, RuntimeError) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return {'report_status': execution.report_status}
 
 
 @router.post("/executions/{execution_id}/questions")
@@ -765,6 +780,8 @@ async def ask_about_execution(execution_id: str, request: RunQuestion):
     execution = store.get_execution(execution_id)
     if execution is None or execution.ai_analysis is None:
         raise HTTPException(status_code=409, detail="This run has no analysis to ask about")
+    if execution.report_status == 'running':
+        raise HTTPException(status_code=409, detail="The analysis is being written; ask when it is done")
     earlier = execution.ai_analysis.follow_ups[-MAX_FOLLOW_UP_CONTEXT:]
     context = json.dumps({'report': execution.ai_analysis.model_dump(exclude={'follow_ups', 'fact_check'}),
                           'earlier_questions': earlier}, ensure_ascii=False, default=str)
@@ -778,10 +795,14 @@ async def ask_about_execution(execution_id: str, request: RunQuestion):
     validation = (result.analysis or {}).get('validation') or {}
     answer = {'question': request.question, 'answer': result.output, 'asked_at': datetime.now().isoformat(),
               'mismatches': validation.get('mismatches') or []}
-    # Read again: the run may have been updated while the model was answering.
-    execution = store.get_execution(execution_id).model_copy(deep=True)
-    execution.ai_analysis.follow_ups.append(answer)
-    await persist_execution(execution)
+    async with _question_locks.setdefault(execution_id, asyncio.Lock()):
+        # Read again: the run may have been deleted or re-analysed while the model was answering.
+        current = store.get_execution(execution_id)
+        if current is None or current.ai_analysis is None or current.report_status == 'running':
+            raise HTTPException(status_code=409, detail="The run or its analysis changed while answering; ask again")
+        execution = current.model_copy(deep=True)
+        execution.ai_analysis.follow_ups.append(answer)
+        await persist_execution(execution)
     save_analysis_markdown(execution.report_dir, execution_id, execution.ai_analysis)
     return answer
 
@@ -1069,7 +1090,7 @@ async def ai_workflow_stream(request: AIWorkflowRequest):
     async def generate():
         try:
             adapter = AIAdapterFactory.get_adapter(request.ai_model)
-            agent = WorkflowAgent(adapter, plan_only=True)
+            agent = WorkflowAgent(adapter)
 
             # ── Step 1: Analyzing ─────────────────────────
             msg = "Analyzing API documentation..." if is_en else "正在分析API文档..."
@@ -1082,7 +1103,6 @@ async def ai_workflow_stream(request: AIWorkflowRequest):
                 api_documentation=request.api_documentation,
                 testing_requirements=request.testing_requirements,
                 test_types=None,
-                execute=False,
             ):
                 if kind == "result":
                     result = payload
@@ -1144,109 +1164,6 @@ async def ai_workflow_stream(request: AIWorkflowRequest):
             yield f"data: {json.dumps({'step': 'error', 'message': err_msg, 'progress': 100, 'error': True}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
-
-
-# ===== Agent Framework =====
-
-@router.get("/agent/agents", response_model=list)
-async def list_agents():
-    """列出所有可用的 Agent"""
-    return [
-        AgentListItem(
-            name="测试计划生成 Agent",
-            description="从API文档自动生成JMeter测试计划，支持验证和迭代优化",
-            agent_type="test_plan",
-        ),
-        AgentListItem(
-            name="测试报告分析 Agent",
-            description="深度分析JMeter测试报告，识别性能瓶颈并给出优化建议",
-            agent_type="analysis",
-        ),
-        AgentListItem(
-            name="工作流编排 Agent",
-            description="端到端编排：API文档 → 项目 → 测试计划 → 执行 → 分析",
-            agent_type="workflow",
-        ),
-    ]
-
-
-@router.post("/agent/run", response_model=AgentAnalysisRunResponse, response_model_exclude_unset=True)
-async def agent_run(request: AgentRunRequest):
-    """运行 Agent 任务（非流式）"""
-    try:
-        evidence = (await AnalysisAgent.resolve_execution(request.execution_id)
-                    if request.execution_id is not None else None)
-        adapter = AIAdapterFactory.create(request.model)
-
-        if request.agent_type == "test_plan":
-            agent = TestPlanAgent(adapter, session_id=request.session_id)
-        elif request.agent_type == "analysis":
-            agent = AnalysisAgent(adapter, session_id=request.session_id)
-        elif request.agent_type == "workflow":
-            agent = WorkflowAgent(adapter, session_id=request.session_id)
-        else:
-            raise HTTPException(status_code=400, detail=f"Unknown agent type: {request.agent_type}")
-
-        result = (await agent.run_analysis(request.task, evidence, context=request.context)
-                  if evidence is not None else await agent.run(request.task, context=request.context))
-
-        return AgentAnalysisRunResponse(
-            agent_type=request.agent_type,
-            task=request.task,
-            success=result.success,
-            output=result.output,
-            plan_steps=[
-                {"step_id": s.step_id, "description": s.description, "success": s.success}
-                for s in result.plan
-            ],
-            iterations=result.iterations,
-            error=result.error,
-            duration_seconds=result.duration_seconds,
-            **({'analysis': result.analysis} if result.analysis is not None else {}),
-        )
-    except AnalysisExecutionError as e:
-        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
-    except HTTPException:
-        raise
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/agent/run/stream")
-async def agent_run_stream(request: AgentRunRequest):
-    """运行 Agent 任务（SSE 流式返回事件）"""
-    try:
-        evidence = (await AnalysisAgent.resolve_execution(request.execution_id)
-                    if request.execution_id is not None else None)
-        adapter = AIAdapterFactory.create(request.model)
-
-        if request.agent_type == "test_plan":
-            agent = TestPlanAgent(adapter, session_id=request.session_id)
-        elif request.agent_type == "analysis":
-            agent = AnalysisAgent(adapter, session_id=request.session_id)
-        elif request.agent_type == "workflow":
-            agent = WorkflowAgent(adapter, session_id=request.session_id)
-        else:
-            raise HTTPException(status_code=400, detail=f"Unknown agent type: {request.agent_type}")
-
-        async def generate():
-            stream = (agent.run_analysis_stream(request.task, evidence, context=request.context)
-                      if evidence is not None else agent.run_stream(request.task, context=request.context))
-            async with aclosing(stream):
-                async for event in stream:
-                    yield f"data: {json.dumps(event.__dict__, ensure_ascii=False)}\n\n"
-
-        return StreamingResponse(generate(), media_type="text/event-stream")
-    except AnalysisExecutionError as e:
-        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
-    except HTTPException:
-        raise
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ===== OpenAPI/Swagger Import =====

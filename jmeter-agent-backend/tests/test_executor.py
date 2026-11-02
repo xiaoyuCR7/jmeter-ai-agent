@@ -180,7 +180,6 @@ class TestExecute:
         ex = make_executor()
         ex._execute_windows_terminal = AsyncMock(return_value=None)
         ex._wait_for_completion = AsyncMock()
-        ex._ws_broadcast = AsyncMock()
         jmx = tmp_path / 'plan.jmx'
         jmx.write_text('<jmeterTestPlan/>')
         with pytest.raises(ValueError):

@@ -40,17 +40,9 @@ def test_lancedb_table_listing_keeps_older_client_compatibility():
     assert rag._list_table_names() == {'legacy'}
 
 
-@pytest.fixture(autouse=True)
-def clean_zero_vector_ids():
-    store_mod._ZERO_VECTOR_IDS.clear()
-    yield
-    store_mod._ZERO_VECTOR_IDS.clear()
-
-
 @pytest.fixture
 def store(tmp_path, monkeypatch):
-    """Isolated store with a working fake embedding function."""
-    monkeypatch.setattr(store_mod, "_compute_embedding", lambda text: list(FAKE_VECTOR))
+    """Isolated LanceDB store."""
     s = LanceRAGStore(db_path=str(tmp_path / "lance"))
     assert s.available, "lancedb backend must be available for these tests"
     return s
@@ -156,8 +148,6 @@ class TestAdd:
         assert doc is not None
         assert doc.module == "login-api"
         assert doc.content == CONTENT
-        # real embedding was written, not a zero placeholder
-        assert "d1" not in store_mod._ZERO_VECTOR_IDS
 
     def test_add_generates_id_when_missing(self, store):
         doc_id = store.add(make_doc(doc_id=""))
@@ -172,12 +162,6 @@ class TestAdd:
         with pytest.raises(ValueError, match="quality filter"):
             store.add(make_doc(content="太短"))
 
-    def test_add_marks_zero_vector_when_model_unavailable(self, store, monkeypatch):
-        monkeypatch.setattr(store_mod, "_compute_embedding", lambda text: None)
-        store.add(make_doc(doc_id="d-zero"))
-        assert "d-zero" in store_mod._ZERO_VECTOR_IDS
-
-
 class TestUpdate:
     def test_failed_update_preserves_original_row_and_cached_value(self, store, monkeypatch):
         store.add(make_doc(doc_id='original', title='original title'))
@@ -190,40 +174,19 @@ class TestUpdate:
         assert store.get('original').title == 'original title'
         assert store.count() == 1
 
-    def test_update_recomputes_embedding_and_replaces_row(self, store, monkeypatch):
-        """Regression for B3: update must delete-then-add (not add-then-delete),
-        and must always recompute a real embedding instead of reusing/wiping it."""
+    def test_update_replaces_row(self, store):
+        """Regression for B3: update must replace the row, not add a second one."""
         store.add(make_doc(doc_id="d1", title="旧结论"))
-
-        calls = []
-
-        def spy_embedding(text):
-            calls.append(text)
-            return [0.02] * VECTOR_DIM
-
-        monkeypatch.setattr(store_mod, "_compute_embedding", spy_embedding)
         updated = store.update("d1", title="新结论", content="新的测试结论内容，p99 降至 180ms，容量提升明显。")
 
         assert updated is not None
         assert updated.title == "新结论"
-        assert len(calls) == 1  # embedding recomputed exactly once
         assert store.count() == 1  # replaced, not duplicated
         assert store.get("d1").title == "新结论"
-        # table row carries the new non-zero vector
-        rows = store._table.search().to_list()
-        assert len(rows) == 1
-        assert any(v != 0.0 for v in rows[0]["vector"])
-        assert "d1" not in store_mod._ZERO_VECTOR_IDS
+        assert len(store._table.search().to_list()) == 1
 
     def test_update_nonexistent_returns_none(self, store):
         assert store.update("ghost", title="x") is None
-
-    def test_update_marks_zero_vector_when_model_lost(self, store, monkeypatch):
-        store.add(make_doc(doc_id="d1"))
-        monkeypatch.setattr(store_mod, "_compute_embedding", lambda text: None)
-        store.update("d1", title="模型不可用时更新")
-        assert "d1" in store_mod._ZERO_VECTOR_IDS
-
 
 class TestDelete:
     def test_failed_delete_preserves_cache_and_reports_failure(self, store, monkeypatch):
@@ -256,7 +219,6 @@ class TestStats:
         assert stats["backend"] == "lancedb"
         assert stats["by_module"]["login-api"] == 1
         assert stats["by_type"]["known_issue"] == 1
-        assert stats["vector_dim"] == VECTOR_DIM
 
 
 class TestSafeWhere:
@@ -265,52 +227,8 @@ class TestSafeWhere:
         assert clause == "id = 'o''brien'"
 
 
-class TestZeroVectorRepair:
-    @pytest.mark.asyncio
-    async def test_repair_reembeds_placeholder_rows(self, store, monkeypatch):
-        """Regression for B16: docs written while the embedding model was
-        still loading get real vectors once the model becomes available."""
-        monkeypatch.setattr(store_mod, "_compute_embedding", lambda text: None)
-        store.add(make_doc(doc_id="z1"))
-        store.add(make_doc(doc_id="z2", module="order-api"))
-        assert store_mod._ZERO_VECTOR_IDS == {"z1", "z2"}
-
-        # Model finishes loading — repair runs against the module singleton,
-        # which we point at this isolated store.
-        monkeypatch.setattr(
-            store_mod, "_compute_embedding_async",
-            lambda text: _async_return([0.03] * VECTOR_DIM),
-        )
-        monkeypatch.setattr(store_mod, "rag_store", store)
-
-        await store_mod._repair_zero_vectors()
-
-        assert store_mod._ZERO_VECTOR_IDS == set()
-        for row in store._table.search().to_list():
-            assert any(v != 0.0 for v in row["vector"])
-
-    @pytest.mark.asyncio
-    async def test_repair_keeps_id_when_model_still_down(self, store, monkeypatch):
-        monkeypatch.setattr(store_mod, "_compute_embedding", lambda text: None)
-        store.add(make_doc(doc_id="z1"))
-
-        monkeypatch.setattr(
-            store_mod, "_compute_embedding_async", lambda text: _async_return(None)
-        )
-        monkeypatch.setattr(store_mod, "rag_store", store)
-
-        await store_mod._repair_zero_vectors()
-
-        assert "z1" in store_mod._ZERO_VECTOR_IDS  # kept for a later attempt
-
-
-async def _async_return(value):
-    return value
-
-
 def test_json_fallback_survives_restart_and_persists_update_delete(tmp_path, monkeypatch):
     monkeypatch.setattr(LanceRAGStore, '_init_db', lambda self: None)
-    monkeypatch.setattr(store_mod, '_compute_embedding', lambda text: None)
     path = str(tmp_path / 'fallback')
     first = LanceRAGStore(path)
     first.add(make_doc(doc_id='durable'))
@@ -329,23 +247,6 @@ def test_reading_a_document_cannot_mutate_persisted_or_cached_memory(store):
     doc.title = 'unsaved'
     assert store.get('copy').title != 'unsaved'
     assert 'unsaved' not in store.get('copy').metadata
-
-
-@pytest.mark.asyncio
-async def test_zero_vector_repair_recovers_cold_store_without_delete(store, monkeypatch):
-    from unittest.mock import AsyncMock, Mock
-    monkeypatch.setattr(store_mod, '_compute_embedding', lambda text: None)
-    store.add(make_doc(doc_id='cold-zero'))
-    store_mod._ZERO_VECTOR_IDS.clear()
-    cold = LanceRAGStore(db_path=store.db_path)
-    monkeypatch.setattr(store_mod, 'rag_store', cold)
-    monkeypatch.setattr(store_mod, '_compute_embedding_async', AsyncMock(return_value=list(FAKE_VECTOR)))
-    deletion = Mock(side_effect=AssertionError('repair must not delete evidence'))
-    monkeypatch.setattr(cold._table, 'delete', deletion)
-    await store_mod._repair_zero_vectors()
-    row = cold._table.search().where("id = 'cold-zero'").to_list()[0]
-    assert row['vector'][0] == pytest.approx(FAKE_VECTOR[0])
-    deletion.assert_not_called()
 
 
 def test_cold_rag_pagination_is_globally_newest_first_and_stats_are_persistent(store):
@@ -373,7 +274,6 @@ def test_filtered_rag_queries_choose_newest_before_limit(store):
 @pytest.mark.asyncio
 async def test_rag_api_filters_with_real_cold_store_in_worker(store, monkeypatch):
     from app.api import routes
-    monkeypatch.setattr(store_mod, '_compute_embedding', lambda text: None)
     store.add(make_doc(doc_id='wanted', module='orders', doc_type='known_issue'))
     store.add(make_doc(doc_id='other-module', module='users', doc_type='known_issue'))
     store.add(make_doc(doc_id='other-type', module='orders', doc_type='raw_report'))
@@ -385,21 +285,6 @@ async def test_rag_api_filters_with_real_cold_store_in_worker(store, monkeypatch
     assert result['documents'] == []
 
 
-def test_delayed_vector_search_does_not_resurrect_deleted_cache(store, monkeypatch):
-    store.add(make_doc(doc_id='delete-during-search'))
-    original_search = store._table.search
-    row = store._doc_to_row(store.get('delete-during-search'), FAKE_VECTOR)
-    class Query:
-        def limit(self, limit):
-            return self
-        def to_list(self):
-            store.delete('delete-during-search')
-            return [row]
-    monkeypatch.setattr(store._table, 'search', lambda *args, **kwargs: Query() if args else original_search(*args, **kwargs))
-    assert store.hybrid_search(query_text='p99')[0].id == 'delete-during-search'
-    assert store.get('delete-during-search') is None
-
-
 def test_keyword_search_cold_fallback_does_not_depend_on_cache(store, monkeypatch):
     store.add(make_doc(doc_id='found', content='This needle is present in a persisted performance observation.'))
     cold = LanceRAGStore(store.db_path)
@@ -408,7 +293,6 @@ def test_keyword_search_cold_fallback_does_not_depend_on_cache(store, monkeypatc
 
 def test_json_fallback_module_filter_is_exact(tmp_path, monkeypatch):
     monkeypatch.setattr(LanceRAGStore, '_init_db', lambda self: None)
-    monkeypatch.setattr(store_mod, '_compute_embedding', lambda text: None)
     store = LanceRAGStore(str(tmp_path / 'fallback'))
     store.add(make_doc(doc_id='wanted', module='api'))
     store.add(make_doc(doc_id='unrelated', module='private-api'))
@@ -436,18 +320,6 @@ def test_module_versions_are_not_limited_to_recent_200_documents(store):
     store._table.add([store._doc_to_row(doc, FAKE_VECTOR) for doc in documents])
     cold = LanceRAGStore(store.db_path)
     assert set(cold.get_module_versions('login-api')) == {f'v{i}' for i in range(201)}
-
-
-@pytest.mark.asyncio
-async def test_cancelled_embedding_preload_resets_loading_flag(monkeypatch):
-    import asyncio
-    from unittest.mock import AsyncMock
-    monkeypatch.setattr(store_mod, '_embedding_model', None)
-    monkeypatch.setattr(store_mod, '_embedding_model_loading', False)
-    monkeypatch.setattr(asyncio, 'to_thread', AsyncMock(side_effect=asyncio.CancelledError()))
-    with pytest.raises(asyncio.CancelledError):
-        await store_mod._preload_embedding_model()
-    assert store_mod._embedding_model_loading is False
 
 
 class TestSearchIsolation:
@@ -673,11 +545,11 @@ class TestSearchIsolation:
         add.assert_not_awaited()
         assert outcome['rejected_reason']
 
-    def test_scope_filter_is_applied_before_vector_search_limit(self, store):
+    def test_scope_filter_is_applied_before_the_limit(self, store):
         wanted = make_doc(doc_id='scoped-wanted'); wanted.context_scope = 'scope-one'
         other = make_doc(doc_id='scoped-other'); other.context_scope = 'scope-two'
         store.add(other); store.add(wanted)
-        assert [doc.id for doc in store.hybrid_search(query_text='capacity', limit=1,
+        assert [doc.id for doc in store.hybrid_search(query_text='p99', limit=1,
                                                       context_scope='scope-one')] == ['scoped-wanted']
 
     def test_archiver_does_not_overwrite_another_execution(self, store):
@@ -698,25 +570,31 @@ class TestSearchIsolation:
         assert not cold._docs_cache
         assert [d.id for d in cold.hybrid_search(module='login-api', version='v1')] == ['persisted']
 
-    def test_missing_embedding_does_not_ignore_query(self, store, monkeypatch):
+    def test_search_keeps_only_documents_with_the_query(self, store):
         store.add(make_doc(doc_id='relevant', content='The unique needle is supported by this saved observation.'))
         store.add(make_doc(doc_id='unrelated'))
-        monkeypatch.setattr(store_mod, '_compute_embedding', lambda text: None)
         cold = LanceRAGStore(db_path=store.db_path)
         assert [d.id for d in cold.full_text_search('unique needle')] == ['relevant']
         assert store.full_text_search('NO_MATCH_EXPECTED') == []
 
-    def test_vector_search_applies_all_metadata_filters(self, store):
+    def test_search_applies_all_metadata_filters(self, store):
         store.add(make_doc(doc_id='wanted', version='v1'))
         store.add(make_doc(doc_id='other-version', version='v2'))
         store.add(make_doc(doc_id='other-module', module='different', version='v1'))
-        result = store.hybrid_search(query_text='capacity', module='login-api',
+        result = store.hybrid_search(query_text='p99', module='login-api',
                                      doc_type='analysis_conclusion', version='v1')
         assert [d.id for d in result] == ['wanted']
 
-    def test_keyword_filter_handles_quotes_as_data(self, store, monkeypatch):
+    def test_keyword_filter_handles_quotes_as_data(self, store):
         store.add(make_doc(doc_id='quoted', content="The client's p99 stayed below the configured threshold."))
-        monkeypatch.setattr(store_mod, '_compute_embedding', lambda text: None)
         cold = LanceRAGStore(db_path=store.db_path)
         assert [d.id for d in cold.full_text_search("client's")] == ['quoted']
         assert cold.full_text_search("' OR true --") == []
+
+
+def test_chinese_terms_find_chinese_documents(store):
+    store.add(make_doc(doc_id='timeout', content='订单接口在高峰期频繁超时，连接池耗尽后错误率升到 5%。'))
+    store.add(make_doc(doc_id='other'))
+    cold = LanceRAGStore(db_path=store.db_path)
+    assert [d.id for d in cold.hybrid_search(query_text='超时')] == ['timeout']
+    assert cold.hybrid_search(query_text='内存泄漏') == []

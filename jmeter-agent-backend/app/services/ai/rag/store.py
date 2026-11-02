@@ -1,10 +1,9 @@
-"""RAG document store — LanceDB-backed with hybrid vector + full-text search.
+"""RAG document store — LanceDB-backed, searched by keyword and metadata.
 
 Upgrades the original JSON-file store to LanceDB:
-- Vector search via sentence-transformers embeddings (all-MiniLM-L6-v2, 384-dim)
-- Full-text search via LanceDB/Tantivy FTS
-- Hybrid search combining vector similarity + keyword + metadata filters
-- Automatic fallback: if LanceDB/sentence-transformers unavailable, falls back to JSON store
+- Substring search over each document's text, so Chinese and English match alike
+- Metadata filters (module, version, doc type)
+- Automatic fallback: if LanceDB is unavailable, falls back to a JSON store
 
 Storage rules (same as before):
 - ONLY stores: raw reports, formal analysis conclusions, defect retrospectives,
@@ -13,7 +12,6 @@ Storage rules (same as before):
 """
 
 import os
-import asyncio
 import json
 import uuid
 import re
@@ -110,200 +108,22 @@ class RAGDocument:
 
     @property
     def search_text(self) -> str:
-        """Combined text for embedding/search."""
+        """Combined text for keyword search."""
         parts = [self.title, self.module, self.version,
                  " ".join(self.keywords), " ".join(self.tags), self.content]
         return " ".join(p for p in parts if p)
 
 
-# ── Embedding function (lazy-loaded) ──────────────────────────
-
-_embedding_model = None
-_embedding_model_loading = False
-
-# IDs of documents written with a placeholder zero vector because the
-# embedding model was not ready at write time. Repaired in the background
-# once the model finishes loading.
-_ZERO_VECTOR_IDS: set = set()
-
-
-def _get_embedding_model():
-    """Lazy-load the sentence-transformers model. Thread-safe singleton.
-
-    Returns the model if loaded, None if still loading or unavailable.
-    Does NOT block — call _preload_embedding_model() at startup to load in background.
-    """
-    global _embedding_model
-    if _embedding_model is not None:
-        return _embedding_model
-    # Don't load synchronously — would block event loop
-    return None
-
-
-async def _preload_embedding_model():
-    """Pre-load the sentence-transformers model in a thread to avoid blocking."""
-    global _embedding_model, _embedding_model_loading
-    if _embedding_model is not None or _embedding_model_loading:
-        return
-    _embedding_model_loading = True
-
-    def _load():
-        try:
-            from sentence_transformers import SentenceTransformer
-            model_name = settings.RAG_EMBEDDING_MODEL
-            device = settings.RAG_EMBEDDING_DEVICE
-            model_path = settings.RAG_EMBEDDING_MODEL_PATH
-
-            # Try local cache first if path configured
-            if model_path and os.path.exists(model_path):
-                try:
-                    m = SentenceTransformer(
-                        model_path, device=device, local_files_only=True,
-                    )
-                    logger.info(f"RAG embedding model loaded from local path: {model_path}")
-                    return m
-                except Exception as e:
-                    logger.warning(f"Local model path {model_path} failed: {e}")
-
-            # Try downloading from huggingface
-            try:
-                m = SentenceTransformer(model_name, device=device)
-                logger.info(f"RAG embedding model loaded: {model_name} (device={device})")
-                return m
-            except Exception as download_err:
-                # Network failure — try local cached version
-                logger.warning(
-                    f"Download failed ({download_err}), trying local cache..."
-                )
-                try:
-                    m = SentenceTransformer(
-                        model_name, device=device, local_files_only=True,
-                    )
-                    logger.info(f"RAG embedding model loaded from cache: {model_name}")
-                    return m
-                except Exception as cache_err:
-                    logger.error(
-                        f"RAG embedding model unavailable (network={download_err}, cache={cache_err}). "
-                        f"Set RAG_EMBEDDING_MODEL_PATH to a local model directory. "
-                        f"Vector search disabled; keyword search still available."
-                    )
-                    return None
-        except ImportError:
-            logger.warning(
-                "sentence-transformers not installed. RAG vector search disabled. "
-                "Install with: pip install sentence-transformers"
-            )
-            return None
-        except Exception as e:
-            logger.error(f"Failed to load embedding model: {e}")
-            return None
-
-    import asyncio
-    try:
-        _embedding_model = await asyncio.to_thread(_load)
-    finally:
-        _embedding_model_loading = False
-
-    # Repair any documents that were written with placeholder zero vectors
-    # while the model was still loading.
-    if _embedding_model is not None:
-        try:
-            await _repair_zero_vectors()
-        except Exception as e:
-            logger.warning(f"Zero-vector repair skipped: {e}")
-
-
-async def _repair_zero_vectors():
-    """Re-embed documents that were stored with placeholder zero vectors."""
-    # This private startup-maintenance entrypoint owns only vector repair. The
-    # scope propagates into its worker threads and is restored on cancellation.
-    await _repair_pending_vectors()
-
-
-async def _repair_pending_vectors():
-    store = rag_store  # module singleton (defined below); resolved at call time
-    if not store.available:
-        return
-
-    # A restart loses the in-memory pending set. Scan only ids/vectors once per
-    # store, not whole document bodies on every repair attempt.
-    if not getattr(store, '_zero_vectors_scanned', False):
-        rows = await asyncio.to_thread(lambda: store._table.search().select(['id', 'vector']).limit(None).to_list())
-        _ZERO_VECTOR_IDS.update(row['id'] for row in rows if not any(row['vector']))
-        store._zero_vectors_scanned = True
-
-    repaired = 0
-    for doc_id in list(_ZERO_VECTOR_IDS):
-        doc = await asyncio.to_thread(store.get, doc_id)
-        if not doc:
-            _ZERO_VECTOR_IDS.discard(doc_id)
-            continue
-        vector = await _compute_embedding_async(doc.search_text)
-        if not vector:
-            continue  # model still unavailable — keep for a later attempt
-        try:
-            # Update the vector atomically, without deleting evidence or
-            # overwriting a concurrent document edit with our older snapshot.
-            where = store._safe_where('id', doc_id) + ' AND ' + store._safe_where('search_text', doc.search_text)
-            def persist_vector():
-                with store._write_lease():
-                    store._table.update(where=where, values={'vector': vector})
-            await asyncio.to_thread(persist_vector)
-            _ZERO_VECTOR_IDS.discard(doc_id)
-            repaired += 1
-        except Exception as e:
-            logger.error(f"Zero-vector repair failed for {doc_id}: {e}")
-    if repaired:
-        logger.info(f"Repaired {repaired} RAG document(s) with real embeddings")
-
-
-def _compute_embedding(text: str) -> Optional[list[float]]:
-    """Compute embedding vector for text. Returns None if model unavailable.
-
-    NOTE: model.encode() is CPU-bound (~5ms per call for all-MiniLM-L6-v2).
-    For bulk archiving, caller should batch and run in a thread pool.
-    """
-    model = _get_embedding_model()
-    if model is None:
-        return None
-    try:
-        vec = model.encode(text, normalize_embeddings=True)
-        return vec.tolist()
-    except Exception as e:
-        logger.error(f"Embedding computation failed: {e}")
-        return None
-
-
-async def _compute_embedding_async(text: str) -> Optional[list[float]]:
-    """Async-safe variant: offloads CPU-bound encode to thread pool."""
-    import asyncio
-    model = _get_embedding_model()
-    if model is None:
-        return None
-    try:
-        vec = await asyncio.to_thread(
-            model.encode, text, normalize_embeddings=True,
-        )
-        return vec.tolist()
-    except Exception as e:
-        logger.error(f"Embedding computation failed: {e}")
-        return None
-
-
 # ── LanceDB RAG Store ─────────────────────────────────────────
 
 class LanceRAGStore:
-    """LanceDB-backed RAG document store with hybrid search.
+    """LanceDB-backed RAG document store, searched by keyword and metadata.
 
-    Features:
-    - Vector search (384-dim all-MiniLM-L6-v2 embeddings)
-    - Full-text search (LanceDB Tantivy FTS)
-    - Metadata filtering (module, version, doc_type)
-    - Hybrid search combining all three
-    - Auto-fallback to JSON store if LanceDB unavailable
+    Auto-falls back to a JSON store if LanceDB is unavailable.
     """
 
-    VECTOR_DIM = 384  # all-MiniLM-L6-v2 dimension
+    # Older tables have a vector column; rows keep a zero vector so they stay readable.
+    VECTOR_DIM = 384
 
     def __init__(self, db_path: Optional[str] = None):
         if db_path is None:
@@ -380,18 +200,13 @@ class LanceRAGStore:
             self._fallback_signature = self._fallback_file_signature()
 
     def _write_document(self, doc: RAGDocument):
-        vector = _compute_embedding(doc.search_text)
         if self.available:
-            row = self._doc_to_row(doc, vector or [0.0] * self.VECTOR_DIM)
+            row = self._doc_to_row(doc, [0.0] * self.VECTOR_DIM)
             (self._table.merge_insert('id').when_matched_update_all()
              .when_not_matched_insert_all().execute([row]))
         else:
             self._persist_fallback(doc)
         self._docs_cache[doc.id] = copy.deepcopy(doc)
-        if vector:
-            _ZERO_VECTOR_IDS.discard(doc.id)
-        else:
-            _ZERO_VECTOR_IDS.add(doc.id)
 
     def _list_table_names(self) -> set[str]:
         """Use the current paginated API while retaining old client support."""
@@ -465,7 +280,7 @@ class LanceRAGStore:
     # ── CRUD ──────────────────────────────────────────────
 
     def _doc_to_row(self, doc: RAGDocument, vector: list) -> dict:
-        """Serialize a document + embedding vector into a LanceDB row."""
+        """Serialize a document into a LanceDB row."""
         return {
             "id": doc.id,
             "doc_type": doc.doc_type,
@@ -573,7 +388,6 @@ class LanceRAGStore:
         else:
             self._persist_fallback(delete_id=doc_id)
         self._docs_cache.pop(doc_id, None)
-        _ZERO_VECTOR_IDS.discard(doc_id)
         return True
 
     # ── Search ────────────────────────────────────────────
@@ -586,23 +400,8 @@ class LanceRAGStore:
         return condition or '1 = 1'
 
     def search_by_keywords(self, keywords: list[str], limit: int = 20) -> list[RAGDocument]:
-        """Full-text keyword search using LanceDB Tantivy FTS."""
-        if not keywords:
-            return []
-
-        if self.available:
-            try:
-                query = " OR ".join(keywords)
-                results = self._table.search(query, query_type="fts") \
-                    .where(self._where()) \
-                    .limit(limit) \
-                    .to_list()
-                return self._visible(self._row_to_doc(r) for r in results)
-            except Exception as e:
-                logger.error(f"LanceDB FTS search failed: {e}")
-
-        # Fallback: in-memory substring search
-        return self._fallback_keyword_search(keywords, limit)
+        """Documents containing any of the keywords."""
+        return self._fallback_keyword_search(keywords, limit) if keywords else []
 
     def search_by_module(self, module: str, limit: int = 20) -> list[RAGDocument]:
         """Find all documents for a module."""
@@ -637,14 +436,14 @@ class LanceRAGStore:
         limit: int = 20,
         context_scope: Optional[str] = None,
     ) -> list[RAGDocument]:
-        """Hybrid search: vector similarity + full-text + metadata filters.
+        """Newest documents matching the metadata filters and containing any keyword.
 
         Args:
-            keywords: Keyword list for full-text search.
+            keywords: Documents must contain at least one of these.
             module: Filter by module.
             doc_type: Filter by document type.
             version: Filter by version.
-            query_text: Natural language query for vector similarity search.
+            query_text: A single search term, used when no keywords are given.
             limit: Max results.
         """
         keywords = keywords or []
@@ -654,23 +453,6 @@ class LanceRAGStore:
         if context_scope is not None:
             filters.append(self._safe_where('context_scope', context_scope))
 
-        if self.available and query_text:
-            # Vector search with metadata filters
-            try:
-                vector = _compute_embedding(query_text)
-                if vector:
-                    q = self._table.search(vector)
-                    if filters or False:
-                        q = q.where(self._where(" AND ".join(filters)))
-                    results = q.limit(limit).to_list()
-                    docs = [self._row_to_doc(r) for r in results]
-                    # Searches may run in a worker. Do not republish stale rows into
-                    # the ID cache after a concurrent update/delete.
-                    return self._visible(docs)
-            except Exception as e:
-                logger.error(f"LanceDB hybrid search failed: {e}")
-
-        # Without an embedding, retain the query instead of returning every doc.
         terms = keywords or ([query_text] if query_text else [])
         if self.available:
             try:
@@ -763,8 +545,6 @@ class LanceRAGStore:
             "db_path": self.db_path,
             "by_type": by_type,
             "by_module": by_module,
-            "embedding_model": settings.RAG_EMBEDDING_MODEL if _embedding_model else "loading_or_unavailable",
-            "vector_dim": self.VECTOR_DIM,
         }
 
     # ── Internal ──────────────────────────────────────────
@@ -807,7 +587,7 @@ class LanceRAGStore:
         return "(" + " OR ".join(f"contains(lower(search_text), '{word}')" for word in literals) + ")"
 
     def _fallback_keyword_search(self, keywords: list[str], limit: int) -> list[RAGDocument]:
-        """Substring search fallback when LanceDB unavailable."""
+        """Substring search, ranked by how many keywords a document contains when LanceDB is unavailable."""
         if self.available and any(keywords):
             try:
                 rows = self._table.search().where(self._where(self._keyword_where(keywords))).limit(limit).to_list()

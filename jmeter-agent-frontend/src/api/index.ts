@@ -2,54 +2,6 @@ import axios from 'axios'
 import { withScriptApproval } from './scriptApproval'
 import { baseURL, requestAccess } from './session'
 
-export type AgentRunRequest = {
-  task: string
-  context?: string | null
-  model?: string | null
-  session_id?: string | null
-  stream?: boolean
-} & ({ agent_type: 'analysis'; execution_id?: string | null }
-  | { agent_type?: 'test_plan' | 'workflow'; execution_id?: never })
-
-export interface RegisteredAnalysis {
-  execution_id: string
-  success: boolean
-  error?: string | null
-  phase?: 'history' | 'evaluation'
-  error_code?: 'ledger_read_failed'
-  fact?: Record<string, unknown> | null
-  validation?: Record<string, unknown> | null
-  structured?: Record<string, unknown> | null
-  archive?: {
-    fact_archived?: boolean
-    hypotheses_archived?: string[]
-    conclusion_archived?: string | null
-    raw_report_archived?: string | null
-    errors?: string[]
-    [key: string]: unknown
-  } | null
-  rag?: { history_found: boolean; historical_facts_count: number; historical_hypotheses_count: number }
-}
-
-export interface AgentRunResult {
-  agent_type: string
-  task: string
-  success: boolean
-  output: string
-  plan_steps: { step_id: number; description: string; success: boolean }[]
-  iterations: number
-  error: string | null
-  duration_seconds: number
-  analysis?: RegisteredAnalysis
-}
-
-export interface AgentStreamEvent {
-  type: string
-  message: string
-  timestamp: string
-  data?: (Record<string, unknown> & { analysis?: RegisteredAnalysis }) | null
-}
-
 export type RequirementMetric = 'avg_response_time' | 'p90' | 'p95' | 'p99' | 'max_response_time' | 'error_rate' | 'throughput'
 export type RequirementOperator = 'lte' | 'lt' | 'gte' | 'gt'
 
@@ -326,9 +278,9 @@ export const api = {
   getExecutions: (projectId?: string) => instance.get('/executions', { params: projectId ? { project_id: projectId } : {} }),
   cancelExecution: (id: string) => instance.post(`/executions/${id}/cancel`),
 
-  runAgent: (data: AgentRunRequest) => instance.post<AgentRunResult>('/agent/run', data),
   askAboutRun: (executionId: string, question: string) =>
     instance.post(`/executions/${encodeURIComponent(executionId)}/questions`, { question }, { timeout: 300000 }),
+  reanalyzeRun: (executionId: string) => instance.post(`/executions/${encodeURIComponent(executionId)}/analysis`),
 
   runAIWorkflowStream: (data: any) => {
     const lang = currentLang()
@@ -361,8 +313,6 @@ export const api = {
   checkResources: () => instance.get('/system/resources'),
 
   getBaselines: (project_id?: string) => instance.get('/baselines', { params: project_id ? { project_id } : {} }),
-  createBaseline: ({ thresholds, metrics_snapshot, ...params }: any) =>
-    instance.post('/baselines', { thresholds, metrics_snapshot }, { params }),
   activateBaseline: (id: number) => instance.post(`/baselines/${id}/activate`),
   deleteBaseline: (id: number) => instance.delete(`/baselines/${id}`),
 

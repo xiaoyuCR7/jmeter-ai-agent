@@ -13,27 +13,22 @@ function selected(source: string, names: string[], context: Record<string, any>)
   return runInNewContext(ts.transpileModule(code, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText + `\n({${names.join(',')}})`, context)
 }
 
-it('OpenAPI and baseline methods send the actual route/body contracts', async () => {
+it('OpenAPI import sends the actual route/body contract', async () => {
   const source = readFileSync(new URL('../src/api/index.ts', import.meta.url), 'utf8')
   const instance = { post: vi.fn() }
   const { api } = selected(source, ['api'], { instance })
   api.importOpenAPI('https://fixture.invalid/spec.json', true)
   expect(instance.post).toHaveBeenLastCalledWith('/openapi/import', { url: 'https://fixture.invalid/spec.json', execute: true })
-  api.createBaseline({ project_id: 'p', name: 'baseline', thresholds: { p99_max: 42 }, metrics_snapshot: { throughput: 5 } })
-  expect(instance.post).toHaveBeenLastCalledWith('/baselines', { thresholds: { p99_max: 42 }, metrics_snapshot: { throughput: 5 } }, { params: { project_id: 'p', name: 'baseline' } })
 })
 
-it('registered and legacy Agent requests preserve their explicit JSON contract', () => {
+it('run questions and re-analysis go to their own routes', () => {
   const source = readFileSync(new URL('../src/api/index.ts', import.meta.url), 'utf8')
   const instance = { post: vi.fn() }
   const { api } = selected(source, ['api'], { instance })
-  for (const data of [{ agent_type: 'analysis', task: 'explain' },
-    { agent_type: 'analysis', task: 'explain', execution_id: 'run-A', session_id: 'session', context: 'reference' }]) {
-    api.runAgent(data)
-    expect(instance.post).toHaveBeenLastCalledWith('/agent/run', data)
-    api.askAboutRun('run/1', 'why?')
-    expect(instance.post).toHaveBeenLastCalledWith('/executions/run%2F1/questions', { question: 'why?' }, { timeout: 300000 })
-  }
+  api.askAboutRun('run/1', 'why?')
+  expect(instance.post).toHaveBeenLastCalledWith('/executions/run%2F1/questions', { question: 'why?' }, { timeout: 300000 })
+  api.reanalyzeRun('run/1')
+  expect(instance.post).toHaveBeenLastCalledWith('/executions/run%2F1/analysis')
 })
 
 it('CSV preview maps the response columns and row arrays to table objects', async () => {

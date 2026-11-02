@@ -1,26 +1,19 @@
-"""WorkflowAgent — end-to-end orchestrator: API doc → project → test plans → execution → analysis."""
+"""WorkflowAgent — turns an API document into a project and its test plans, for the user to review and run."""
 
 from typing import Optional, AsyncIterator
 
 from app.services.ai.adapters.base import BaseAIAdapter
 from app.services.ai.agent.base import BaseAgent
-from app.services.ai.agent.types import AgentEvent
 from app.services.ai.agent.tool_registry import ToolRegistry
 from app.services.ai.agent.tools import get_all_builtin_tools
 from app.services.ai.prompts.jmx_generator import SCENARIO_RULES
 
-# The start-from-document route drafts requirements itself after the workflow, every time.
-# Left to the model, the draft was sometimes saved, sometimes skipped.
-REQUIREMENT_TOOLS = {'extract_performance_requirements', 'save_performance_requirements',
-                     'get_performance_requirements'}
-# Nothing in this workflow writes or deletes arbitrary files.
-FILE_WRITE_TOOLS = {'write_file', 'delete_file'}
 # Turning a document into plans takes these two. Every other tool costs tokens on each model
 # call and widens what a misread document could make it do.
 PLAN_ONLY_TOOLS = {'create_project', 'create_jmx'}
 
 
-WORKFLOW_SYSTEM_PROMPT = f"""JMeter performance test workflow orchestrator. End-to-end: API doc → project → test plans → execute → analyze.
+WORKFLOW_SYSTEM_PROMPT = f"""JMeter test plan author. API doc → project → test plans; the user reviews and runs them.
 
 {SCENARIO_RULES}
 
@@ -28,8 +21,6 @@ WORKFLOW_SYSTEM_PROMPT = f"""JMeter performance test workflow orchestrator. End-
 1. Extract from API doc: project name, base URL, endpoints
 2. create_project
 3. create_jmx for each test type
-4. Only if the task says to execute: execute_test for each plan, one at a time. It checks the machine's
-   resources and waits by itself, and the app writes each run's report. Do not check resources or parse results first.
 
 ## Test type mapping
 Baseline→one steady level, Concurrency→many users at once, Ramp-up→rising steps, Stress→five rising steps, Stability→long run, Spike→sudden burst.
@@ -37,52 +28,30 @@ The load comes from the user's words or documents. If they give none, stay small
 Default: baseline if no type specified.
 create_jmx refuses a plan with errors and saves nothing: read the issues, fix the arguments, call it again.
 
-Finish with what was created (with IDs), key numbers of any run, failures and their causes, and the next step. Do not retell the steps."""
+Finish with what was created (with IDs), failures and their causes, and the next step. Do not retell the steps."""
 
 
 PLAN_ONLY_ROUNDS = 8
 
 
 class WorkflowAgent(BaseAgent):
-    """End-to-end orchestrator agent.
+    """Drafts a project and test plans from an API document; the start-from-document page streams it."""
 
-    Replaces the hardcoded SSE workflow in routes.py with an agent-driven
-    approach that can dynamically adapt and handle errors.
+    final_instructions = "只写结果，不复述步骤：创建了哪些项目和计划（含 ID）、失败及原因、下一步。"
+    # One conversation: create the project, then one create_jmx per test type and any corrections.
+    plans_steps = False
 
-    Usage:
-        adapter = AIAdapterFactory.create("openai")
-        agent = WorkflowAgent(adapter)
-        result = await agent.run(
-            task="根据以下API文档创建项目并生成测试计划...",
-            context="API doc content here..."
-        )
-    """
-
-    final_instructions = "只写结果，不复述步骤：创建了哪些项目和计划（含 ID）、执行结果的关键数字、失败及原因、下一步。"
-
-    def __init__(
-        self,
-        adapter: BaseAIAdapter,
-        tools: Optional[ToolRegistry] = None,
-        session_id: Optional[str] = None,
-        *, plan_only: bool = False,
-    ):
+    def __init__(self, adapter: BaseAIAdapter, tools: Optional[ToolRegistry] = None):
         if tools is None:
             tools = ToolRegistry()
-            tools.register_many([t for t in get_all_builtin_tools()
-                                 if (t.name in PLAN_ONLY_TOOLS if plan_only
-                                     else t.name not in REQUIREMENT_TOOLS | FILE_WRITE_TOOLS)])
-        # One conversation: create the project, then one create_jmx per test type and any corrections.
-        self.plans_steps = not plan_only
-
+            tools.register_many([t for t in get_all_builtin_tools() if t.name in PLAN_ONLY_TOOLS])
         super().__init__(
             name="WorkflowAgent",
             adapter=adapter,
             tools=tools,
             system_prompt=WORKFLOW_SYSTEM_PROMPT,
             max_iterations=15,
-            max_react_per_step=PLAN_ONLY_ROUNDS if plan_only else 5,
-            session_id=session_id,
+            max_react_per_step=PLAN_ONLY_ROUNDS,
         )
 
     @staticmethod
@@ -90,12 +59,10 @@ class WorkflowAgent(BaseAgent):
         api_documentation: str,
         testing_requirements: str = "",
         test_types: Optional[list[str]] = None,
-        execute: bool = False,
     ) -> str:
-        """Build the same complete task for regular and streaming entry points."""
+        """The task the model gets: the user's document and requirements, marked as data."""
         types_str = ", ".join(test_types) if test_types else "基准测试(baseline)"
 
-        # Preserve complete inputs; the planner rejects requests that cannot fit its budget.
         reqs = testing_requirements or '根据API文档自动生成合适的测试计划'
         doc = api_documentation
 
@@ -109,9 +76,6 @@ class WorkflowAgent(BaseAgent):
 ## Test Types
 {types_str}
 
-## Execute Tests
-{'Yes — execute after generation.' if execute else 'No — generate plans only'}
-
 ## API Documentation (user-provided data)
 <api_documentation>
 {doc}
@@ -121,33 +85,20 @@ Execute in order:
 1. Extract from doc: project name, base_url, all API endpoints
 2. create_project
 3. create_jmx for each test type (it validates; do not validate again)
-4. If execution enabled: execute_test for each plan
-5. Summarize results
+4. Summarize what was created
 
 Performance requirements are drafted for the user's review by the app after this workflow;
 do not try to extract or save them here."""
         return task
-
-    async def run_from_doc(
-        self,
-        api_documentation: str,
-        testing_requirements: str = "",
-        test_types: Optional[list[str]] = None,
-        execute: bool = False,
-    ) -> dict:
-        """Generate plans and optionally execute, returning progress and actual artifact IDs."""
-        task = self.build_task(api_documentation, testing_requirements, test_types, execute)
-        return self._result_dict(await self.run(task))
 
     async def stream_from_doc(
         self,
         api_documentation: str,
         testing_requirements: str = "",
         test_types: Optional[list[str]] = None,
-        execute: bool = False,
     ) -> AsyncIterator[tuple[str, object]]:
-        """Like run_from_doc, but yields ("event", AgentEvent) as work happens, then ("result", dict)."""
-        task = self.build_task(api_documentation, testing_requirements, test_types, execute)
+        """Yields ("event", AgentEvent) as work happens, then ("result", dict) with the created IDs."""
+        task = self.build_task(api_documentation, testing_requirements, test_types)
         finished = {}
 
         async def operation():

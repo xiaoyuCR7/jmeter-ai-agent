@@ -342,10 +342,9 @@ async def test_workflow_skips_the_draft_when_requirements_already_exist_or_draft
 
 
 def test_workflow_agent_leaves_requirements_to_the_app():
-    from app.services.ai.agents.workflow_agent import REQUIREMENT_TOOLS, WorkflowAgent
+    from app.services.ai.agents.workflow_agent import WorkflowAgent
     agent = WorkflowAgent(SimpleNamespace())
-    assert not REQUIREMENT_TOOLS & set(agent.tools._tools)
-    assert 'create_project' in agent.tools._tools
+    assert set(agent.tools._tools) == {'create_project', 'create_jmx'}
 
 
 @pytest.mark.asyncio

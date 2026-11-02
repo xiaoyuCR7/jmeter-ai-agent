@@ -11,10 +11,9 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import json
 import logging
 from contextlib import asynccontextmanager, AsyncExitStack
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException
 
 logger = logging.getLogger(__name__)
 from fastapi.middleware.cors import CORSMiddleware
@@ -52,11 +51,8 @@ async def lifespan(app: FastAPI):
 
     await routes.ensure_default_project()
 
-    # Preload RAG embedding model in background (does not block startup)
     import asyncio as _asyncio
-    from app.services.ai.rag.store import _preload_embedding_model
     from app.api.mcp_routes import init_mcp_server
-    from app.services.ws_manager import ws_manager
     from app.services.execution_lifecycle import execution_lifecycle
     from app.services import notifications, post_run
     from app.services.ai.adapters.factory import AIAdapterFactory
@@ -82,14 +78,9 @@ async def lifespan(app: FastAPI):
         cleanup.push_async_callback(notifications.drain, 10.0)
         cleanup.callback(notifications.unregister, execution_lifecycle)
         cleanup.push_async_callback(execution_lifecycle.shutdown)
-        cleanup.push_async_callback(ws_manager.stop)
-        ws_manager.start()
+        cleanup.push_async_callback(post_run.stop_reanalyses)
+        await post_run.recover_interrupted()
 
-        preload_task = _asyncio.create_task(_preload_embedding_model())
-        async def stop_preload():
-            preload_task.cancel()
-            await _asyncio.gather(preload_task, return_exceptions=True)
-        cleanup.push_async_callback(stop_preload)
         await init_mcp_server()
 
         try:
@@ -132,26 +123,6 @@ app.add_middleware(
 
 # Validate Host before deriving same-origin from it (DNS rebinding).
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.ALLOWED_HOSTS)
-
-# WebSocket endpoint for real-time test progress
-@app.websocket("/ws/executions/{execution_id}")
-async def ws_execution(websocket: WebSocket, execution_id: str):
-    from app.services.ws_manager import ws_manager
-    await ws_manager.connect(execution_id, websocket)
-    try:
-        while True:
-            data = await websocket.receive_text()
-            try:
-                parsed = json.loads(data)
-                if parsed.get("type") == "pong":
-                    ws_manager._register_pong(websocket)
-            except Exception:
-                pass
-    except WebSocketDisconnect:
-        await ws_manager.disconnect(execution_id, websocket)
-    except Exception:
-        await ws_manager.disconnect(execution_id, websocket)
-
 
 # Health check (must be before catch-all)
 @app.get("/health")

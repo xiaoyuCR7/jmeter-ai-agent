@@ -193,7 +193,6 @@ class JMeterExecutor:
                 if any(item.get('cleanup_failed') for item in self._running_processes.values()):
                     raise RuntimeError('Previous execution cleanup is incomplete')
                 info.status = TestExecutionStatus.RUNNING
-                await self._ws_broadcast(execution_id, 'status', {'status': 'running', 'progress': 0})
                 try:
                     launcher = self._execute_windows_terminal if self.system == 'Windows' else self._execute_unix_terminal
                     pid = await launcher(cmd, execution_id, flag_file)
@@ -495,12 +494,6 @@ class JMeterExecutor:
                 callback(progress)
             except Exception:
                 pass
-            try:
-                await self._ws_broadcast(execution_id, "progress", {
-                    "progress": progress,
-                })
-            except Exception:
-                pass
         # Final push so subscribers see 100% immediately
         try:
             callback(100)
@@ -590,14 +583,6 @@ class JMeterExecutor:
         except Exception:
             return "Failed to read log file"
 
-
-    async def _ws_broadcast(self, execution_id: str, event_type: str, data: dict):
-        """Send a WebSocket event for real-time progress."""
-        try:
-            from app.services.ws_manager import ws_manager
-            await ws_manager.broadcast(execution_id, {**data, "event": event_type})
-        except Exception:
-            pass
 
     async def export_junit_xml(self, jtl_path: str, output_path: str,
                                test_name: str = "JMeter Test") -> str:

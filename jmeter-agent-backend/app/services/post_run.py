@@ -213,6 +213,74 @@ async def _write_analysis(execution: TestExecutionInfo, ai_model):
     await execution_lifecycle.emit('analysis_completed', execution)
 
 
+_reanalyses: dict[str, asyncio.Task] = {}
+INTERRUPTED = '后端重启时分析被中断'
+
+
+async def _reanalyze(execution: TestExecutionInfo, ai_model):
+    try:
+        await _write_analysis(execution, ai_model)
+        execution.report_status = 'completed'
+        from app.services.ai.memory import fact_ledger
+        fact = await fact_ledger.load(execution.id)
+        if fact:
+            await record_hypotheses(execution, fact)
+    except asyncio.CancelledError:
+        execution.report_status, execution.report_error = 'failed', INTERRUPTED
+        raise
+    except Exception as error:
+        logger.warning("Re-analysis failed for %s: %s", execution.id, error)
+        execution.report_status, execution.report_error = 'failed', str(error)
+    finally:
+        _reanalyses.pop(execution.id, None)
+        # Read the version again: follow-up questions are not allowed meanwhile, but a delete is.
+        current = store.get_execution(execution.id)
+        if current is not None:
+            execution.storage_version = current.storage_version
+            from app.services.execution_lifecycle import persist_execution
+            try:
+                await persist_execution(execution)
+            except Exception as error:
+                logger.warning("Re-analysis result not saved for %s: %s", execution.id, error)
+
+
+async def start_reanalysis(execution_id: str, ai_model=None) -> TestExecutionInfo:
+    """Write the run's AI analysis again in the background; the report page polls report_status."""
+    from app.services.execution_lifecycle import persist_execution
+    current = store.get_execution(execution_id)
+    if current is None:
+        raise LookupError(execution_id)
+    if current.status != TestExecutionStatus.COMPLETED or not current.summary:
+        raise ValueError('只有成功完成并有结果的运行才能分析')
+    if current.report_status == 'running' or execution_id in _reanalyses:
+        raise RuntimeError('这次运行的分析还在进行')
+    execution = current.model_copy(deep=True)
+    execution.report_status, execution.report_error = 'running', None
+    await persist_execution(execution)
+    _reanalyses[execution_id] = asyncio.create_task(_reanalyze(execution, ai_model))
+    return execution
+
+
+async def stop_reanalyses():
+    tasks = list(_reanalyses.values())
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def recover_interrupted():
+    """A restart ends any analysis in flight; without this the report would say it is still running."""
+    from app.services.execution_lifecycle import TERMINAL, persist_execution
+    for execution in list(store.executions.values()):
+        if execution.report_status == 'running' and execution.status in TERMINAL:
+            execution = execution.model_copy(deep=True)
+            execution.report_status, execution.report_error = 'failed', INTERRUPTED
+            try:
+                await persist_execution(execution)
+            except Exception as error:
+                logger.warning("Could not mark %s as interrupted: %s", execution.id, error)
+
+
 async def finish_run(execution: TestExecutionInfo, ai_model=None):
     """AUTO_ANALYSIS_ENABLED saves the model calls; the measured history is kept either way."""
     if execution.status != TestExecutionStatus.COMPLETED or not execution.summary:
@@ -222,7 +290,7 @@ async def finish_run(execution: TestExecutionInfo, ai_model=None):
     try:
         from app.services.ai.rag.archiver import rag_archiver
         plan = store.get_test_plan(execution.test_plan_id)
-        # Computes an embedding and takes a write lock, so it stays off the event loop.
+        # Takes a write lock and writes to disk, so it stays off the event loop.
         await asyncio.to_thread(
             rag_archiver.archive_raw_report, report_data=execution.summary.model_dump(),
             module=plan.name if plan else execution.test_plan_id,

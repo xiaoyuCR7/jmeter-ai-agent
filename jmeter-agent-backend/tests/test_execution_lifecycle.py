@@ -577,3 +577,18 @@ async def test_a_broken_post_run_step_does_not_fail_the_run(env):
         jmx_path=prepared.jmx_path, end_time=datetime.now())))
     result = await lifecycle.run(prepared.id, executor=executor)
     assert result.status == Status.COMPLETED and result.report_status == 'failed' and 'disk full' in result.report_error
+
+
+@pytest.mark.asyncio
+async def test_a_failed_postprocess_still_gets_the_post_run_step(env):
+    lifecycle, _ = service()
+    post_run = AsyncMock()
+    lifecycle.set_post_run(post_run)
+    prepared = await lifecycle.prepare(str(env.path), 'post-run-after-failure')
+    executor = SimpleNamespace(execute=AsyncMock(return_value=Execution(
+        id=prepared.id, test_plan_id=prepared.test_plan_id, status=Status.COMPLETED,
+        jmx_path=prepared.jmx_path, end_time=datetime.now())))
+    result = await lifecycle.run(prepared.id, executor=executor,
+                                 postprocess=AsyncMock(side_effect=ValueError('requirements unreadable')))
+    post_run.assert_awaited_once()
+    assert result.report_status == 'failed' and result.report_error == 'requirements unreadable'
