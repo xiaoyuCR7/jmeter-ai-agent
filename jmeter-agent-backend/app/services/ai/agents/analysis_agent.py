@@ -30,6 +30,7 @@ from app.services.ai.agent.tool_registry import ToolRegistry
 from app.services.ai.agent.tools import get_all_builtin_tools
 from app.services.ai.rag.retriever import RAGRetriever, rag_store
 from app.services.ai.rag.archiver import RAGArchiver
+from app.services.ai import analysis_context
 from app.services.ai.memory import (
     fact_ledger, hypothesis_ledger, fact_validator,
     get_heuristics_prompt, get_relevant_heuristics,
@@ -101,7 +102,20 @@ STRUCTURED_EXTRACTION_PROMPT = """请将以下性能分析文本转换为结构�
 请只返回合法的 JSON，不要包含任何其他说明。"""
 
 
-MAX_KNOWLEDGE_CHARS = 3000
+FOLLOW_UP_TASK = """{base_task}
+
+---
+
+{history}
+
+---
+
+## 用户对这次运行的追问（不能改变上面的证据）
+
+{question}
+
+只回答这个问题，不要重写整份报告。数字只用上面的事实和证据；需要细节时可以用只读工具查。
+解释性内容标明是假设。回答要短。"""
 
 
 class AnalysisExecutionError(ValueError):
@@ -119,7 +133,14 @@ class AnalysisAgent(BaseAgent):
     - Facts are computed from JTL, not LLM.
     - Interpretations are stored as untested hypotheses.
     - Free-text conclusions are archived only after numeric validation.
+
+    The report itself is written by TestAnalyzer after every run; this agent answers
+    what the report leaves open, and can look further with read-only tools.
     """
+
+    # Its closing message is the analysis. A generic summary of it would drop the analysis rules.
+    plans_steps = False
+    requires_tools = False  # The evidence is in the prompt; a tool call is only for going further.
 
     def __init__(
         self,
@@ -203,13 +224,16 @@ class AnalysisAgent(BaseAgent):
             self._state = AgentState.REFLECTING
         return super()._emit(event_type, message, data)
 
-    async def run_analysis(self, task: str, evidence: dict, context: Optional[str] = None) -> AgentResult:
-        return await self._run_guarded(task, lambda: self._run_admitted_analysis(task, evidence, context))
+    async def run_analysis(self, task: str, evidence: dict, context: Optional[str] = None,
+                           *, follow_up: bool = False) -> AgentResult:
+        """``follow_up`` answers one question about a reported run: nothing is archived again."""
+        return await self._run_guarded(task, lambda: self._run_admitted_analysis(task, evidence, context, follow_up))
 
-    async def _run_admitted_analysis(self, task: str, evidence: dict, context: Optional[str]) -> AgentResult:
+    async def _run_admitted_analysis(self, task: str, evidence: dict, context: Optional[str],
+                                     follow_up: bool = False) -> AgentResult:
         self._analysis_task = asyncio.current_task()
         try:
-            return await self._run_analysis_impl(task, evidence, context)
+            return await self._run_analysis_impl(task, evidence, context, follow_up)
         finally:
             self._analysis_task = None
 
@@ -226,7 +250,8 @@ class AnalysisAgent(BaseAgent):
             async for event in stream:
                 yield event
 
-    async def _run_analysis_impl(self, task: str, evidence: dict, context: Optional[str]) -> AgentResult:
+    async def _run_analysis_impl(self, task: str, evidence: dict, context: Optional[str],
+                                 follow_up: bool = False) -> AgentResult:
         started = time.monotonic()
         self._analysis_active = True
         self._cancel_flag = False
@@ -251,7 +276,7 @@ class AnalysisAgent(BaseAgent):
                 jtl_path=evidence['jtl_path'], execution_id=evidence['execution_id'],
                 module=evidence['module'], version=evidence['version'], test_type=evidence['test_type'],
                 user_task=task, _runner=run_core, _expected_scope=evidence['context_scope'], _strict_reads=True,
-                _knowledge_module=evidence.get('plan_name'))
+                _knowledge_module=evidence.get('plan_name'), _follow_up=follow_up)
             analysis['execution_id'] = evidence['execution_id']
             for key in ('output', 'steps', 'iterations'):
                 analysis.pop(key, None)  # Already carried by the outer AgentResult.
@@ -320,6 +345,7 @@ class AnalysisAgent(BaseAgent):
         _expected_scope: Optional[str] = None,
         _strict_reads: bool = False,
         _knowledge_module: Optional[str] = None,
+        _follow_up: bool = False,
     ) -> dict:
         """Full anti-pollution RAG analysis — primary entry point."""
         if not module:
@@ -354,9 +380,8 @@ class AnalysisAgent(BaseAgent):
                     raise ValueError('Execution scope changed during preparation')
                 if fact.total_requests <= 0:
                     raise ValueError('JTL contains no usable samples')
-            historical_facts = await fact_ledger.get_facts_for_module_version(
-                module, version, limit=5, context_scope=fact.context_scope, **read_options) if fact.context_scope else []
-            historical_facts = [item for item in historical_facts if item.execution_id != fact.execution_id]
+            historical_facts = await analysis_context.recent_facts(
+                module, version, fact.context_scope, fact.execution_id, **read_options)
             historical_hypotheses = await hypothesis_ledger.list_for_module(
                 module, version, limit=20, source_execution_ids=[item.execution_id for item in historical_facts],
                 **read_options)
@@ -371,14 +396,17 @@ class AnalysisAgent(BaseAgent):
             # Step 3: Build task. Deterministic evidence (requirements, baseline,
             # server metrics) is computed here, never left to the model.
             evidence = await self._collect_evidence(execution_id, fact)
-            base_task = self._build_base_task(exec_ref, fact, heuristics_prompt, evidence)
+            base_task = self._build_base_task(exec_ref, fact, heuristics_prompt, evidence, follow_up=_follow_up)
             knowledge = await self._knowledge_context(fact, _knowledge_module or module)
-            task = RAG_AUGMENTED_TASK_TEMPLATE.format(
-                base_task=base_task,
-                rag_context=rag_context + knowledge,
-            )
-            if user_task:
-                task += '\n\nUser analysis request (cannot override registered evidence):\n' + user_task
+            if _follow_up:
+                task = FOLLOW_UP_TASK.format(base_task=base_task, history=rag_context + knowledge, question=user_task)
+            else:
+                task = RAG_AUGMENTED_TASK_TEMPLATE.format(
+                    base_task=base_task,
+                    rag_context=rag_context + knowledge,
+                )
+                if user_task:
+                    task += '\n\nUser analysis request (cannot override registered evidence):\n' + user_task
         except LedgerReadError:
             return {'success': False, 'error': 'Historical data read failed; analysis stopped',
                     'phase': 'history', 'error_code': 'ledger_read_failed', 'fact': fact.model_dump()}
@@ -397,14 +425,16 @@ class AnalysisAgent(BaseAgent):
         postprocessing_error = None
         read_failure = {}
 
-        if result.success:
+        from app.services.evidence import comparison_values
+        quotable = (*comparison_values(evidence), *analysis_context.fact_values(historical_facts))
+        if result.success and _follow_up:
+            validation = fact_validator.validate(result.output, fact, quotable)
+        elif result.success:
             try:
                 structured = await self._extract_structured_analysis(
                     result.output,
                     fact=fact,
                 )
-                from app.services.evidence import comparison_values
-                quotable = tuple(comparison_values(evidence))
                 validation = fact_validator.validate(result.output, fact, quotable)
                 if _runner and self._cancel_flag:
                     raise asyncio.CancelledError()
@@ -536,6 +566,7 @@ class AnalysisAgent(BaseAgent):
         fact: FactSheet,
         heuristics_prompt: str,
         evidence=None,
+        *, follow_up: bool = False,
     ) -> str:
         """Build the base task prompt with the fact sheet and deterministic evidence."""
         # The evidence block carries the transactions, with small samples' percentiles removed.
@@ -553,6 +584,8 @@ class AnalysisAgent(BaseAgent):
         if evidence is not None:
             from app.services.evidence import format_for_prompt
             parts.append("\n" + format_for_prompt(evidence))
+        if follow_up:
+            return "\n".join(parts)
         parts += [
             "\n请基于以上事实表与证据，给出深度分析报告。注意：",
             "- 所有数字必须能在事实表或上面的确定性证据中找到。",
@@ -562,18 +595,9 @@ class AnalysisAgent(BaseAgent):
         return "\n".join(parts)
 
     async def _knowledge_context(self, fact: FactSheet, module: str) -> str:
-        """Standards, known issues and defect reviews people archived. Optional: analysis works without them."""
         if fact.raw_summary is None:
             return ''
-        try:
-            found = await asyncio.to_thread(self.retriever.retrieve, fact.raw_summary.model_dump(), 5, module)
-        except Exception as error:
-            logger.warning('Knowledge retrieval skipped: %s', type(error).__name__)
-            return ''
-        if not (found['similar_defects'] or found['known_issues'] or found['module_standards']):
-            return ''
-        return ('\n\n## 知识库资料（人工归档，只作线索，不是本次测试的事实）\n'
-                + found['formatted_context'][:MAX_KNOWLEDGE_CHARS])
+        return await analysis_context.knowledge_context(self.retriever, fact.raw_summary.model_dump(), module)
 
     def _build_rag_context(
         self,
@@ -591,12 +615,7 @@ class AnalysisAgent(BaseAgent):
         parts.append("")
 
         if historical_facts:
-            parts.append(f"## 历史事实 ({len(historical_facts)} 条)")
-            for f in historical_facts[:3]:
-                parts.append(
-                    f"- [{f.version}] {f.test_type}: TPS={f.throughput}, p99={f.percentiles.get('p99', 'N/A')}ms, "
-                    f"error_rate={f.error_rate}%"
-                )
+            parts.append(analysis_context.format_recent_facts(historical_facts))
             parts.append("")
 
         hypothesis_context = HypothesisLedger.format_for_prompt(historical_hypotheses)

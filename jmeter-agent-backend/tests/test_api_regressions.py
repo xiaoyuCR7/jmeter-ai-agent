@@ -78,17 +78,18 @@ async def test_resource_fallback_uses_configured_readiness_thresholds(monkeypatc
 
 @pytest.mark.asyncio
 async def test_invalid_analysis_is_recorded_on_the_analysis_not_the_report(monkeypatch, tmp_path):
-    from app.api import routes
+    from app.services import post_run
+    from app.models.schemas import TestExecutionStatus
     from app.models.schemas import ReportAnalysis
     from app.services.ai.rag.archiver import rag_archiver
     analysis = ReportAnalysis(analysis_status='invalid', overall_assessment='Invalid model response', conclusion='Unknown')
-    monkeypatch.setattr(routes, 'TestAnalyzer', lambda **kwargs: SimpleNamespace(analyze=AsyncMock(return_value=analysis)))
+    monkeypatch.setattr(post_run, 'TestAnalyzer', lambda **kwargs: SimpleNamespace(analyze=AsyncMock(return_value=analysis)))
     monkeypatch.setattr(rag_archiver, 'archive_raw_report', lambda **kwargs: None)
-    execution = SimpleNamespace(id='fixture', status=routes.TestExecutionStatus.COMPLETED,
+    execution = SimpleNamespace(id='fixture', status=TestExecutionStatus.COMPLETED,
         summary=SimpleNamespace(model_dump=lambda: {'total_requests': 10}), test_plan_id='fixture',
-        report_dir=str(tmp_path), error_message=None, log_path=None, report_status='running', report_error=None)
-    await routes._postprocess_web_execution(execution, {})
-    assert execution.status == routes.TestExecutionStatus.COMPLETED
+        report_dir=str(tmp_path), error_message=None, log_path=None, report_status='running', report_error=None, context_snapshot={})
+    await post_run.finish_run(execution)
+    assert execution.status == TestExecutionStatus.COMPLETED
     # The parsed report is still good; the lifecycle restores its status after postprocessing.
     assert execution.report_status == 'running' and execution.report_error is None
     assert execution.ai_analysis.analysis_status == 'invalid'
@@ -216,14 +217,16 @@ async def test_failed_tree_save_keeps_the_old_file(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_post_run_analysis_sees_the_report_evidence_and_records_its_verdict(monkeypatch, tmp_path):
-    from app.api import routes
+    from app.services import post_run
+    from app.models.schemas import TestExecutionStatus
     from app.models.schemas import DetailedTestSummary, ReportAnalysis
     from app.services import evidence as evidence_service
     from app.services import requirements as requirement_service
     from app.services.ai.rag.archiver import rag_archiver
     analyze = AsyncMock(return_value=ReportAnalysis(overall_assessment='ok', conclusion='ok'))
-    monkeypatch.setattr(routes, 'TestAnalyzer', lambda **kwargs: SimpleNamespace(analyze=analyze))
+    monkeypatch.setattr(post_run, 'TestAnalyzer', lambda **kwargs: SimpleNamespace(analyze=analyze))
     monkeypatch.setattr(rag_archiver, 'archive_raw_report', lambda **kwargs: None)
+    monkeypatch.setattr(post_run, 'history_context', AsyncMock(return_value=('', [])))
     summary = DetailedTestSummary(total_requests=10, avg_response_time=100, min_response_time=1, max_response_time=200,
                                   error_rate=0, throughput=5, received_bytes_per_sec=1, sent_bytes_per_sec=1)
     evaluation = requirement_service.RequirementEvaluation(verdict='fail', passed=1, failed=2, missing=0)
@@ -232,10 +235,10 @@ async def test_post_run_analysis_sees_the_report_evidence_and_records_its_verdic
         return evidence_service.ExecutionEvidence(execution_id='run', project_id='p', requirements=evaluation,
                                                   baseline=None, server_metrics={'status': 'not_configured'})
     monkeypatch.setattr(evidence_service, 'build_evidence', build_evidence)
-    execution = SimpleNamespace(id='run', project_id='p', status=routes.TestExecutionStatus.COMPLETED, summary=summary,
+    execution = SimpleNamespace(id='run', project_id='p', status=TestExecutionStatus.COMPLETED, summary=summary,
         test_plan_id='plan', report_dir=str(tmp_path), error_message=None, log_path=None,
-        report_status='running', report_error=None)
-    await routes._postprocess_web_execution(execution, {})
+        report_status='running', report_error=None, context_snapshot={})
+    await post_run.finish_run(execution)
     text = analyze.call_args.kwargs['evidence_text']
     assert text == evidence_service.format_for_prompt(await build_evidence(execution, summary))
     assert '服务端指标' in text and '历史对比' in text
@@ -257,7 +260,7 @@ async def _workflow_events(monkeypatch, items):
     from app.services.ai.agents import workflow_agent
 
     class FakeAgent:
-        def __init__(self, adapter):
+        def __init__(self, adapter, **kwargs):
             pass
 
         async def stream_from_doc(self, **kwargs):
@@ -271,18 +274,18 @@ async def _workflow_events(monkeypatch, items):
 
 
 @pytest.mark.asyncio
-async def test_workflow_stream_reports_each_step_and_counts_appended_steps(monkeypatch):
+async def test_workflow_stream_reports_each_tool_as_it_starts(monkeypatch):
     from app.services.ai.agent.types import AgentEvent
     result = {'success': True, 'plan_steps': [{'step_id': 1, 'success': True}], 'project_id': 'p1',
               'test_plan_ids': ['plan1'], 'diagnostic_summary': 'ok', 'error': None}
     events = await _workflow_events(monkeypatch, [
-        ('event', AgentEvent('plan_ready', 'Plan has 2 steps', {'steps': [{}, {}]})),
-        ('event', AgentEvent('step_start', 'Step 1/2: create project', {'step_id': 1})),
-        ('event', AgentEvent('step_start', 'Step 3/2: summarize', {'step_id': 3})),
+        ('event', AgentEvent('tool_call', 'ReAct', {'tool': 'create_project'})),
+        ('event', AgentEvent('tool_call', 'ReAct', {'tool': 'create_jmx'})),
+        ('event', AgentEvent('tool_call', 'ReAct', {'tool': 'create_jmx'})),
         ('result', result),
     ])
     messages = [e['message'] for e in events]
-    assert '第 1/2 步：create project' in messages and '第 3/3 步：summarize' in messages
+    assert '正在创建项目...' in messages and messages.count('正在生成测试计划...') == 2
     assert events[-1]['step'] == 'complete' and events[-1]['project_id'] == 'p1'
 
 
@@ -347,19 +350,20 @@ def test_workflow_agent_leaves_requirements_to_the_app():
 
 @pytest.mark.asyncio
 async def test_analysis_crash_is_recorded_on_the_analysis_and_announced(monkeypatch, tmp_path):
-    from app.api import routes
+    from app.services import post_run
+    from app.models.schemas import TestExecutionStatus
     from app.services.ai.rag.archiver import rag_archiver
     from app.services.execution_lifecycle import execution_lifecycle
-    monkeypatch.setattr(routes, 'TestAnalyzer', lambda **kwargs: SimpleNamespace(
+    monkeypatch.setattr(post_run, 'TestAnalyzer', lambda **kwargs: SimpleNamespace(
         analyze=AsyncMock(side_effect=TimeoutError('model timed out'))))
     monkeypatch.setattr(rag_archiver, 'archive_raw_report', lambda **kwargs: None)
-    monkeypatch.setattr(routes, '_analysis_evidence', AsyncMock(return_value=('', None, [])))
+    monkeypatch.setattr(post_run, 'analysis_evidence', AsyncMock(return_value=('', None, [])))
     emit = AsyncMock()
     monkeypatch.setattr(execution_lifecycle, 'emit', emit)
-    execution = SimpleNamespace(id='crash', project_id='p', status=routes.TestExecutionStatus.COMPLETED,
+    execution = SimpleNamespace(id='crash', project_id='p', status=TestExecutionStatus.COMPLETED,
         summary=SimpleNamespace(model_dump=lambda: {'total_requests': 10}), test_plan_id='plan',
-        report_dir=str(tmp_path), error_message=None, log_path=None, report_status='running', report_error=None)
-    await routes._postprocess_web_execution(execution, {})
+        report_dir=str(tmp_path), error_message=None, log_path=None, report_status='running', report_error=None, context_snapshot={})
+    await post_run.finish_run(execution)
     assert execution.report_status == 'running' and execution.report_error is None
     assert execution.ai_analysis.analysis_status == 'failed'
     assert 'model timed out' in execution.ai_analysis.overall_assessment

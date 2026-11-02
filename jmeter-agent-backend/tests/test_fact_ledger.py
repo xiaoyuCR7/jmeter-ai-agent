@@ -111,8 +111,7 @@ async def test_registered_analysis_end_to_end_jtl_to_scoped_persistence(register
     from unittest.mock import Mock, AsyncMock
     from fastapi import FastAPI
     from app.api import routes
-    from app.services.ai.agent.types import PlanStep
-    from app.services.ai.agent.planner import TaskPlanner
+    from app.services.ai.adapters.base import ToolCallResponse
     from app.services.ai.memory.provenance import snapshot_scope
     from app.services.storage import store as execution_cache
     analysis_mod = importlib.import_module('app.services.ai.agents.analysis_agent')
@@ -122,16 +121,20 @@ async def test_registered_analysis_end_to_end_jtl_to_scoped_persistence(register
     rag = rag_mod.LanceRAGStore(db_path=str(tmp_path / 'rag'))
     monkeypatch.setattr(archiver_mod, 'rag_store', rag)
     monkeypatch.setattr(analysis_mod, 'fact_ledger', temp_ledger)
+    monkeypatch.setattr(analysis_mod.analysis_context, 'fact_ledger', temp_ledger)
     monkeypatch.setattr(archiver_mod, 'fact_ledger', temp_ledger)
     monkeypatch.setattr(analysis_mod.hypothesis_ledger, 'list_for_module', AsyncMock(return_value=[]))
     monkeypatch.setattr(analysis_mod.hypothesis_ledger, 'evaluate_module_hypotheses', AsyncMock(return_value=[]))
     monkeypatch.setattr(execution_cache, 'get_execution', lambda _: None)
     adapter = Mock()
     adapter.prepare_chat_messages.side_effect = lambda messages, **kwargs: messages
-    adapter.chat = AsyncMock(side_effect=['Measured observation', json.dumps({'overall_assessment':
+    adapter.context_budget = adapter.max_tokens = 100000
+    adapter.estimate_tokens = len
+    adapter._truncate_messages = lambda messages, max_tokens: messages
+    adapter.chat_with_tools = AsyncMock(return_value=ToolCallResponse(text='Measured observation'))
+    adapter.chat = AsyncMock(side_effect=[json.dumps({'overall_assessment':
         'The measured results provide a baseline; additional experiments are required to establish any root cause.'})])
     monkeypatch.setattr(routes.AIAdapterFactory, 'create', lambda _: adapter)
-    monkeypatch.setattr(TaskPlanner, 'plan', AsyncMock(return_value=[PlanStep(1, 'explain evidence')]))
     app = FastAPI()
     app.include_router(routes.router)
     try:
@@ -150,7 +153,7 @@ async def test_registered_analysis_end_to_end_jtl_to_scoped_persistence(register
         for key in ('conclusion_archived', 'raw_report_archived'):
             doc = rag.get(result['analysis']['archive'][key])
             assert doc and doc.context_scope == fact.context_scope and doc.source_execution_id == 'run-A'
-        assert adapter.chat.await_count == 2
+        assert adapter.chat_with_tools.await_count == 1 and adapter.chat.await_count == 1
     finally:
         rag_mod._ZERO_VECTOR_IDS.clear()
 

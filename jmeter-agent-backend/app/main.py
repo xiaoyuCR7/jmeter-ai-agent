@@ -58,8 +58,9 @@ async def lifespan(app: FastAPI):
     from app.api.mcp_routes import init_mcp_server
     from app.services.ws_manager import ws_manager
     from app.services.execution_lifecycle import execution_lifecycle
-    from app.services import notifications
+    from app.services import notifications, post_run
     from app.services.ai.adapters.factory import AIAdapterFactory
+    from app.services.ai.memory import fact_ledger, hypothesis_ledger
     from app.services.jmeter import resource_monitor
 
     async def stop_monitoring():
@@ -69,9 +70,14 @@ async def lifespan(app: FastAPI):
     async with AsyncExitStack() as cleanup:
         # LIFO cleanup remains guaranteed if startup, serving, or one cleanup fails.
         cleanup.push_async_callback(AIAdapterFactory.close_all)
+        # Pushed early so they close late. An open connection's thread would keep the process from exiting.
+        cleanup.push_async_callback(fact_ledger.close)
+        cleanup.push_async_callback(hypothesis_ledger.close)
         cleanup.push_async_callback(stop_monitoring)
         execution_lifecycle.start()
         notifications.register(execution_lifecycle)
+        execution_lifecycle.set_post_run(post_run.finish_run)
+        cleanup.callback(execution_lifecycle.set_post_run, None)
         # Runs after the lifecycle shutdown below, so the cancellations it causes are still sent.
         cleanup.push_async_callback(notifications.drain, 10.0)
         cleanup.callback(notifications.unregister, execution_lifecycle)

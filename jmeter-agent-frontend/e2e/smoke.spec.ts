@@ -129,3 +129,44 @@ test('report states what was checked and what cannot be judged', async ({ page }
   await expect(page.getByText('Some numbers in the AI text do not match the measurements')).toBeVisible()
   await expect(page.getByText('p99: 900 → 400')).toBeVisible()
 })
+
+test('a report can be questioned and keeps the answer', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('jmeter-agent-lang', 'en'))
+  await mockApi(page)
+  const asked: unknown[] = []
+  await page.route(url => url.pathname.endsWith('/executions/run1/questions'), route => {
+    asked.push(route.request().postDataJSON())
+    return route.fulfill({ json: { question: 'Which request was slowest?', answer: 'POST /checkout, at 900 ms.',
+      asked_at: '2026-10-01T10:20:00', mismatches: [{ metric: 'p99', claimed: 900, actual: 400 }] } })
+  })
+  await page.route(url => url.pathname.endsWith('/executions/run1/report'), route => route.fulfill({ json: {
+    ...report, ai_analysis: { ...report.ai_analysis, follow_ups: [{ question: 'Was it stable?', answer: 'Yes.', mismatches: [] }] },
+  } }))
+
+  await page.goto('/executions/run1')
+  await page.getByRole('tab', { name: 'AI analysis' }).click()
+  await expect(page.getByText('Was it stable?')).toBeVisible()
+  const ask = page.getByRole('button', { name: 'Ask', exact: true })
+  await expect(ask).toBeDisabled()
+  await page.getByPlaceholder(/which request caused most errors/).fill('Which request was slowest?')
+  await ask.click()
+  await expect(page.getByText('POST /checkout, at 900 ms.')).toBeVisible()
+  await expect(page.getByText('Some numbers in this answer do not match the measurements')).toBeVisible()
+  await expect(page.getByPlaceholder(/which request caused most errors/)).toHaveValue('')
+  expect(asked).toEqual([{ question: 'Which request was slowest?' }])
+})
+
+test('a failed run says what stopped it', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('jmeter-agent-lang', 'en'))
+  await mockApi(page)
+  await page.route(url => url.pathname.endsWith('/executions/run1/report'), route => route.fulfill({ json: {
+    ...report, status: 'failed', ai_analysis: null, evidence: null,
+    failure_diagnosis: { code: 'missing_plugin', line: 'CannotResolveClassException: kg.apc.UltimateThreadGroup' },
+  } }))
+
+  await page.goto('/executions/run1')
+  await expect(page.getByText('The plan uses a plugin that is not installed')).toBeVisible()
+  await expect(page.getByText('CannotResolveClassException: kg.apc.UltimateThreadGroup')).toBeVisible()
+  await page.getByRole('tab', { name: 'AI analysis' }).click()
+  await expect(page.getByRole('button', { name: 'Ask', exact: true })).toHaveCount(0)
+})

@@ -132,6 +132,7 @@ claude mcp add --transport http jmeter-agent http://127.0.0.1:8000/api/v1/mcp --
 | `PORT` | 后端端口 | `8000` |
 | `JMETER_HOME` | JMeter 的 `bin` 目录或安装根目录 | `<项目>/bin` |
 | `JMETER_TIMEOUT` | 单次执行最长时间（秒） | `3600` |
+| `AUTO_ANALYSIS_ENABLED` | 每次运行结束后写 AI 报告，不论运行由谁发起；关闭后实测历史仍会保留 | `true` |
 | `JMETER_HEAP_MIN` / `JMETER_HEAP_MAX` | JMeter JVM 堆内存 | `256m` / `2g` |
 | `JMETER_EXECUTION_MODE` | `local` 或 `container`，见下方「执行隔离」 | `local` |
 | `JMETER_MAX_OUTPUT_MB` | 报告目录超过这个大小（MB）时停止执行，`0` 表示不限制 | `10240` |

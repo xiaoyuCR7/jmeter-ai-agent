@@ -31,6 +31,8 @@ it('registered and legacy Agent requests preserve their explicit JSON contract',
     { agent_type: 'analysis', task: 'explain', execution_id: 'run-A', session_id: 'session', context: 'reference' }]) {
     api.runAgent(data)
     expect(instance.post).toHaveBeenLastCalledWith('/agent/run', data)
+    api.askAboutRun('run/1', 'why?')
+    expect(instance.post).toHaveBeenLastCalledWith('/executions/run%2F1/questions', { question: 'why?' }, { timeout: 300000 })
   }
 })
 

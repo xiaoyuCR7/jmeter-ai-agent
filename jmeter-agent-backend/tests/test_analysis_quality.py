@@ -327,7 +327,7 @@ async def test_knowledge_is_included_only_when_people_archived_some():
 
 @pytest.mark.asyncio
 async def test_a_finished_run_joins_the_measured_history(monkeypatch, tmp_path):
-    from app.api import routes
+    from app.services import post_run
     from app.services.ai import memory
     from app.services.ai.memory import provenance
     jtl = tmp_path / 'result.jtl'
@@ -348,7 +348,7 @@ async def test_a_finished_run_joins_the_measured_history(monkeypatch, tmp_path):
     monkeypatch.setattr(provenance, 'load_execution_scope', scope)
     execution = SimpleNamespace(id='run-1', report_dir=str(tmp_path), test_plan_id='plan-1', summary=summary_of(), ai_analysis=None,
                                 context_snapshot={'test_config': {'test_type': 'baseline'}})
-    await routes._record_facts(execution)
+    await post_run.record_facts(execution)
     assert saved[0].module == 'plan-1' and saved[0].context_scope == 'scope-1' and saved[0].test_type == 'baseline'
     assert evaluated == [('plan-1', 'run-1')]
 

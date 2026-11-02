@@ -83,17 +83,6 @@ async def test_thinking_step_checks_budget_after_appending_instruction():
     assert not adapter.chat_calls
 
 
-@pytest.mark.asyncio
-async def test_checkpoint_parses_nested_steps_and_keeps_safety_rules():
-    import json
-    adapter = FakeAdapter(chat_responses=[json.dumps({'replan': True, 'new_steps': [
-        {'description': 'retry input', 'tool_name': 'echo_tool', 'tool_args': {'msg': 'literal }'}}]})])
-    agent = make_agent(adapter)
-    result = await agent._checkpoint_eval([PlanStep(1, 'old')], PlanStep(1, 'done'), 1)
-    assert len(result) == 1 and result[0].step_id == 2
-    assert adapter.chat_calls[0][0].role == 'system'
-
-
 def make_echo_tool(calls: list) -> Tool:
     async def handler(msg: str = "") -> dict:
         calls.append(msg)
@@ -132,12 +121,13 @@ def registered_agent(monkeypatch):
     from app.services.ai.agent.memory import ConversationMemory
     module = importlib.import_module('app.services.ai.agents.analysis_agent')
     provenance = importlib.import_module('app.services.ai.memory.provenance')
-    adapter = FakeAdapter(chat_responses=['Measured observation', '{"overall_assessment":"Measured report"}'])
-    agent = AnalysisAgent(adapter, tools=ToolRegistry(), session_id='registered-session')
+    adapter = FakeAdapter(tool_responses=[ToolCallResponse(text='{"overall_assessment":"Measured report"}')])
+    tools = ToolRegistry()
+    tools.register(make_echo_tool([]))
+    agent = AnalysisAgent(adapter, tools=tools, session_id='registered-session')
     fact = FactSheet(execution_id='run-A', module='plan-A', version='unknown', test_type='baseline',
                      total_requests=10, context_scope='scope', jtl_path='fixture.jtl', jtl_sha256='digest')
     agent._build_fact_sheet = AsyncMock(return_value=fact)
-    agent.planner.plan = AsyncMock(return_value=[PlanStep(1, 'explain measured facts')])
     monkeypatch.setattr(provenance, 'load_execution_scope', AsyncMock(return_value='scope'))
     monkeypatch.setattr(module.fact_ledger, 'get_facts_for_module_version', AsyncMock(return_value=[]))
     monkeypatch.setattr(module.hypothesis_ledger, 'list_for_module', AsyncMock(return_value=[]))
@@ -164,10 +154,10 @@ async def test_registered_ledger_read_contract_does_not_change_legacy_failure_be
     db = Mock()
     db.execute.side_effect = OSError('fixture')
     ledger._get_db = AsyncMock(return_value=db)
-    monkeypatch.setattr(module, 'fact_ledger', ledger)
+    monkeypatch.setattr(module.analysis_context, 'fact_ledger', ledger)
     result = await agent.analyze_with_rag(execution_id=evidence['execution_id'], module=evidence['module'])
     assert result['success'] and not result['rag']['history_found']
-    assert len(agent.adapter.chat_calls) == 2
+    assert agent.adapter.chat_with_tools_calls == 1
 
 
 @pytest.mark.asyncio
@@ -187,7 +177,7 @@ async def test_registered_analysis_manual_cancel_is_not_reset_by_inner_loop(regi
     assert not result.success and result.error == 'Cancelled by user'
     assert agent.state == AgentState.CANCELLED and not agent._run_active
     if phase == 'preparation':
-        assert not agent.adapter.chat_calls
+        assert not agent.adapter.chat_with_tools_calls
     if phase == 'archive':
         assert result.analysis['archive']['fact_archived']
     else:
@@ -206,11 +196,47 @@ async def test_registered_analysis_runs_fact_model_archive_and_retains_task_cont
     assert result.analysis['archive']['validation']['is_valid']
     assert result.events[0].type == 'analysis_phase'
     json.dumps(result.analysis, allow_nan=False)
-    sent = agent.planner.plan.call_args.kwargs
-    assert 'Explain the regression' in sent['task'] and sent['context'] == 'USER_CONTEXT'
-    assert 'scope' in sent['task']
-    assert len(agent.adapter.chat_calls) == 2
+    sent = '\n'.join(message.content for message in agent.adapter.tool_messages[0])
+    assert 'Explain the regression' in sent and 'USER_CONTEXT' in sent and 'scope' in sent
+    assert agent.adapter.chat_with_tools_calls == 1 and not agent.adapter.chat_calls  # No second pass over the analysis.
     assert not agent._run_active and agent.session_id not in BaseAgent._active_sessions
+
+
+@pytest.mark.asyncio
+async def test_a_follow_up_answers_the_question_and_archives_nothing_again(registered_agent):
+    agent, evidence, _ = registered_agent
+    agent.adapter._tool_responses = [ToolCallResponse(text='P99 为 0ms')]
+    result = await agent.run_analysis('为什么慢？', evidence, context='REPORT', follow_up=True)
+    assert result.success and result.output == 'P99 为 0ms'
+    sent = '\n'.join(message.content for message in agent.adapter.tool_messages[0])
+    assert '为什么慢？' in sent and '不要重写整份报告' in sent and 'REPORT' in sent
+    assert '深度分析报告' not in sent and '增强分析要求' not in sent
+    agent.archiver.archive_analysis_result.assert_not_awaited()
+    assert result.analysis['validation'] is not None and not agent.adapter.chat_calls
+
+
+@pytest.mark.asyncio
+async def test_a_model_that_only_announces_its_work_is_reminded_once_not_replanned():
+    calls = []
+    registry = ToolRegistry()
+    registry.register(make_echo_tool(calls))
+    adapter = FakeAdapter(tool_responses=[
+        ToolCallResponse(text='I will start by calling the tool.'),
+        ToolCallResponse(tool_calls=[ToolCallRequest('c1', 'echo_tool', {'msg': 'hi'})]),
+        ToolCallResponse(text='All done.')])
+    agent = make_agent(adapter, registry)
+    agent.plans_steps = False
+    result = await agent.run('do it')
+    assert result.success and calls == ['hi'] and result.output == 'All done.'
+    assert adapter.chat_with_tools_calls == 3 and not adapter.chat_calls
+
+
+@pytest.mark.asyncio
+async def test_a_task_needing_tools_still_fails_without_a_tool_call():
+    agent = make_agent(FakeAdapter(tool_responses=[ToolCallResponse(text='done, trust me')]))
+    agent.tools.register(make_echo_tool([]))
+    agent.plans_steps = False
+    assert not (await agent.run('create the plan')).success
 
 
 @pytest.mark.asyncio
@@ -513,16 +539,6 @@ async def test_structured_summary_over_budget_does_not_send_incomplete_evidence(
 
 
 @pytest.mark.asyncio
-async def test_checkpoint_receives_full_structured_evidence():
-    adapter = FakeAdapter(chat_responses=['{"replan": false}'])
-    agent = make_agent(adapter)
-    step = PlanStep(1, 'work', success=True,
-                    result=ToolResult(True, data={'details': 'data ' * 130, 'status': 'TAIL_NOT_READY'}))
-    await agent._checkpoint_eval([step, PlanStep(2, 'next')], step, 1)
-    assert 'TAIL_NOT_READY' in adapter.chat_calls[0][-1].content
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize('ids', [['', 'ok'], ['same', 'same'], ['   ', 'ok']])
 async def test_invalid_native_call_ids_rejected_before_any_tool_execution(ids):
     calls = []
@@ -664,47 +680,54 @@ async def test_document_generation_keeps_tail_and_rejects_oversized_input(kind):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('execute', [False, True])
-async def test_workflow_stream_uses_same_complete_task_as_regular_workflow(monkeypatch, execute):
-    from app.api import routes
-    from app.models.schemas import WorkflowAgentRequest
-    from app.services.ai.agents.workflow_agent import WorkflowAgent
-    from app.services.ai.agent.types import AgentEvent, AgentResult
-    doc = 'x' * 8100 + ' GET /TAIL_ENDPOINT'
-    requirements = 'r' * 2100 + ' REQUIREMENT_TAIL'
-    agent = WorkflowAgent(FakeAdapter(), tools=ToolRegistry())
-    agent.run = AsyncMock(return_value=AgentResult(True, 'fixture'))
-    await agent.run_from_doc(doc, requirements, ['baseline'], execute)
-    regular_task = agent.run.call_args.args[0]
-    seen = []
-    async def stream(self, task):
-        seen.append(task)
-        yield AgentEvent(type='done', message='fixture', data={'success': True})
-    monkeypatch.setattr(WorkflowAgent, 'run_stream', stream)
-    monkeypatch.setattr(routes.AIAdapterFactory, 'create', lambda *args: FakeAdapter())
-    response = await routes.agent_workflow_stream(WorkflowAgentRequest(
-        api_documentation=doc, testing_requirements=requirements, test_types=['baseline'], execute=execute))
-    chunks = [chunk async for chunk in response.body_iterator]
-    assert chunks and seen == [regular_task]
-    assert 'GET /TAIL_ENDPOINT' in seen[0] and 'REQUIREMENT_TAIL' in seen[0]
-
-
-@pytest.mark.asyncio
 async def test_oversized_workflow_stream_fails_before_model_or_tools(monkeypatch):
-    import json
-    from app.api import routes
-    from app.models.schemas import WorkflowAgentRequest
+    from app.services.ai.agents.workflow_agent import WorkflowAgent
     adapter = FakeAdapter()
-    monkeypatch.setattr(routes.AIAdapterFactory, 'create', lambda *args: adapter)
-    response = await routes.agent_workflow_stream(WorkflowAgentRequest(api_documentation='x' * 100000))
-    events = [json.loads(chunk.removeprefix('data: ')) async for chunk in response.body_iterator]
-    assert events[-1]['type'] == 'done' and events[-1]['data']['success'] is False
-    assert 'budget' in events[-1]['data']['error'].lower()
+    items = [item async for item in WorkflowAgent(adapter).stream_from_doc('x' * 100000)]
+    assert items[-1][0] == 'result' and items[-1][1]['success'] is False
+    assert 'budget' in items[-1][1]['error'].lower()
     assert not adapter.chat_calls and adapter.chat_with_tools_calls == 0
 
 
 @pytest.mark.asyncio
-async def test_workflow_resource_prompts_defer_to_tool_thresholds():
+async def test_generating_plans_needs_only_the_tools_that_create_them():
+    from app.services.ai.agents.workflow_agent import PLAN_ONLY_ROUNDS, WorkflowAgent
+    agent = WorkflowAgent(FakeAdapter(), plan_only=True)
+    assert set(agent.tools._tools) == {'create_project', 'create_jmx'}
+    assert not agent.plans_steps and agent.max_react_per_step == PLAN_ONLY_ROUNDS
+    full = WorkflowAgent(FakeAdapter())
+    assert 'execute_test' in full.tools and full.plans_steps
+
+
+@pytest.mark.asyncio
+async def test_a_generated_plan_comes_from_one_conversation_without_a_planner():
+    from app.services.ai.agents.workflow_agent import WorkflowAgent
+    registry = ToolRegistry()
+    calls = []
+    async def create_project(name: str = ''):
+        calls.append('project')
+        return {'project_id': 'p1'}
+    async def create_jmx(name: str = ''):
+        calls.append('plan')
+        return {'test_plan_id': 'plan1', 'jmx_path': 'plan1.jmx'}
+    for name, handler in (('create_project', create_project), ('create_jmx', create_jmx)):
+        registry.register(Tool(name=name, description=name, parameters={
+            'type': 'object', 'properties': {'name': {'type': 'string'}}}, handler=handler, risk='draft'))
+    adapter = FakeAdapter(tool_responses=[
+        ToolCallResponse(tool_calls=[ToolCallRequest('c1', 'create_project', {'name': 'shop'})]),
+        ToolCallResponse(tool_calls=[ToolCallRequest('c2', 'create_jmx', {'name': 'baseline'})]),
+        ToolCallResponse(text='Created project p1 and plan plan1.')])
+    agent = WorkflowAgent(adapter, tools=registry, plan_only=True)
+    items = [item async for item in agent.stream_from_doc('GET /x', 'r')]
+    result = items[-1][1]
+    assert calls == ['project', 'plan'] and result['success']
+    assert result['project_id'] == 'p1' and result['test_plan_ids'] == ['plan1']
+    assert result['diagnostic_summary'] == 'Created project p1 and plan plan1.'
+    assert adapter.chat_with_tools_calls == 3 and not adapter.chat_calls
+
+
+@pytest.mark.asyncio
+async def test_workflow_leaves_resource_checks_to_execute_test():
     from app.services.ai.agents.workflow_agent import WorkflowAgent
     adapter = FakeAdapter(chat_responses=['{"steps":[{"description":"review request"}]}', 'review', 'summary'])
     agent = WorkflowAgent(adapter, tools=ToolRegistry())
@@ -713,7 +736,8 @@ async def test_workflow_resource_prompts_defer_to_tool_thresholds():
     policy = adapter.chat_calls[1][0].content
     assert 'CPU > 80%' not in task and '内存 > 85%' not in task
     assert 'CPU>80%' not in policy and 'mem>85%' not in policy
-    assert '阈值' in task and 'returned' in policy
+    assert 'check_system_resources' not in task and 'check_system_resources' not in policy
+    assert 'Do not check resources' in policy
 
 
 @pytest.mark.asyncio
@@ -736,27 +760,6 @@ async def test_summary_failure_preserves_completed_effects_but_fails_run(summary
     assert 'complete' not in [event.type for event in events]
     assert agent.planner.plan.return_value[0].success  # Actual work is not rolled back/replayed.
     adapter.chat.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize('phase', ['plan', 'replan', 'summary', 'checkpoint'])
-async def test_auxiliary_request_rejects_unfittable_input_before_model(monkeypatch, phase):
-    from app.core.config import settings
-    monkeypatch.setattr(settings, 'AGENT_CONTEXT_TOKEN_BUDGET', 2300)
-    adapter = FakeAdapter()
-    agent = make_agent(adapter)
-    step = PlanStep(1, 'large description ' * 500)
-    if phase == 'checkpoint':
-        assert await agent._checkpoint_eval([step, step], step, 1) is None
-    else:
-        with pytest.raises(ValueError, match='context budget'):
-            if phase == 'plan':
-                await agent.planner.plan(step.description, '')
-            elif phase == 'replan':
-                await agent.planner.replan([step], step, 'failed', '')
-            else:
-                await agent._generate_final_response(step.description, [step])
-    assert not adapter.chat_calls
 
 
 @pytest.mark.asyncio

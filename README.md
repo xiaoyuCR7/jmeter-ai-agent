@@ -140,6 +140,7 @@ Common settings in `jmeter-agent-backend/.env`:
 | `PORT` | Backend port | `8000` |
 | `JMETER_HOME` | JMeter `bin` directory or install root | `<project>/bin` |
 | `JMETER_TIMEOUT` | Max run time in seconds | `3600` |
+| `AUTO_ANALYSIS_ENABLED` | Write an AI report after every finished run, whatever started it; measured history is kept either way | `true` |
 | `JMETER_HEAP_MIN` / `JMETER_HEAP_MAX` | JMeter JVM heap | `256m` / `2g` |
 | `JMETER_EXECUTION_MODE` | `local` or `container`; see Execution isolation below | `local` |
 | `JMETER_MAX_OUTPUT_MB` | Stop a run whose report directory grows past this; `0` = no limit | `10240` |

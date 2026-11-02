@@ -4,6 +4,7 @@ Everything comes from the JTL. Reports, the analysis agent and MCP all share thi
 so each of them reasons from the same interface, error and timing evidence.
 """
 import json
+import re
 from typing import Optional
 
 from app.models.schemas import DetailedTestSummary
@@ -14,6 +15,31 @@ MAX_ERRORS = 10
 MAX_ANOMALIES = 8
 # Below these sizes a percentile is one or two samples under another name.
 MIN_LABEL_SAMPLES = 20
+
+
+# A failed run has no JTL to read, so its error message and log are the evidence. First match wins.
+FAILURE_PATTERNS = (
+    ('load_generator_busy', r'System overloaded|waiting for resources'),
+    ('timed_out', r'Test timed out after'),
+    ('java_missing', r"JAVA_HOME|java(\.exe)?['\"]? (is )?not (found|recognized)|No such file or directory: 'java'"),
+    ('out_of_memory', r'OutOfMemoryError'),
+    ('missing_plugin', r'CannotResolveClassException|ClassNotFoundException|NoClassDefFoundError|Missing plugin'),
+    ('missing_file', r'FileNotFoundException|NoSuchFileException|File .{1,200} must exist|Could not read file header'),
+    ('port_in_use', r'BindException|Address already in use'),
+    ('remote_engine', r'Engine is busy|Failed to (configure|start|initiali[sz]e) .{0,80}(remote|engine)|ConnectException: Connection refused to host'),
+    ('plan_unreadable', r'Error in NonGUIDriver|SAXParseException|Could not open|Error while processing file'),
+)
+
+
+def diagnose_failure(error_message: Optional[str], log_text: str = '') -> dict:
+    """What most likely stopped a run: a code the UI explains, and the line that shows it."""
+    lines = [*(error_message or '').splitlines(), *log_text.splitlines()]
+    for code, pattern in FAILURE_PATTERNS:
+        matched = next((line for line in lines if re.search(pattern, line, re.IGNORECASE)), None)
+        if matched is not None:
+            return {'code': code, 'line': _text(matched.strip(), 300)}
+    errors = [line for line in lines if re.search(r'\b(ERROR|FATAL)\b', line)]
+    return {'code': 'unknown', 'line': _text((errors[-1] if errors else error_message or '').strip(), 300)}
 
 
 def _text(value, limit: int = 160) -> str:

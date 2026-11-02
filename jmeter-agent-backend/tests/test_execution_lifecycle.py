@@ -546,3 +546,34 @@ async def test_local_runs_with_scripts_need_explicit_approval(env, monkeypatch):
     monkeypatch.setattr(settings, 'JMETER_EXECUTION_MODE', 'container')
     assert (await lifecycle.prepare(str(env.path), 'scripts-in-container')).status == Status.PENDING
     await lifecycle.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_every_finished_run_reaches_the_shared_post_run_step(env):
+    lifecycle, _ = service()
+    from app.models.schemas import ReportAnalysis
+    seen = []
+    async def finish(execution, ai_model):
+        seen.append((execution.id, ai_model))
+        execution.ai_analysis = ReportAnalysis(overall_assessment='written here', conclusion='done')
+    lifecycle.set_post_run(finish)
+    prepared = await lifecycle.prepare(str(env.path), 'post-run')
+    executor = SimpleNamespace(execute=AsyncMock(return_value=Execution(
+        id=prepared.id, test_plan_id=prepared.test_plan_id, status=Status.COMPLETED,
+        jmx_path=prepared.jmx_path, end_time=datetime.now())))
+    await lifecycle.run(prepared.id, executor=executor, ai_model='chosen-model')
+    assert seen == [('post-run', 'chosen-model')]
+    row = await env.db.get_execution('post-run')
+    assert row['ai_analysis_data']['overall_assessment'] == 'written here'
+
+
+@pytest.mark.asyncio
+async def test_a_broken_post_run_step_does_not_fail_the_run(env):
+    lifecycle, _ = service()
+    lifecycle.set_post_run(AsyncMock(side_effect=OSError('disk full')))
+    prepared = await lifecycle.prepare(str(env.path), 'post-run-broken')
+    executor = SimpleNamespace(execute=AsyncMock(return_value=Execution(
+        id=prepared.id, test_plan_id=prepared.test_plan_id, status=Status.COMPLETED,
+        jmx_path=prepared.jmx_path, end_time=datetime.now())))
+    result = await lifecycle.run(prepared.id, executor=executor)
+    assert result.status == Status.COMPLETED and result.report_status == 'failed' and 'disk full' in result.report_error

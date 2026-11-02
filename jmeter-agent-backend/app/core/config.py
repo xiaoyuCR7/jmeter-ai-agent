@@ -77,6 +77,7 @@ class Settings(BaseSettings):
 
     # JMeter
     JMETER_TIMEOUT: int = 3600  # seconds
+    AUTO_ANALYSIS_ENABLED: bool = True  # Off to spare model calls on batches; facts are recorded either way
     JMETER_MAX_OUTPUT_MB: int = 10240  # stop a run whose report directory grows past this; 0 = no limit
 
     # Resource monitoring thresholds (CPU/memory usage %)

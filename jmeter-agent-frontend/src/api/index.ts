@@ -327,6 +327,8 @@ export const api = {
   cancelExecution: (id: string) => instance.post(`/executions/${id}/cancel`),
 
   runAgent: (data: AgentRunRequest) => instance.post<AgentRunResult>('/agent/run', data),
+  askAboutRun: (executionId: string, question: string) =>
+    instance.post(`/executions/${encodeURIComponent(executionId)}/questions`, { question }, { timeout: 300000 }),
 
   runAIWorkflowStream: (data: any) => {
     const lang = currentLang()

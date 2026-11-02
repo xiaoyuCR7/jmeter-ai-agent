@@ -40,7 +40,7 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 AGENT_SAFETY_RULES = """## Rules (MUST follow)
-- Check resources before EXECUTING a test, using the returned thresholds and readiness decision. Creating or inspecting a plan needs no resource check.
+- execute_test checks the machine's resources itself and waits if it must. Creating or inspecting a plan needs no resource check.
 - NEVER delete files unless user explicitly asks. NEVER expose API keys/passwords.
 - Tool errors: fix invalid args; retry transient read failures once. Do not repeat timed-out writes/executions with unknown outcome. Report system errors and stop after 3 consecutive failures.
 - At most 8 tool calls per response. Split larger batches into rounds and observe results.
@@ -56,18 +56,6 @@ Understand task → plan steps → execute with tools → observe results → ad
 Use compare_runs for comparisons (never manual). Validate results then report."""
 
 REACT_RESPONSE_TOKENS = 8000
-
-# ── ReAct prompt template (deprecated — kept for fallback compat) ──
-REACT_SYSTEM_TEMPLATE = """{base_prompt}
-
-## Available tools
-{tools_description}
-
-## Tool call format (FALLBACK — only used when native function calling unavailable)
-Output JSON: {{"tool_calls": [{{"name": "...", "arguments": {{...}}}}]}}
-Results come back as {{"tool_results": [...]}}. Observe then decide: call more tools or conclude.
-Call independent tools together; chain dependent ones across rounds."""
-
 
 # Error classification patterns are defined in types.py (single source of truth).
 # BaseAgent._classify_error() delegates to types.classify_error().
@@ -96,6 +84,8 @@ class BaseAgent:
     # Whether to plan steps first. A plan pays for itself on multi-stage work; one tool call
     # with a planner around it costs a plan, a closing call per step and a summary.
     plans_steps = True
+    # Whether a task must end in a tool call. Evidence already in the prompt may be enough to answer.
+    requires_tools = True
     final_instructions = ("请给出：\n1. 任务完成情况总结\n2. 关键结果（如果有数据请列出来）\n"
                           "3. 后续建议（如果有的话）")
 
@@ -123,7 +113,6 @@ class BaseAgent:
                               if system_prompt else AGENT_SYSTEM_PROMPT)
         self.max_iterations = max_iterations
         self.max_react_per_step = max_react_per_step
-        self.enable_checkpoint_eval: bool = False  # off by default — only enable for critical workflows
         self.session_id = session_id
         self._state = AgentState.IDLE
         self._events: list[AgentEvent] = []
@@ -411,16 +400,6 @@ class BaseAgent:
                                 break
                     else:
                         step_index += 1
-                        # ── Checkpoint: did this result change plan assumptions? ──
-                        if self.enable_checkpoint_eval and step_index < len(plan):
-                            try:
-                                new_steps = await self._checkpoint_eval(plan, step, step_index)
-                                if new_steps:
-                                    plan = plan[:step_index] + new_steps
-                                    self._emit("replanning",
-                                              f"Plan adjusted after step {step.step_id} based on intermediate results")
-                            except Exception:
-                                pass  # checkpoint failure should not break the run
                 else:
                     # No tool — LLM thinking/response step
                     try:
@@ -637,6 +616,7 @@ class BaseAgent:
         all_results: list[ToolResult] = []
         last_text: str = ""
         concluded = False
+        reminded = False
 
         react_i = 0
 
@@ -733,6 +713,13 @@ class BaseAgent:
             elif not (response.text or "").strip() and react_i + 1 < self.max_react_per_step:
                 # A thinking model that ran out of budget returns nothing; that is not a conclusion.
                 logger.warning("[%s] Empty model reply in step %s", self.name, step.step_id)
+            elif (self.requires_tools and not step.tool_name and not all_results and not reminded
+                    and react_i + 1 < self.max_react_per_step):
+                # A model often opens by saying what it will do. Replanning that costs far more than asking.
+                reminded = True
+                conversation.append(AIChatMessage(role='assistant', content=response.text or ''))
+                conversation.append(AIChatMessage(role='user', pinned=True, content=(
+                    'Nothing has been done yet: no tool was called. Call the tools now.')))
             else:
                 # No tool calls — step complete
                 concluded = True
@@ -756,7 +743,7 @@ class BaseAgent:
         # Return combined result
         if self._cancel_flag:
             return combined_result(False, 'Cancelled by user', ErrorCategory.CANCELLED)
-        if not all_results:
+        if not all_results and self.requires_tools:
             return combined_result(False, 'No tool was executed for a tool-required step', ErrorCategory.TOOL_ERROR)
 
         # The step succeeded if every call succeeded, or a failed call was an input error the
@@ -781,68 +768,6 @@ class BaseAgent:
             return combined_result(False, last_error or ("ReAct stopped before confirming step completion"
                                    if not concluded else f"{failed_count}/{len(all_results)} tool calls failed"),
                                    last_category or ErrorCategory.TOOL_ERROR)
-
-    # ── Checkpoint evaluation ─────────────────────────────────
-
-    async def _checkpoint_eval(
-        self, plan: list[PlanStep], completed_step: PlanStep, next_step_index: int,
-    ) -> Optional[list[PlanStep]]:
-        """Evaluate whether the plan's remaining steps need adjustment.
-
-        Called after a successful step when intermediate results might change
-        the task's assumptions. Uses a lightweight LLM call to decide.
-
-        Returns new steps to replace remaining ones, or None if plan is still valid.
-        """
-        # Build a compact summary of what happened and what remains
-        result_summary = ""
-        if completed_step.result and completed_step.result.success:
-            result_summary = json.dumps(completed_step.result.data, ensure_ascii=False,
-                                        separators=(',', ':'), default=str, allow_nan=False)
-
-        remaining = "\n".join([
-            f"Step {s.step_id}: {s.description}"
-            for s in plan[next_step_index:]
-        ])
-
-        prompt = f"""Step "{completed_step.description}" completed successfully.
-Result summary: {result_summary or 'no data'}
-
-Remaining plan steps:
-{remaining or '(none)'}
-
-Does the result change what the remaining steps should do? Consider:
-- Unexpected data (e.g., errors, empty results, much higher/lower values than expected)
-- New information that makes some remaining steps unnecessary
-- Missing prerequisites that the remaining steps need
-
-Reply with JSON: {{"replan": true/false, "reason": "...", "new_steps": [...]}}
-
-If replan is false, omit new_steps. Keep response under 200 chars."""
-
-        try:
-            messages = self.adapter.prepare_chat_messages(
-                [AIChatMessage(role="system", content=AGENT_SAFETY_RULES),
-                 AIChatMessage(role="user", content=prompt)], response_tokens=200)
-            response = await self.adapter.chat(
-                messages,
-                temperature=0.0, max_tokens=200,
-            )
-            # Parse JSON response
-            json_object = TaskPlanner._extract_json_object(response)
-            if json_object:
-                data = json.loads(json_object)
-                if isinstance(data, dict) and data.get("replan") is True and data.get("new_steps"):
-                    reason = data.get("reason", "")
-                    logger.info(f"[{self.name}] Checkpoint triggered replan: {reason}")
-                    new_steps = self.planner._parse_plan(json.dumps({'steps': data['new_steps']}))
-                    for offset, step in enumerate(new_steps, start=1):
-                        step.step_id = next_step_index + offset
-                    return new_steps or None
-        except Exception as e:
-            logger.debug(f"[{self.name}] Checkpoint eval skipped: {e}")
-
-        return None
 
     # ── Tool execution with timeout + error classification ────
 

@@ -31,6 +31,7 @@ class ExecutionEvidence(BaseModel):
     plan_issues: list[dict[str, Any]] = []
     planned_load: list[dict[str, Any]] = []
     configured_load: Optional[dict[str, Any]] = None
+    load_generator: Optional[dict[str, Any]] = None
 
 
 CONFIGURED_LOAD_FIELDS = ('test_type', 'concurrent_users', 'ramp_up_seconds', 'duration_seconds', 'target_rps',
@@ -80,8 +81,23 @@ async def build_evidence(execution, summary: DetailedTestSummary) -> ExecutionEv
         execution_id=get('id'), project_id=project_id, test_plan_id=get('test_plan_id'), run=run,
         plan_issues=_plan_issues(get('jmx_path')), planned_load=jmx_lint.planned_load(_read(get('jmx_path'))),
         configured_load={key: config.get(key) for key in CONFIGURED_LOAD_FIELDS} if config else None,
+        load_generator=_load_generator(get('resource_snapshot_pre'), get('resource_snapshot_post')),
         requirements=requirement_service.evaluate(stored, summary, requirement_service.sampler_routes(get('jmx_path'))),
         baseline=history, server_metrics=server)
+
+
+def _load_generator(before: Optional[dict], after: Optional[dict]) -> Optional[dict]:
+    """CPU and memory of the machine running JMeter, just before and just after the run."""
+    def usage(snapshot):
+        return {key: snapshot.get(key) for key in ('cpu_percent', 'memory_percent')} if snapshot else None
+    return {'before': usage(before), 'after': usage(after)} if before or after else None
+
+
+def _format_load_generator(machine: Optional[dict]) -> str:
+    if not machine:
+        return ''
+    return (f'## 压测机资源（运行前后各一次）\n{json.dumps(machine, ensure_ascii=False)}'
+            '\n这只是起止两个时刻，不代表运行期间的峰值。运行前已经很高时，要考虑压测机本身限制了负载。')
 
 
 def format_for_prompt(evidence: ExecutionEvidence) -> str:
@@ -90,6 +106,7 @@ def format_for_prompt(evidence: ExecutionEvidence) -> str:
         f'## 配置负载\n{json.dumps(load, ensure_ascii=False)}' if load else '',
         _format_planned_load(evidence.planned_load),
         _format_plan_issues(evidence.plan_issues),
+        _format_load_generator(evidence.load_generator),
         requirement_service.format_for_prompt(evidence.requirements),
         run_diagnostics.format_for_prompt(evidence.run),
         baseline_compare.format_for_prompt(evidence.baseline),

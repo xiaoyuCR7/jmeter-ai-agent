@@ -1,4 +1,3 @@
-import hashlib
 import os
 import shutil
 import uuid
@@ -24,7 +23,7 @@ from app.middleware.local_guard import REPORT_POLICY
 from app.services.db_store import db_store
 from app.models.schemas import (
     GenerateTestPlanRequest, TestPlanInfo, ExecuteTestRequest,
-    TestExecutionInfo, TestReport, TestExecutionStatus, ReportAnalysis,
+    TestExecutionInfo, TestReport, TestExecutionStatus,
     AIChatMessage, TestTemplate, TestType, AIModelConfig,
     JMXTreeNode, UpdateJMXTreeRequest,
     ProjectInfo, ProjectEnvironment, ProjectEnvironments, EnvironmentConfig,
@@ -32,8 +31,7 @@ from app.models.schemas import (
     CreateEnvironmentRequest, UpdateEnvironmentRequest,
     AIWorkflowRequest, AIWorkflowCreateResponse,
     APIEndpoint,
-    AgentRunRequest, AgentRunResponse, AgentAnalysisRunResponse, AgentListItem, AgentStatusResponse,
-    WorkflowAgentRequest,
+    AgentRunRequest, AgentAnalysisRunResponse, AgentListItem, RunQuestion,
 )
 from app.core.config import (
     get_all_model_configs, load_user_model_configs, save_user_model_configs,
@@ -41,7 +39,6 @@ from app.core.config import (
     load_paths_config, save_paths_config
 )
 from app.services.ai.adapters.factory import AIAdapterFactory, HEALTH_CHECK_TIMEOUT_SECONDS
-from app.services.ai.analyzer import TestAnalyzer, check_numbers
 from app.services.jmeter import jmx_lint
 from app.services.jmeter.jmx_generator import JMXGenerator
 from app.services.jmeter.executor import get_executor
@@ -52,15 +49,16 @@ from app.services.jmeter.script_risk import ScriptApprovalRequired
 from app.services.jmeter.component_registry import get_all_components, get_allowed_children
 from app.services.jmeter.sla_engine import SLAEngine, SLAConfig
 from app.services.jmeter.function_registry import get_all_functions
+from app.services.ai.agent.tools.jmeter import resource_hooks
 from app.services.ai.agents import TestPlanAgent, AnalysisAgent, WorkflowAgent
 from app.services.ai.agents.analysis_agent import AnalysisExecutionError
 from app.services.openapi_importer import OpenAPIImporter
 from app.services.ml_analysis import ml_detector
 from app.services.ai.agents.selfheal_agent import selfheal
-from app.services.ai.agent.types import AgentState
-from app.services.ai.agent.base import BaseAgent
 from app.services.storage import store
 from app.services.execution_lifecycle import execution_lifecycle, persist_project, persist_execution
+from app.services import run_diagnostics
+from app.services.post_run import save_analysis_markdown
 
 # JMeter executor — obtained lazily via get_executor() at each call site so
 # importing this module never probes the filesystem for the JMeter binary.
@@ -68,6 +66,9 @@ _report_parser = ReportParser()
 
 
 DEFAULT_PROJECT_ID = "default"
+MAX_FOLLOW_UP_CONTEXT = 3  # Earlier answers a follow-up question can build on.
+WORKFLOW_PROGRESS = {'create_project': (35, '正在创建项目...', 'Creating the project...'),
+                     'create_jmx': (60, '正在生成测试计划...', 'Generating the test plan...')}
 
 
 # ═══════════════════════════════════════════════════════════
@@ -96,98 +97,6 @@ async def _delete_test_plan_from_db(plan_id: str):
     """Delete test plan from both DB and in-memory store."""
     await db_store.delete_test_plan(plan_id)
     store.delete_test_plan(plan_id)
-
-
-def _fact_check_note(analysis: dict) -> str:
-    check = analysis.get('fact_check') or {}
-    if analysis.get('evidence_status') == 'mismatch':
-        wrong = '；'.join(f"{m['metric']} 写的是 {m['claimed']}，实测 {m['actual']}" for m in check.get('mismatches', []))
-        return f"有数字与实测不符，请以原始指标为准：{wrong}。"
-    if analysis.get('evidence_status') == 'verified':
-        return f"已核对文中 {check.get('checked', 0)} 处指标数字，均与实测相符；解释性内容仍是推测，不等于已验证根因。"
-    return "AI文本尚未逐项事实核验，请结合原始指标；推测不等于已验证根因。"
-
-
-def _save_analysis_markdown(report_dir: str, execution_id: str, analysis) -> str:
-    """Save AI analysis as a readable Markdown file in the report directory.
-
-    Returns the file path, or empty string on failure.
-    """
-    if not report_dir or not os.path.isdir(report_dir):
-        return ""
-    try:
-        ad = analysis.model_dump() if hasattr(analysis, 'model_dump') else analysis
-        md = f"""# AI 性能测试分析报告
-
-**执行ID**: {execution_id}
-**生成时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-**分析状态**: {ad.get('analysis_status', 'completed')}。{_fact_check_note(ad)}
-
----
-
-## 整体评估
-
-{ad.get('overall_assessment', '无')}
-
-## 关键发现
-
-"""
-        for item in ad.get('key_findings', []):
-            md += f"- {item}\n"
-
-        if ad.get('limitations'):
-            md += "\n## 分析限制\n\n"
-            for item in ad['limitations']:
-                md += f"- {item}\n"
-
-        if ad.get('specific_issues'):
-            md += "\n## 具体问题定位\n\n"
-            for item in ad['specific_issues']:
-                md += f"- {item}\n"
-
-        tl = ad.get('timeline_analysis', '')
-        if tl:
-            md += f"\n## 性能时间线分析\n\n{tl}\n"
-
-        if ad.get('resource_bottlenecks'):
-            md += "\n## 资源瓶颈推断\n\n"
-            for item in ad['resource_bottlenecks']:
-                md += f"- {item}\n"
-
-        md += "\n## 性能瓶颈点\n\n"
-        for item in ad.get('performance_bottlenecks', []):
-            md += f"- {item}\n"
-
-        md += "\n## 错误根因分析\n\n"
-        for item in ad.get('error_analysis', []):
-            md += f"- {item}\n"
-
-        md += "\n## 优化建议\n\n"
-        for item in ad.get('recommendations', []):
-            md += f"- {item}\n"
-
-        ip_list = ad.get('improvement_plan', [])
-        if ip_list:
-            md += "\n## 分步改进计划\n\n"
-            for i, item in enumerate(ip_list, 1):
-                md += f"{i}. {item}\n"
-
-        risk = ad.get('risk_areas', [])
-        if risk:
-            md += "\n## 风险区域\n\n"
-            for item in risk:
-                md += f"- {item}\n"
-
-        md += f"\n## 最终结论\n\n{ad.get('conclusion', '无')}\n"
-
-        filepath = os.path.join(report_dir, "ai_analysis.md")
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(md)
-        return filepath
-    except Exception:
-        return ""
-
 
 
 # ═══════════════════════════════════════════════════════════
@@ -661,105 +570,6 @@ async def download_test_plan(plan_id: str):
 
 
 # ===== Test Execution =====
-async def _analysis_evidence(execution):
-    """The same requirement verdicts, baseline comparison and server metrics the report shows."""
-    from app.services.evidence import build_evidence, comparison_values, format_for_prompt
-    try:
-        evidence = await build_evidence(execution, execution.summary)
-    except Exception as error:
-        logger.warning("Evidence unavailable for analysis of %s: %s", execution.id, error)
-        return "", None, []
-    req = evidence.requirements
-    verdict = {"verdict": req.verdict, "passed": req.passed, "failed": req.failed, "missing": req.missing}
-    return format_for_prompt(evidence) + await _open_hypotheses(execution), verdict, comparison_values(evidence)
-
-
-async def _open_hypotheses(execution) -> str:
-    """What earlier runs of this plan left to check, so a report can pick the thread up."""
-    from app.services.ai.memory import hypothesis_ledger
-    from app.services.ai.memory.hypothesis_ledger import HypothesisLedger
-    found = await hypothesis_ledger.list_for_module(execution.test_plan_id, limit=10)
-    return '\n\n## 这个计划的历史假设\n' + HypothesisLedger.format_for_prompt(found) if found else ''
-
-
-async def _record_facts(execution: TestExecutionInfo):
-    """Give later analyses of this plan a measured history, and test the hypotheses waiting for one."""
-    from app.services.ai.memory import fact_ledger, hypothesis_ledger
-    from app.services.ai.memory.provenance import load_execution_scope
-    jtl_path = os.path.join(execution.report_dir or '', 'result.jtl')
-    scope = await load_execution_scope(execution.id)
-    if not scope or not os.path.isfile(jtl_path):
-        return
-    config = (execution.context_snapshot or {}).get('test_config') or {}
-    fact = await asyncio.to_thread(
-        fact_ledger.compute_from_summary, summary=execution.summary, execution_id=execution.id, jtl_path=jtl_path,
-        module=execution.test_plan_id, version='unknown', test_type=config.get('test_type', ''))
-    fact.context_scope = scope
-    if await fact_ledger.save(fact):
-        await hypothesis_ledger.evaluate_module_hypotheses(execution.test_plan_id, execution.id)
-        await _record_hypotheses(execution, fact)
-
-
-async def _record_hypotheses(execution: TestExecutionInfo, fact):
-    """Report explanations join the ledger as untested, so a later run can settle them."""
-    from app.models.schemas import Hypothesis, HypothesisCategory, HypothesisStatus
-    from app.services.ai.memory import hypothesis_ledger
-    for item in (execution.ai_analysis.hypotheses if execution.ai_analysis else []):
-        statement = str(item.get('statement') or '').strip()
-        if not statement:
-            continue
-        try:
-            category = HypothesisCategory(item.get('category'))
-        except ValueError:
-            category = HypothesisCategory.BOTTLENECK
-        await hypothesis_ledger.add(Hypothesis(
-            hypothesis_id=hashlib.sha256(json.dumps([execution.id, statement], ensure_ascii=False).encode()).hexdigest(),
-            source_execution_id=execution.id, module=fact.module, version=fact.version, test_type=fact.test_type,
-            category=category, statement=statement, confidence=0.5, status=HypothesisStatus.UNTESTED,
-            testable_prediction=str(item.get('testable_prediction') or '') or None), if_absent=True)
-
-
-async def _postprocess_web_execution(execution: TestExecutionInfo, test_config: dict, ai_model=None):
-    """Web runs add AI analysis and RAG archiving. Process status and notifications belong to
-    the lifecycle; an analysis that fails is recorded on the analysis, the report stays usable."""
-    if execution.status == TestExecutionStatus.COMPLETED and execution.summary:
-        try:
-            analyzer = TestAnalyzer(model_type=ai_model)  # None: the factory picks the default model
-            evidence_text, verdict, comparison_numbers = await _analysis_evidence(execution)
-            analysis = await analyzer.analyze(
-                summary_data=execution.summary.model_dump(), test_config=test_config,
-                test_type=test_config.get("test_type", "unknown"), evidence_text=evidence_text)
-            analysis.requirements_verdict = verdict
-            execution.ai_analysis = check_numbers(analysis, execution.summary, execution.id, comparison_numbers)
-            _save_analysis_markdown(execution.report_dir, execution.id, execution.ai_analysis)
-        except Exception as error:
-            logger.warning("AI analysis failed for %s: %s", execution.id, error)
-            execution.ai_analysis = ReportAnalysis(
-                analysis_status='failed', overall_assessment=f"AI analysis failed: {error}",
-                conclusion="AI 分析未完成")
-        await execution_lifecycle.emit('analysis_completed', execution)
-        try:
-            from app.services.ai.rag.archiver import rag_archiver
-            plan = store.get_test_plan(execution.test_plan_id)
-            rag_archiver.archive_raw_report(
-                report_data=execution.summary.model_dump(),
-                module=plan.name if plan else execution.test_plan_id,
-                version=execution.id, execution_id=execution.id, plan_id=execution.test_plan_id)
-        except Exception as error:
-            logger.warning("RAG archiving skipped for %s: %s", execution.id, error)
-        try:
-            await _record_facts(execution)
-        except Exception as error:
-            logger.warning("Fact recording skipped for %s: %s", execution.id, error)
-
-
-async def _run_test(execution_id: str, jmx_path: str, test_config: dict, ai_model=None):
-    """Compatibility adapter for an already prepared execution."""
-    async def postprocess(execution):
-        await _postprocess_web_execution(execution, test_config, ai_model)
-    return await execution_lifecycle.run(execution_id, postprocess=postprocess)
-
-
 @router.post("/test-plans/{plan_id}/execute", response_model=TestExecutionInfo)
 async def execute_test_plan(
     plan_id: str,
@@ -772,12 +582,12 @@ async def execute_test_plan(
         raise HTTPException(status_code=404, detail="Test plan not found")
     
     plan = store.test_plans[plan_id]
-    async def postprocess(execution):
-        await _postprocess_web_execution(execution, plan.test_config.model_dump(), ai_model)
+    # The user chose to run it now, so a busy machine is recorded for the report, not waited on.
+    before_execute, postprocess = resource_hooks(False, {}, wait=False)
     try:
         return await execution_lifecycle.submit(
             plan.jmx_path, test_plan_id=plan_id, approved_sha256=approved_sha256,
-            postprocess=postprocess)
+            before_execute=before_execute, postprocess=postprocess, ai_model=ai_model)
     except ScriptApprovalRequired as error:
         # The UI lists these and asks before retrying with this exact content's hash.
         raise HTTPException(status_code=409, detail={
@@ -910,6 +720,12 @@ async def get_report(execution_id: str):
 
     plan = store.test_plans.get(execution.test_plan_id)
 
+    failure_diagnosis = None
+    if (execution.status == TestExecutionStatus.FAILED or summary.total_requests == 0
+            or (execution.status == TestExecutionStatus.CANCELLED and execution.error_message)):
+        log_text = await asyncio.to_thread(_report_parser.read_log, execution.log_path, 200) if execution.log_path else ''
+        failure_diagnosis = run_diagnostics.diagnose_failure(execution.error_message, log_text)
+
     evidence = None
     if summary.total_requests > 0:
         from app.services.evidence import build_evidence
@@ -932,10 +748,42 @@ async def get_report(execution_id: str):
         ai_analysis=getattr(execution, 'ai_analysis', None),
         sla_result=sla_result,
         evidence=evidence,
+        failure_diagnosis=failure_diagnosis,
         status=execution.status
     )
 
     return report
+
+
+@router.post("/executions/{execution_id}/questions")
+async def ask_about_execution(execution_id: str, request: RunQuestion):
+    """追问一次已有分析的运行；问答跟着这份分析保存"""
+    try:
+        evidence = await AnalysisAgent.resolve_execution(execution_id)
+    except AnalysisExecutionError as error:
+        raise HTTPException(status_code=error.status_code, detail=str(error)) from error
+    execution = store.get_execution(execution_id)
+    if execution is None or execution.ai_analysis is None:
+        raise HTTPException(status_code=409, detail="This run has no analysis to ask about")
+    earlier = execution.ai_analysis.follow_ups[-MAX_FOLLOW_UP_CONTEXT:]
+    context = json.dumps({'report': execution.ai_analysis.model_dump(exclude={'follow_ups', 'fact_check'}),
+                          'earlier_questions': earlier}, ensure_ascii=False, default=str)
+    try:
+        agent = AnalysisAgent(AIAdapterFactory.create(request.model))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    result = await agent.run_analysis(request.question, evidence, context=context, follow_up=True)
+    if not result.success:
+        raise HTTPException(status_code=502, detail=result.error or "The model did not answer")
+    validation = (result.analysis or {}).get('validation') or {}
+    answer = {'question': request.question, 'answer': result.output, 'asked_at': datetime.now().isoformat(),
+              'mismatches': validation.get('mismatches') or []}
+    # Read again: the run may have been updated while the model was answering.
+    execution = store.get_execution(execution_id).model_copy(deep=True)
+    execution.ai_analysis.follow_ups.append(answer)
+    await persist_execution(execution)
+    save_analysis_markdown(execution.report_dir, execution_id, execution.ai_analysis)
+    return answer
 
 
 @router.get("/executions/{execution_id}/log")
@@ -1221,16 +1069,15 @@ async def ai_workflow_stream(request: AIWorkflowRequest):
     async def generate():
         try:
             adapter = AIAdapterFactory.get_adapter(request.ai_model)
-            agent = WorkflowAgent(adapter)
+            agent = WorkflowAgent(adapter, plan_only=True)
 
             # ── Step 1: Analyzing ─────────────────────────
             msg = "Analyzing API documentation..." if is_en else "正在分析API文档..."
             yield f"data: {json.dumps({'step': 'analyzing_doc', 'message': msg, 'progress': 10})}\n\n"
 
-            # Forward each plan step as it starts; generation takes minutes and a static
+            # Forward each tool as it starts; generation takes minutes and a static
             # "analyzing" line looked stuck. Unchanged step keys update one progress line.
             result = None
-            step_count = 0
             async for kind, payload in agent.stream_from_doc(
                 api_documentation=request.api_documentation,
                 testing_requirements=request.testing_requirements,
@@ -1239,16 +1086,10 @@ async def ai_workflow_stream(request: AIWorkflowRequest):
             ):
                 if kind == "result":
                     result = payload
-                elif payload.type == "plan_ready":
-                    step_count = len((payload.data or {}).get("steps", []))
-                elif payload.type == "step_start" and step_count:
-                    step_id = (payload.data or {}).get("step_id", 0)
-                    step_count = max(step_count, step_id)  # replanning can append steps
-                    description = payload.message.split(": ", 1)[-1]
-                    progress = 10 + int(80 * (step_id - 1) / step_count)
-                    msg = (f"Step {step_id}/{step_count}: {description}" if is_en
-                           else f"第 {step_id}/{step_count} 步：{description}")
-                    yield f"data: {json.dumps({'step': f'agent_step_{step_id}', 'message': msg, 'progress': progress}, ensure_ascii=False)}\n\n"
+                elif payload.type == "tool_call" and (payload.data or {}).get("tool") in WORKFLOW_PROGRESS:
+                    tool = payload.data["tool"]
+                    progress, zh, en = WORKFLOW_PROGRESS[tool]
+                    yield f"data: {json.dumps({'step': f'agent_{tool}', 'message': en if is_en else zh, 'progress': progress}, ensure_ascii=False)}\n\n"
 
             steps_done = bool(result.get("plan_steps")) and all(step["success"] for step in result["plan_steps"])
             if not result["success"] and steps_done and result.get("project_id"):
@@ -1306,19 +1147,6 @@ async def ai_workflow_stream(request: AIWorkflowRequest):
 
 
 # ===== Agent Framework =====
-
-
-# ===== Agent Framework =====
-
-# Track running agents for status/cancel
-_agent_instances: dict[str, BaseAgent] = {}
-
-
-def _get_agent_instance(agent_id: str):
-    """Get a running agent instance by ID."""
-    from app.services.ai.agent.base import BaseAgent
-    return _agent_instances.get(agent_id)
-
 
 @router.get("/agent/agents", response_model=list)
 async def list_agents():
@@ -1415,56 +1243,6 @@ async def agent_run_stream(request: AgentRunRequest):
         raise HTTPException(status_code=e.status_code, detail=str(e)) from e
     except HTTPException:
         raise
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/agent/workflow", response_model=AgentRunResponse)
-async def agent_workflow(request: WorkflowAgentRequest):
-    """WorkflowAgent 专用接口：从API文档自动创建项目和测试计划"""
-    try:
-        adapter = AIAdapterFactory.create(request.ai_model)
-        agent = WorkflowAgent(adapter)
-
-        result = await agent.run_from_doc(
-            api_documentation=request.api_documentation,
-            testing_requirements=request.testing_requirements,
-            test_types=request.test_types,
-            execute=request.execute,
-        )
-
-        return AgentRunResponse(
-            agent_type="workflow",
-            task="从API文档创建项目并生成测试计划",
-            success=result["success"],
-            output=result["output"],
-            plan_steps=result.get("plan_steps", []),
-            iterations=result["iterations"],
-            error=result.get("error"),
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/agent/workflow/stream")
-async def agent_workflow_stream(request: WorkflowAgentRequest):
-    """WorkflowAgent SSE 流式接口"""
-    try:
-        adapter = AIAdapterFactory.create(request.ai_model)
-        agent = WorkflowAgent(adapter)
-
-        task = agent.build_task(request.api_documentation, request.testing_requirements,
-                                request.test_types, request.execute)
-
-        async def generate():
-            async for event in agent.run_stream(task):
-                yield f"data: {json.dumps(event.__dict__, ensure_ascii=False)}\n\n"
-
-        return StreamingResponse(generate(), media_type="text/event-stream")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

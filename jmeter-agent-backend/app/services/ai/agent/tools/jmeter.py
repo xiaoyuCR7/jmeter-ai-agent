@@ -44,8 +44,9 @@ async def execute_with_script_approval(tool_name: str, jmx_path: str, *args, **k
     return await _with_script_approval(execution_lifecycle.execute, tool_name, jmx_path, *args, **kwargs)
 
 
-def _resource_hooks(skip_resource_check: bool, resource_info: dict):
-    """before_execute and postprocess callbacks: wait for a quiet machine, record its load."""
+def resource_hooks(skip_resource_check: bool, resource_info: dict, *, wait: bool = True):
+    """before_execute and postprocess callbacks: record the machine's load and, with ``wait``,
+    hold or stop the run until it is quiet."""
     from app.models.schemas import TestExecutionStatus
 
     async def before_execute(execution):
@@ -58,6 +59,8 @@ def _resource_hooks(skip_resource_check: bool, resource_info: dict):
                              pre_test_memory=readiness.snapshot.memory_percent,
                              readiness_decision=readiness.decision.value,
                              readiness_message=readiness.message)
+        if not wait:
+            return
         if readiness.decision == SchedulerDecision.OVERLOADED:
             execution.status = TestExecutionStatus.CANCELLED
             execution.error_message = f"System overloaded: {readiness.message}"
@@ -95,7 +98,7 @@ async def execute_test(jmx_path: str, execution_id: str = "",
     """
     from app.models.schemas import TestExecutionStatus
     resource_info = {}
-    before_execute, postprocess = _resource_hooks(skip_resource_check, resource_info)
+    before_execute, postprocess = resource_hooks(skip_resource_check, resource_info)
     try:
         result = await execute_with_script_approval(
             'execute_test', jmx_path, execution_id, before_execute=before_execute, postprocess=postprocess)
@@ -126,7 +129,7 @@ async def _start(tool_name: str, jmx_path: str, execution_id: str, **kwargs) -> 
 
 async def start_test(jmx_path: str, execution_id: str = "", skip_resource_check: bool = False) -> dict:
     """Start a JMeter test plan in the background (see ``execute_test``)."""
-    before_execute, postprocess = _resource_hooks(skip_resource_check, {})
+    before_execute, postprocess = resource_hooks(skip_resource_check, {})
     return await _start('execute_test', jmx_path, execution_id, before_execute=before_execute, postprocess=postprocess)
 
 

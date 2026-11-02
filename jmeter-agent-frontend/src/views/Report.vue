@@ -29,6 +29,12 @@
         </div>
       </section>
 
+      <section v-if="failure" class="panel failure">
+        <h3>{{ failure.title }}</h3>
+        <p>{{ failure.advice }}</p>
+        <code v-if="report.failure_diagnosis.line">{{ report.failure_diagnosis.line }}</code>
+      </section>
+
       <section class="kpi-block">
         <div v-if="reference" class="kpi-caption">
           <span>{{ reference.kind === 'baseline' ? L('对比基线', 'Compared with baseline') : L('对比上一次执行', 'Compared with the previous run') }}「{{ reference.data.name }}」</span>
@@ -149,6 +155,7 @@
             </div>
           </section>
           <section v-else class="panel"><el-empty :description="t('report.aiNotEnabled')" /></section>
+          <RunQuestions v-if="ai?.analysis_status === 'completed'" :execution-id="report.execution_id" :follow-ups="ai.follow_ups" />
         </el-tab-pane>
       </el-tabs>
     </template>
@@ -168,6 +175,7 @@ import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/compon
 import VChart from 'vue-echarts'
 import { api } from '@/api'
 import EvidencePanel from '@/components/EvidencePanel.vue'
+import RunQuestions from '@/components/RunQuestions.vue'
 import { useI18n } from '@/composables/useI18n'
 import { formatDuration, formatMs, formatPct, formatTime, formatTps } from '@/utils/format'
 
@@ -203,6 +211,24 @@ const banner = computed(() => {
     title: L('未设性能需求', 'No performance requirements'),
     detail: violations ? L(`按默认阈值有 ${violations} 项超标`, `${violations} default thresholds exceeded`) : L('按默认阈值评估全部通过', 'All default thresholds passed'),
   }
+})
+
+const failure = computed(() => {
+  const code = report.value?.failure_diagnosis?.code
+  if (!code) return null
+  const known: Record<string, { title: string; advice: string }> = {
+    load_generator_busy: { title: L('压测机太忙，这次没有开始', 'The machine was too busy to start this run'), advice: L('关掉占用 CPU 或内存的程序后重新运行。', 'Close what is using CPU or memory, then run it again.') },
+    timed_out: { title: L('运行超过了时间上限', 'The run went past the time limit'), advice: L('计划的时长可能超过了 JMETER_TIMEOUT，缩短计划或调大这个设置。', 'The plan may run longer than JMETER_TIMEOUT. Shorten the plan or raise that setting.') },
+    java_missing: { title: L('找不到 Java', 'Java was not found'), advice: L('JMeter 需要 Java。安装 Java 并设置 JAVA_HOME 后再运行。', 'JMeter needs Java. Install it, set JAVA_HOME, then run again.') },
+    out_of_memory: { title: L('JMeter 内存不足', 'JMeter ran out of memory'), advice: L('调大 JMeter 的堆内存，或减少并发和保存的结果字段。', 'Give JMeter a larger heap, or reduce the load or the result fields saved.') },
+    missing_plugin: { title: L('计划用到了没有安装的插件', 'The plan uses a plugin that is not installed'), advice: L('把下面这行提到的插件装进 JMeter 的 lib/ext，或从计划里去掉这个组件。', 'Add the plugin named below to JMeter\'s lib/ext, or remove that element from the plan.') },
+    missing_file: { title: L('计划引用的文件找不到', 'A file the plan needs is missing'), advice: L('把文件放到计划所在目录，或在项目的测试数据里重新上传。', 'Put the file next to the plan, or upload it again under test data.') },
+    port_in_use: { title: L('需要的端口被占用', 'A port the run needs is in use'), advice: L('关掉占用端口的程序，或等上一次运行结束后再试。', 'Close what is using the port, or wait for the previous run to finish.') },
+    remote_engine: { title: L('连不上远程压测引擎', 'Could not reach a remote engine'), advice: L('确认远程引擎已启动，地址和 RMI 端口正确。', 'Check the remote engines are running and their addresses and RMI ports are right.') },
+    plan_unreadable: { title: L('JMeter 读不了这个计划', 'JMeter could not read this plan'), advice: L('在计划编辑器里检查计划，或查看执行日志。', 'Check the plan in the editor, or read the run log.') },
+    unknown: { title: L('运行没有产生结果', 'The run produced no results'), advice: L('下面是日志里最后一条错误；完整内容在执行记录的日志里。', 'Below is the last error in the log. The full log is in the run list.') },
+  }
+  return known[code] || known.unknown
 })
 
 const historyLines = computed(() => {
@@ -429,6 +455,12 @@ onMounted(loadReport)
   .verdict-history { display: flex; gap: 16px; font-size: 13px; color: var(--app-text-secondary); }
   .bad { color: var(--app-danger); }
   .good { color: var(--app-success); }
+}
+
+.failure {
+  h3 { margin: 0 0 4px; font-size: 15px; font-weight: 600; color: var(--app-danger); }
+  p { margin: 0 0 8px; color: var(--app-text-secondary); }
+  code { display: block; font-family: var(--app-font-mono); font-size: 12px; color: var(--app-text-muted); word-break: break-all; }
 }
 
 .kpi-block {

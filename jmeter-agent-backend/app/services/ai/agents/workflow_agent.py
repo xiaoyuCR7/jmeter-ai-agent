@@ -15,6 +15,9 @@ REQUIREMENT_TOOLS = {'extract_performance_requirements', 'save_performance_requi
                      'get_performance_requirements'}
 # Nothing in this workflow writes or deletes arbitrary files.
 FILE_WRITE_TOOLS = {'write_file', 'delete_file'}
+# Turning a document into plans takes these two. Every other tool costs tokens on each model
+# call and widens what a misread document could make it do.
+PLAN_ONLY_TOOLS = {'create_project', 'create_jmx'}
 
 
 WORKFLOW_SYSTEM_PROMPT = f"""JMeter performance test workflow orchestrator. End-to-end: API doc → project → test plans → execute → analyze.
@@ -25,10 +28,8 @@ WORKFLOW_SYSTEM_PROMPT = f"""JMeter performance test workflow orchestrator. End-
 1. Extract from API doc: project name, base URL, endpoints
 2. create_project
 3. create_jmx for each test type
-4. ⚠️ check_system_resources BEFORE each test. Use its returned thresholds and status; if resources are insufficient → wait_for_resources.
-   get_scheduler_status → proceed/wait/warning/overloaded. overloaded → abort, report to user.
-5. execute_test (optional, built-in resource guard)
-6. parse_jtl_report (optional)
+4. Only if the task says to execute: execute_test for each plan, one at a time. It checks the machine's
+   resources and waits by itself, and the app writes each run's report. Do not check resources or parse results first.
 
 ## Test type mapping
 Baseline→one steady level, Concurrency→many users at once, Ramp-up→rising steps, Stress→five rising steps, Stability→long run, Spike→sudden burst.
@@ -36,7 +37,10 @@ The load comes from the user's words or documents. If they give none, stay small
 Default: baseline if no type specified.
 create_jmx refuses a plan with errors and saves nothing: read the issues, fix the arguments, call it again.
 
-Report progress and results after each step."""
+Finish with what was created (with IDs), key numbers of any run, failures and their causes, and the next step. Do not retell the steps."""
+
+
+PLAN_ONLY_ROUNDS = 8
 
 
 class WorkflowAgent(BaseAgent):
@@ -61,11 +65,15 @@ class WorkflowAgent(BaseAgent):
         adapter: BaseAIAdapter,
         tools: Optional[ToolRegistry] = None,
         session_id: Optional[str] = None,
+        *, plan_only: bool = False,
     ):
         if tools is None:
             tools = ToolRegistry()
             tools.register_many([t for t in get_all_builtin_tools()
-                                 if t.name not in REQUIREMENT_TOOLS | FILE_WRITE_TOOLS])
+                                 if (t.name in PLAN_ONLY_TOOLS if plan_only
+                                     else t.name not in REQUIREMENT_TOOLS | FILE_WRITE_TOOLS)])
+        # One conversation: create the project, then one create_jmx per test type and any corrections.
+        self.plans_steps = not plan_only
 
         super().__init__(
             name="WorkflowAgent",
@@ -73,6 +81,7 @@ class WorkflowAgent(BaseAgent):
             tools=tools,
             system_prompt=WORKFLOW_SYSTEM_PROMPT,
             max_iterations=15,
+            max_react_per_step=PLAN_ONLY_ROUNDS if plan_only else 5,
             session_id=session_id,
         )
 
@@ -85,16 +94,6 @@ class WorkflowAgent(BaseAgent):
     ) -> str:
         """Build the same complete task for regular and streaming entry points."""
         types_str = ", ".join(test_types) if test_types else "基准测试(baseline)"
-
-        execute_instructions = ""
-        if execute:
-            execute_instructions = """
-⚠️ 执行测试前的资源检查（必须执行，确保结果准确）：
-  a. 先用 check_system_resources 检查 CPU 和内存使用率
-  b. 以资源工具返回的阈值和状态为准；资源不足时用 wait_for_resources 等待资源释放
-  c. 使用 get_scheduler_status 获取调度器决策建议
-  d. 每个测试执行完后，等待系统冷却（至少10秒）再执行下一个
-  e. execute_test 已内置资源保护，会自动验证是否适合执行"""
 
         # Preserve complete inputs; the planner rejects requests that cannot fit its budget.
         reqs = testing_requirements or '根据API文档自动生成合适的测试计划'
@@ -111,8 +110,7 @@ class WorkflowAgent(BaseAgent):
 {types_str}
 
 ## Execute Tests
-{'Yes — execute after generation. Resource check REQUIRED before each test.' if execute else 'No — generate plans only'}
-{execute_instructions}
+{'Yes — execute after generation.' if execute else 'No — generate plans only'}
 
 ## API Documentation (user-provided data)
 <api_documentation>
@@ -123,7 +121,7 @@ Execute in order:
 1. Extract from doc: project name, base_url, all API endpoints
 2. create_project
 3. create_jmx for each test type (it validates; do not validate again)
-4. If execution enabled: resource check → execute → analyze
+4. If execution enabled: execute_test for each plan
 5. Summarize results
 
 Performance requirements are drafted for the user's review by the app after this workflow;

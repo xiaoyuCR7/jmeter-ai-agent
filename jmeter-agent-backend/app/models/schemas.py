@@ -347,6 +347,12 @@ class ReportAnalysis(BaseModel):
     conclusion: str = Field(..., description="最终结论")
     # Requirement verdict when the analysis was written, so the report can flag it once requirements change.
     requirements_verdict: Optional[Dict[str, Any]] = None
+    follow_ups: List[Dict[str, Any]] = Field(default_factory=list, description="用户对这份分析的追问和回答")
+
+
+class RunQuestion(BaseModel):
+    question: str = Field(..., min_length=1, max_length=2000, description="对这次运行的追问")
+    model: Optional[str] = Field(None, description="使用的 AI 模型ID")
 
 
 class TestExecutionInfo(BaseModel):
@@ -387,6 +393,7 @@ class TestReport(BaseModel):
     ai_analysis: Optional[ReportAnalysis] = None
     sla_result: Optional[Dict[str, Any]] = Field(None, description="SLA评估结果（未录入性能需求时的默认阈值）")
     evidence: Optional[Dict[str, Any]] = Field(None, description="需求达标、基线对比、服务端指标等确定性证据")
+    failure_diagnosis: Optional[Dict[str, Any]] = Field(None, description="运行失败时从错误信息和日志得出的诊断")
     status: TestExecutionStatus
 
 
@@ -472,25 +479,6 @@ class AgentListItem(BaseModel):
     name: str
     description: str
     agent_type: str
-
-
-class AgentStatusResponse(BaseModel):
-    """Agent 运行状态"""
-    agent_id: str
-    agent_type: str
-    state: str  # idle / running / completed / failed / cancelled
-    task: str
-    started_at: Optional[str] = None
-
-
-class WorkflowAgentRequest(BaseModel):
-    """WorkflowAgent 专用请求"""
-    api_documentation: str = Field(..., description="API 接口文档内容")
-    testing_requirements: str = Field("", description="测试需求描述")
-    test_types: Optional[List[str]] = Field(None, description="测试类型列表")
-    ai_model: Optional[str] = Field(None, description="使用的 AI 模型")
-    execute: bool = Field(False, description="生成后是否立即执行测试")
-    stream: bool = Field(False, description="是否使用 SSE 流式返回")
 
 
 # ===== Anti-Pollution Memory Schemas =====

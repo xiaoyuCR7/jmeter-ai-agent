@@ -103,6 +103,7 @@ class ExecutionLifecycle:
         self._prepared = set()
         self._listeners = {event: [] for event in EVENTS}
         self._finished = set()
+        self._post_run = None
 
     def on(self, event, handler):
         """Call ``await handler(execution)`` on ``event`` for every run, whatever started it.
@@ -117,6 +118,13 @@ class ExecutionLifecycle:
     def off(self, event, handler):
         if handler in self._listeners[event]:
             self._listeners[event].remove(handler)
+
+    def set_post_run(self, handler):
+        """``await handler(execution, ai_model)`` once a run has finished, whatever started it.
+
+        Unlike a listener it may take minutes, and what it writes on the execution is persisted.
+        """
+        self._post_run = handler
 
     async def emit(self, event, execution):
         if event == 'finished':
@@ -295,7 +303,7 @@ class ExecutionLifecycle:
         return execution
 
     async def run(self, execution_id, *, remote_engines=None, postprocess=None,
-                  before_execute=None, progress_callback=None, executor=None):
+                  before_execute=None, progress_callback=None, executor=None, ai_model=None):
         execution = store.get_execution(execution_id)
         if execution is None:
             raise LookupError(f'Execution not found: {execution_id}')
@@ -373,12 +381,15 @@ class ExecutionLifecycle:
                 execution.report_status = 'skipped'
             # Notify on the process result; postprocessing such as AI analysis can take minutes.
             await self.emit('finished', execution)
-            if postprocess:
+            if postprocess or self._post_run:
                 previous_report_status = execution.report_status
                 execution.report_status = 'running'
                 await persist_execution(execution)
                 try:
-                    await postprocess(execution)
+                    if postprocess:
+                        await postprocess(execution)
+                    if self._post_run:
+                        await self._post_run(execution, ai_model)
                     if execution.report_status == 'running':
                         execution.report_status = previous_report_status
                 except Exception as error:
