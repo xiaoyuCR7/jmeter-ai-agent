@@ -6,6 +6,7 @@ functions and elements, then send what it read anywhere. The app's own generator
 none of this; the scan lets the user approve such a plan knowingly.
 """
 import hashlib
+import ntpath
 import os
 import re
 import xml.etree.ElementTree as ET
@@ -46,6 +47,9 @@ def _roots() -> list[str]:
 def _path_is_contained(value: str, base_dir: str | None) -> bool:
     """True when ``value`` stays in the app's own data folders; a variable cannot be checked."""
     if '$' in value:
+        return False
+    # A plan can carry a Windows path to any host, and POSIX would read it as relative.
+    if os.name != 'nt' and ntpath.splitdrive(value)[0]:
         return False
     if not os.path.isabs(value):
         if not base_dir or '..' in re.split(r'[\\/]', value):
