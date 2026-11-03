@@ -165,12 +165,17 @@ def test_every_built_in_tool_has_a_deliberate_risk():
     assert all(tool.require_confirmation == (tool.risk in ('write', 'execute')) for tool in get_all_builtin_tools())
 
 
-def test_analysis_agent_can_only_read():
-    from unittest.mock import Mock
-    from app.services.ai.agents.analysis_agent import AnalysisAgent
-    agent = AnalysisAgent(adapter=Mock())
-    assert {tool.risk for tool in agent.tools.list_tools()} == {'read'}
-    assert 'read_file' in agent.tools and 'write_file' not in agent.tools and 'execute_test' not in agent.tools
+def test_questions_about_a_run_get_only_read_tools_bound_to_that_run():
+    from types import SimpleNamespace
+    from app.services.ai.agent.tools.run_scope import run_tools
+    tools = run_tools(SimpleNamespace(id='run-1', project_id='p', test_plan_id='plan', report_dir='', log_path=None,
+                                      jmx_path='plan.jmx'))
+    assert {tool.risk for tool in tools} == {'read'}
+    names = {tool.name for tool in tools}
+    assert names == {'find_samples', 'read_run_log', 'describe_plan', 'detect_anomalies', 'list_runs', 'compare_with_run'}
+    # Nothing that reaches other projects or files, waits for minutes, or calls another model.
+    for schema in (tool.parameters for tool in tools):
+        assert not {'path', 'jmx_path', 'jtl_path', 'execution_id', 'project_id'} & set(schema['properties'])
 
 
 @pytest.mark.asyncio

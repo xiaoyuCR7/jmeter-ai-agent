@@ -89,6 +89,9 @@ def build_analysis_prompt(summary_data: dict, test_config: dict, test_type: str,
             '单位同实测：毫秒、百分比、每秒请求数）,"threads":验证时的总线程数（负载不变时省略）,'
             '"after":"验证前必须先做的改动，例如加连接预热、调大连接池（只改线程数或原样重跑时省略）"}}；'
             '只有能用一次运行的数字判定时才写 prediction，否则省略它；'
+            '能写 prediction 的假设，优先写原样重跑或只改线程数就能判定的（不带 after），程序会在下次运行后自动判定它，'
+            '例如假设“登录慢在新建连接”可预测原样重跑时 {"metric":"p95","label":"POST /login","change":"above","value":1500}，'
+            '假设“这个接口在 20 线程以上排队”可预测 {"metric":"avg","label":"GET /items","change":"increase","value":30,"threads":40}；'
             '历史假设里仍未验证、这次数据也没有带来新信息的，不要换个说法再写一遍；'
             '这次的数据修正或细化了某条未验证的历史假设时，照写新的一条并加 "replaces":"那条的编号"，旧的会被它取代），'
             'conclusion（字符串，一两句）。同一事实只在一个字段里写一次。')

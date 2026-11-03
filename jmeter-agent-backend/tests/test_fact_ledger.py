@@ -3,6 +3,7 @@
 import os
 import asyncio
 import pytest
+from types import SimpleNamespace
 import pytest_asyncio
 
 from app.services.ai.memory.fact_ledger import FactLedger
@@ -111,14 +112,15 @@ async def test_registered_question_end_to_end_from_jtl_to_a_checked_answer(regis
     analysis_mod = importlib.import_module('app.services.ai.agents.analysis_agent')
     monkeypatch.setattr(analysis_mod, 'fact_ledger', temp_ledger)
     monkeypatch.setattr(analysis_mod.analysis_context, 'fact_ledger', temp_ledger)
-    monkeypatch.setattr(execution_cache, 'get_execution', lambda _: None)
+    monkeypatch.setattr(execution_cache, 'get_execution', lambda _: SimpleNamespace(
+        id='run-A', project_id='p', test_plan_id='plan-A', report_dir='', log_path=None, jmx_path='x.jmx'))
     adapter = Mock()
     adapter.prepare_chat_messages.side_effect = lambda messages, **kwargs: messages
     adapter.context_budget = adapter.max_tokens = 100000
     adapter.estimate_tokens = len
     adapter._truncate_messages = lambda messages, max_tokens: messages
     adapter.chat_with_tools = AsyncMock(return_value=ToolCallResponse(text='Measured observation; 错误率为 99.9%'))
-    adapter.chat = AsyncMock()
+    adapter.chat = AsyncMock(return_value='')  # The one rewrite fails, so the mismatch stays reported.
     evidence = await analysis_mod.AnalysisAgent.resolve_execution('run-A')
     result = await analysis_mod.AnalysisAgent(adapter).run_analysis(
         'Explain this run', evidence, context='module=untrusted, version=untrusted, jtl_path=untrusted')
@@ -129,7 +131,8 @@ async def test_registered_question_end_to_end_from_jtl_to_a_checked_answer(regis
     assert fact['context_scope'] == snapshot_scope(registered_evidence[0]['context_snapshot'])
     assert any(m['metric'] == 'error_rate' for m in result.analysis['validation']['mismatches'])
     assert await temp_ledger.load('run-A') is None  # Answering a question archives nothing.
-    assert adapter.chat_with_tools.await_count == 1 and adapter.chat.await_count == 0
+    assert adapter.chat_with_tools.await_count == 1 and adapter.chat.await_count == 1
+    assert {tool['function']['name'] for tool in adapter.chat_with_tools.await_args.args[1]} >= {'find_samples'}
 
 
 @pytest.mark.asyncio
@@ -399,7 +402,7 @@ async def test_an_answer_is_checked_only_when_the_model_gave_one(monkeypatch, ou
     agent = object.__new__(module.AnalysisAgent)
     agent._build_fact_sheet = AsyncMock(return_value=FactSheet(execution_id='fixture', module='api'))
     output = {'answered': 'answer text', 'empty': '  ', 'model_failed': ''}[outcome]
-    agent.run = AsyncMock(return_value=SimpleNamespace(success=outcome != 'model_failed', output=output,
+    agent.converse = AsyncMock(return_value=SimpleNamespace(success=outcome != 'model_failed', output=output,
                                                      error='model down' if outcome == 'model_failed' else None,
                                                      plan=[], iterations=1))
     result = await agent.analyze_with_rag(module='api', user_task='why?')
@@ -425,7 +428,7 @@ async def test_analysis_context_preparation_failure_stops_before_model_and_keeps
     agent = object.__new__(module.AnalysisAgent)
     fact = FactSheet(execution_id='run', module='api', total_requests=42)
     agent._build_fact_sheet = AsyncMock(return_value=fact)
-    agent.run = AsyncMock()
+    agent.converse = AsyncMock()
     calls = {'scope': AsyncMock(return_value='scope-a'),
              'recall': AsyncMock(return_value=module.analysis_context.Recall())}
     calls.update({key: Mock(return_value='context') for key in ['heuristics', 'base_task']})
@@ -443,7 +446,7 @@ async def test_analysis_context_preparation_failure_stops_before_model_and_keeps
         assert not result['success'] and 'Context preparation failed' in result['error']
         assert 'private fixture detail' not in result['error']
         assert result['fact']['execution_id'] == 'run' and result['fact']['total_requests'] == 42
-    agent.run.assert_not_awaited()
+    agent.converse.assert_not_awaited()
 
 
 @pytest.mark.asyncio

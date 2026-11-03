@@ -12,6 +12,7 @@ from datetime import datetime
 
 from app.core.config import settings
 from app.models.schemas import ReportAnalysis, TestExecutionInfo, TestExecutionStatus
+from app.services.ai import usage
 from app.services.ai.analyzer import TestAnalyzer, check_numbers
 from app.services.execution_lifecycle import execution_lifecycle
 from app.services.storage import store
@@ -21,6 +22,11 @@ logger = logging.getLogger(__name__)
 
 def _fact_check_note(analysis: dict) -> str:
     check = analysis.get('fact_check') or {}
+    fixed = f"初稿有 {check['corrected_from']} 处数字不符，已让模型改写。" if check.get('corrected_from') else ''
+    return fixed + _fact_check_status(analysis, check)
+
+
+def _fact_check_status(analysis: dict, check: dict) -> str:
     if analysis.get('evidence_status') == 'mismatch':
         wrong = '；'.join(f"{m['metric']} 写的是 {m['claimed']}，实测 {m['actual']}" for m in check.get('mismatches', []))
         return f"有数字与实测不符，请以原始指标为准：{wrong}。"
@@ -208,6 +214,22 @@ async def record_hypotheses(execution: TestExecutionInfo, fact):
 
 async def _write_analysis(execution: TestExecutionInfo, ai_model):
     """An analysis that fails is recorded on the analysis; the report stays usable."""
+    execution.ai_analysis = await analysis_for(execution, ai_model)
+    save_analysis_markdown(execution.report_dir, execution.id, execution.ai_analysis)
+    await execution_lifecycle.emit('analysis_completed', execution)
+
+
+async def analysis_for(execution: TestExecutionInfo, ai_model=None) -> ReportAnalysis:
+    """The report's analysis of a finished run, with its numbers checked and its token use; saves nothing."""
+    with usage.metered() as used:
+        analysis = await _analyse(execution, ai_model)
+    if used['calls']:
+        analysis.usage = used
+        logger.info("Analysis of %s used %s", execution.id, used)
+    return analysis
+
+
+async def _analyse(execution: TestExecutionInfo, ai_model) -> ReportAnalysis:
     test_config = (execution.context_snapshot or {}).get('test_config') or {}
     try:
         analyzer = TestAnalyzer(model_type=ai_model)  # None: the factory picks the default model
@@ -216,14 +238,23 @@ async def _write_analysis(execution: TestExecutionInfo, ai_model):
             summary_data=execution.summary.model_dump(), test_config=test_config,
             test_type=test_config.get("test_type", "unknown"), evidence_text=evidence_text)
         analysis.requirements_verdict = verdict
-        execution.ai_analysis = check_numbers(analysis, execution.summary, execution.id, comparison_numbers)
-        save_analysis_markdown(execution.report_dir, execution.id, execution.ai_analysis)
+        analysis = check_numbers(analysis, execution.summary, execution.id, comparison_numbers)
+        if analysis.evidence_status == 'mismatch':
+            # One rewrite with the wrong numbers named; kept only if it gets more of them right.
+            wrong = analysis.fact_check['mismatches']
+            rewritten = await analyzer.correct_numbers(wrong)
+            if rewritten is not None:
+                rewritten.requirements_verdict = verdict
+                rewritten = check_numbers(rewritten, execution.summary, execution.id, comparison_numbers)
+                if len((rewritten.fact_check or {}).get('mismatches', [])) < len(wrong):
+                    rewritten.fact_check['corrected_from'] = len(wrong)
+                    analysis = rewritten
+        return analysis
     except Exception as error:
         logger.warning("AI analysis failed for %s: %s", execution.id, error)
-        execution.ai_analysis = ReportAnalysis(
+        return ReportAnalysis(
             analysis_status='failed', overall_assessment=f"AI analysis failed: {error}",
             conclusion="AI 分析未完成")
-    await execution_lifecycle.emit('analysis_completed', execution)
 
 
 _reanalyses: dict[str, asyncio.Task] = {}

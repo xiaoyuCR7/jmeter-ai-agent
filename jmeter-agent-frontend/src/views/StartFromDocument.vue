@@ -17,6 +17,7 @@
     <ProgressStep v-else-if="stage === 1" :steps="workflowSteps" :running="workflowRunning" @back="resetWorkflow" />
     <ResultStep v-else :project-id="result!.projectId" :title="result!.title" :detail="result!.detail"
       :diagnostic="workflowResult?.diagnostic_summary" :draft-count="workflowResult?.requirements_draft?.items?.length"
+      :usage="workflowResult?.usage"
       @review="reviewRequirements" @reset="resetWorkflow" />
   </div>
 </template>
@@ -135,7 +136,8 @@ const startWorkflow = async () => {
                 project_id: data.project_id,
                 test_plan_ids: data.test_plan_ids,
                 diagnostic_summary: data.diagnostic_summary,
-                requirements_draft: data.requirements_draft
+                requirements_draft: data.requirements_draft,
+                usage: data.usage
               }
               workflowRunning.value = false
             }

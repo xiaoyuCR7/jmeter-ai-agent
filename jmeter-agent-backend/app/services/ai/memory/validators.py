@@ -197,6 +197,15 @@ class FactValidator:
         )
 
 
+def correction_request(mismatches: list[dict], output_shape: str) -> str:
+    """Ask the model to fix the numbers the validator could not find in the facts, once."""
+    lines = [f"- {m['metric']} 写成了 {m['claimed']}{m.get('unit', '')}（整体实测 {m['actual']}{m.get('unit', '')}），"
+             f"原文：「{m.get('context', '').strip()}」" for m in mismatches]
+    return ("程序核对了你写的数字，下面这些在事实表和证据里都找不到对应的值：\n" + "\n".join(lines) +
+            "\n\n逐个改正：换成事实表或证据里对应范围的值；找不到依据的就删掉这个数字。"
+            f"其它内容保持不变。{output_shape}")
+
+
 class HypothesisExtractor:
     """Extract structured hypotheses from LLM analysis text.
 

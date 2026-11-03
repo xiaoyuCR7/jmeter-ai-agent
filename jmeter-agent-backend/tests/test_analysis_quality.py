@@ -325,3 +325,27 @@ async def test_an_empty_model_reply_is_retried_with_room_to_answer(monkeypatch):
     result = await module.TestAnalyzer().analyze({}, {}, 'baseline')
     assert result.analysis_status == 'completed' and chat.await_count == 2
     assert chat.await_args.kwargs['max_tokens'] == module.AI_ANALYSIS_MAX_TOKENS
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('rewrite, kept', [('P95 为 {p95}ms', True), ('P95 为 98765ms', False), (None, False)])
+async def test_a_report_with_a_wrong_number_is_rewritten_once(monkeypatch, rewrite, kept):
+    from unittest.mock import AsyncMock
+    from app.services import post_run
+    from app.services.ai import usage
+    summary = run_with_ramp()
+    p95 = summary.percentiles['p95']
+    corrected = analysis(key_findings=[rewrite.format(p95=p95)]) if rewrite else None
+
+    async def analyze(**kwargs):
+        usage.record(1000, 200)
+        return analysis(key_findings=['P95 为 98765ms'])
+    analyzer = SimpleNamespace(analyze=analyze, correct_numbers=AsyncMock(return_value=corrected))
+    monkeypatch.setattr(post_run, 'TestAnalyzer', lambda **kwargs: analyzer)
+    monkeypatch.setattr(post_run, 'analysis_evidence', AsyncMock(return_value=('', None, [])))
+    execution = SimpleNamespace(id='x', summary=summary, context_snapshot={})
+    result = await post_run.analysis_for(execution)
+    assert analyzer.correct_numbers.await_args.args[0][0]['claimed'] == 98765
+    assert (result.evidence_status == 'verified') is kept
+    assert result.fact_check.get('corrected_from') == (1 if kept else None)
+    assert result.usage == {'calls': 1, 'input_tokens': 1000, 'output_tokens': 200}

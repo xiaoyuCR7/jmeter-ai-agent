@@ -19,9 +19,9 @@ def walk(node):
 @pytest.mark.asyncio
 async def test_ai_jmx_request_reserves_output_before_model(monkeypatch):
     from app.core.config import settings
-    from app.services.ai.adapters.deepseek_adapter import DeepSeekAdapter
+    from app.services.ai.adapters.openai_adapter import OpenAIAdapter
     from app.services.ai.adapters.factory import AIAdapterFactory
-    adapter = object.__new__(DeepSeekAdapter)
+    adapter = object.__new__(OpenAIAdapter)
     adapter.max_tokens = 8000
     adapter.chat = AsyncMock(return_value='{"base_url":"https://example.invalid","endpoints":[{"name":"a","method":"GET","path":"/a"}]}')
     monkeypatch.setattr(AIAdapterFactory, 'create', lambda *args: adapter)

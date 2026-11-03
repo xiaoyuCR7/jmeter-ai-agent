@@ -134,10 +134,13 @@ test('a report can be questioned and keeps the answer', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('jmeter-agent-lang', 'en'))
   await mockApi(page)
   const asked: unknown[] = []
-  await page.route(url => url.pathname.endsWith('/executions/run1/questions'), route => {
+  await page.route(url => url.pathname.endsWith('/executions/run1/questions/stream'), route => {
     asked.push(route.request().postDataJSON())
-    return route.fulfill({ json: { question: 'Which request was slowest?', answer: 'POST /checkout, at 900 ms.',
-      asked_at: '2026-10-01T10:20:00', mismatches: [{ metric: 'p99', claimed: 900, actual: 400 }] } })
+    const answer = { question: 'Which request was slowest?', answer: 'POST /checkout, at 900 ms.',
+      asked_at: '2026-10-01T10:20:00', mismatches: [{ metric: 'p99', claimed: 900, actual: 400 }] }
+    const events = [{ step: 'progress', message: 'Checking the numbers in the answer' }, { step: 'answer', answer }]
+    return route.fulfill({ contentType: 'text/event-stream',
+      body: events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('') })
   })
   await page.route(url => url.pathname.endsWith('/executions/run1/report'), route => route.fulfill({ json: {
     ...report, ai_analysis: { ...report.ai_analysis, follow_ups: [{ question: 'Was it stable?', answer: 'Yes.', mismatches: [] }] },

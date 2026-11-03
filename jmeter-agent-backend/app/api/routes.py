@@ -37,6 +37,7 @@ from app.core.config import (
     sanitize_model_config,
     load_paths_config, save_paths_config
 )
+from app.services.ai import usage as ai_usage
 from app.services.ai.adapters.factory import AIAdapterFactory, HEALTH_CHECK_TIMEOUT_SECONDS
 from app.services.jmeter import jmx_lint
 from app.services.jmeter.jmx_generator import JMXGenerator
@@ -70,8 +71,6 @@ _report_parser = ReportParser()
 DEFAULT_PROJECT_ID = "default"
 MAX_FOLLOW_UP_CONTEXT = 3  # Earlier answers a follow-up question can build on.
 _question_locks: dict[str, asyncio.Lock] = {}  # One answer saved at a time per run.
-WORKFLOW_PROGRESS = {'create_project': (35, '正在创建项目...', 'Creating the project...'),
-                     'create_jmx': (60, '正在生成测试计划...', 'Generating the test plan...')}
 
 
 # ═══════════════════════════════════════════════════════════
@@ -781,9 +780,8 @@ async def reanalyze_execution(execution_id: str, request: Optional[ReanalyzeRequ
     return {'report_status': execution.report_status}
 
 
-@router.post("/executions/{execution_id}/questions")
-async def ask_about_execution(execution_id: str, request: RunQuestion):
-    """追问一次已有分析的运行；问答跟着这份分析保存"""
+async def _question_setup(execution_id: str, request: RunQuestion):
+    """The evidence, the report context and the agent for a question; refuses before anything runs."""
     try:
         evidence = await AnalysisAgent.resolve_execution(execution_id)
     except AnalysisExecutionError as error:
@@ -794,18 +792,21 @@ async def ask_about_execution(execution_id: str, request: RunQuestion):
     if execution.report_status == 'running':
         raise HTTPException(status_code=409, detail="The analysis is being written; ask when it is done")
     earlier = execution.ai_analysis.follow_ups[-MAX_FOLLOW_UP_CONTEXT:]
-    context = json.dumps({'report': execution.ai_analysis.model_dump(exclude={'follow_ups', 'fact_check'}),
-                          'earlier_questions': earlier}, ensure_ascii=False, default=str)
+    context = json.dumps({'report': execution.ai_analysis.model_dump(exclude={'follow_ups', 'fact_check', 'usage'}),
+                          'earlier_questions': [{'question': item.get('question'), 'answer': item.get('answer')}
+                                                for item in earlier]}, ensure_ascii=False, default=str)
     try:
         agent = AnalysisAgent(AIAdapterFactory.create(request.model))
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
-    result = await agent.run_analysis(request.question, evidence, context=context)
-    if not result.success:
-        raise HTTPException(status_code=502, detail=result.error or "The model did not answer")
+    return evidence, context, agent
+
+
+async def _save_answer(execution_id: str, question: str, result, used: dict) -> dict:
     validation = (result.analysis or {}).get('validation') or {}
-    answer = {'question': request.question, 'answer': result.output, 'asked_at': datetime.now().isoformat(),
-              'mismatches': validation.get('mismatches') or []}
+    answer = {'question': question, 'answer': result.output, 'asked_at': datetime.now().isoformat(),
+              'mismatches': validation.get('mismatches') or [],
+              'corrected_from': (result.analysis or {}).get('corrected_from') or 0, 'usage': used}
     async with _question_locks.setdefault(execution_id, asyncio.Lock()):
         # Read again: the run may have been deleted or re-analysed while the model was answering.
         current = store.get_execution(execution_id)
@@ -816,6 +817,75 @@ async def ask_about_execution(execution_id: str, request: RunQuestion):
         await persist_execution(execution)
     save_analysis_markdown(execution.report_dir, execution_id, execution.ai_analysis)
     return answer
+
+
+@router.post("/executions/{execution_id}/questions")
+async def ask_about_execution(execution_id: str, request: RunQuestion):
+    """追问一次已有分析的运行；问答跟着这份分析保存"""
+    evidence, context, agent = await _question_setup(execution_id, request)
+    with ai_usage.metered() as used:
+        result = await agent.run_analysis(request.question, evidence, context=context)
+    if not result.success:
+        raise HTTPException(status_code=502, detail=result.error or "The model did not answer")
+    return await _save_answer(execution_id, request.question, result, used)
+
+
+QUESTION_PHASES = {
+    'preparation': ('正在准备这次运行的证据', "Gathering this run's evidence"),
+    'postprocessing': ('正在核对回答里的数字', 'Checking the numbers in the answer'),
+    'correction': ('有数字与实测不符，正在让模型改正', 'Some numbers did not match; asking the model to fix them'),
+}
+QUESTION_TOOLS = {
+    'find_samples': ('查看单个样本', 'Looking at individual samples'),
+    'read_run_log': ('查看 JMeter 日志', 'Reading the JMeter log'),
+    'describe_plan': ('查看测试计划', 'Reading the test plan'),
+    'detect_anomalies': ('查找时间线上的突变', 'Looking for spikes and drops'),
+    'list_runs': ('查找早先的运行', 'Finding earlier runs'),
+    'compare_with_run': ('和早先的运行对比', 'Comparing with an earlier run'),
+}
+
+
+@router.post("/executions/{execution_id}/questions/stream")
+async def ask_about_execution_stream(execution_id: str, request: RunQuestion, lang: str = 'zh-CN'):
+    """追问，并以 SSE 报告进度；最后一条是保存好的问答（step=answer）或错误（step=error）"""
+    evidence, context, agent = await _question_setup(execution_id, request)
+    en = lang == 'en'
+
+    def progress(event):
+        data = event.data or {}
+        if event.type == 'analysis_phase' and data.get('phase') in QUESTION_PHASES:
+            return QUESTION_PHASES[data['phase']][en]
+        if event.type == 'tool_call':
+            return QUESTION_TOOLS.get(data.get('tool'), ('查看更多数据', 'Looking further'))[en]
+        if event.type == 'queued':
+            return 'Other AI tasks are running; waiting for one to finish' if en else '其它 AI 任务正在运行，正在排队'
+        return None
+
+    async def events():
+        from contextlib import aclosing
+        with ai_usage.metered() as used:
+            outcome = {}
+
+            async def answer():
+                outcome['result'] = await agent.run_analysis(request.question, evidence, context=context)
+                return outcome['result']
+
+            async with aclosing(agent.stream(answer)) as stream:
+                async for event in stream:
+                    message = progress(event)
+                    if message:
+                        yield f"data: {json.dumps({'step': 'progress', 'message': message}, ensure_ascii=False)}\n\n"
+            result = outcome['result']
+            if not result.success:
+                payload = {'step': 'error', 'message': result.error or 'The model did not answer'}
+            else:
+                try:
+                    payload = {'step': 'answer', 'answer': await _save_answer(execution_id, request.question, result, used)}
+                except HTTPException as error:
+                    payload = {'step': 'error', 'message': error.detail}
+            yield f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
+
+    return StreamingResponse(events(), media_type="text/event-stream")
 
 
 @router.get("/executions/{execution_id}/log")
@@ -1130,91 +1200,51 @@ async def set_active_environment(project_id: str, env_id: str):
 # ===== AI Workflow =====
 @router.post("/ai/workflow/stream")
 async def ai_workflow_stream(request: AIWorkflowRequest):
-    """AI 工作流 SSE 接口 —— 从API文档自动创建项目和测试用例。
-
-    Delegates to WorkflowAgent which handles all tool calling, error retry,
-    and resource checks via the unified agent framework.
-    """
+    """AI 工作流 SSE 接口 —— 从API文档创建项目、测试计划和性能需求草稿"""
     from app.services.ai.agents.workflow_agent import WorkflowAgent
 
     lang = request.lang or "zh-CN"
     is_en = lang == "en"
 
     async def generate():
+        with ai_usage.metered() as used:
+            async for event in steps():
+                if event.get('step') == 'complete':
+                    event['usage'] = used
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+    async def steps():
         try:
-            adapter = AIAdapterFactory.get_adapter(request.ai_model)
-            agent = WorkflowAgent(adapter)
-
-            # ── Step 1: Analyzing ─────────────────────────
-            msg = "Analyzing API documentation..." if is_en else "正在分析API文档..."
-            yield f"data: {json.dumps({'step': 'analyzing_doc', 'message': msg, 'progress': 10})}\n\n"
-
-            # Forward each tool as it starts; generation takes minutes and a static
-            # "analyzing" line looked stuck. Unchanged step keys update one progress line.
+            agent = WorkflowAgent(AIAdapterFactory.get_adapter(request.ai_model), lang)
             result = None
-            async for kind, payload in agent.stream_from_doc(
-                api_documentation=request.api_documentation,
-                testing_requirements=request.testing_requirements,
-                test_types=None,
-            ):
-                if kind == "result":
+            # Generation takes minutes; each stage reports itself so the page never looks stuck.
+            async for kind, payload in agent.stream_from_doc(request.api_documentation, request.testing_requirements):
+                if kind == 'result':
                     result = payload
-                elif payload.type == "tool_call" and (payload.data or {}).get("tool") in WORKFLOW_PROGRESS:
-                    tool = payload.data["tool"]
-                    progress, zh, en = WORKFLOW_PROGRESS[tool]
-                    yield f"data: {json.dumps({'step': f'agent_{tool}', 'message': en if is_en else zh, 'progress': progress}, ensure_ascii=False)}\n\n"
-
-            steps_done = bool(result.get("plan_steps")) and all(step["success"] for step in result["plan_steps"])
-            if not result["success"] and steps_done and result.get("project_id"):
-                # Every step finished and the project exists; only the closing summary failed.
-                # Reporting failure here made people retry and create a duplicate project.
-                note = ("All steps finished, but the closing summary could not be written: "
-                        if is_en else "所有步骤都已完成，只是最后的总结没能生成：")
-                result["diagnostic_summary"] = note + str(result.get("error") or "")
-            elif not result["success"]:
-                err_msg = result.get("error", "Unknown error")
-                yield f"data: {json.dumps({'step': 'error', 'message': err_msg, 'progress': 100, 'error': True}, ensure_ascii=False)}\n\n"
+                else:
+                    yield payload
+            if not result['success']:
+                message = result.get('error') or 'Unknown error'
+                if result.get('error_code') == 'document_too_large':
+                    message = (f"The document is about {result['tokens']} tokens, more than this model can work with "
+                               f"(about {result['limit']}). Paste only the endpoints to test, or choose a model with a larger context."
+                               if is_en else f"文档约 {result['tokens']} token，超出这个模型能处理的范围（约 {result['limit']}）。"
+                               "请只粘贴要测的接口，或换一个上下文更大的模型。")
+                yield {'step': 'error', 'message': message, 'progress': 100, 'error': True}
                 return
-
-            pid = result.get("project_id", "")
-            plan_ids = result.get("test_plan_ids", [])
-
-            # Always draft requirements from the same text, for review; never saved here.
-            requirements_draft = None
-            if pid:
-                from app.services import requirements as requirement_service
-                try:
-                    already_saved = await requirement_service.get_requirements(pid)
-                    if already_saved is None or not already_saved.items:
-                        msg = "Drafting performance requirements..." if is_en else "正在起草性能需求..."
-                        yield f"data: {json.dumps({'step': 'drafting_requirements', 'message': msg, 'progress': 92}, ensure_ascii=False)}\n\n"
-                        source = f"{request.testing_requirements}\n\n{request.api_documentation}".strip()
-                        draft = await requirement_service.extract_requirements(
-                            source, adapter, "start-from-document")
-                        requirements_draft = draft.model_dump()
-                except Exception as error:
-                    logger.warning("Requirement draft failed for project %s: %s", pid, error)
-
-            # ── Complete ──────────────────────────────────
-            plan_count = len(plan_ids)
-            complete_msg = (
-                f"Workflow complete! Created project with {plan_count} test plans"
-                if is_en else f"工作流完成！已创建项目，共 {plan_count} 个测试计划"
-            )
-            complete_event = {
-                'step': 'complete',
-                'message': complete_msg,
-                'progress': 100,
-                'project_id': pid,
-                'test_plan_ids': plan_ids,
-                'diagnostic_summary': result.get('diagnostic_summary', ''),
-                'requirements_draft': requirements_draft,
+            count = len(result['test_plan_ids'])
+            yield {
+                'step': 'complete', 'progress': 100,
+                'message': (f"Created the project with {count} test plans" if is_en
+                            else f"已创建项目，共 {count} 个测试计划"),
+                'project_id': result['project_id'], 'test_plan_ids': result['test_plan_ids'],
+                'missing_endpoints': result['missing_endpoints'],
+                'diagnostic_summary': result['diagnostic_summary'],
+                'requirements_draft': result['requirements_draft'],
             }
-            yield f"data: {json.dumps(complete_event, ensure_ascii=False)}\n\n"
-
         except Exception as e:
             err_msg = f"Workflow failed: {str(e)}" if is_en else f"工作流执行失败: {str(e)}"
-            yield f"data: {json.dumps({'step': 'error', 'message': err_msg, 'progress': 100, 'error': True}, ensure_ascii=False)}\n\n"
+            yield {'step': 'error', 'message': err_msg, 'progress': 100, 'error': True}
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 

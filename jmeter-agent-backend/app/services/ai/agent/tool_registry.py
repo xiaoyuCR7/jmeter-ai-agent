@@ -9,7 +9,9 @@ from dataclasses import dataclass, field
 
 from app.core.config import settings
 
-from app.services.ai.agent.types import ToolResult, ToolHandler, ErrorCategory, classify_error
+from app.services.ai.agent.types import (
+    ToolResult, ToolHandler, ErrorCategory, classify_error, classify_exception, reported_category,
+)
 
 
 # Room for confirmations and report parsing around a run.
@@ -164,7 +166,7 @@ class ToolRegistry:
                     tool_name=name,
                     duration_ms=duration,
                     error_category=(ErrorCategory.CANCELLED if result.get("status") == "cancelled"
-                                    else self._classify_error(error_msg)),
+                                    else reported_category(result, error_msg)),
                 )
 
             return ToolResult(
@@ -190,7 +192,7 @@ class ToolRegistry:
                 error=f"Tool '{name}' error: {msg}",
                 tool_name=name,
                 duration_ms=duration,
-                error_category=self._classify_error(msg),
+                error_category=classify_exception(e),
             )
 
     @staticmethod

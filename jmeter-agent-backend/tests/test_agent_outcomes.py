@@ -10,9 +10,9 @@ from app.services.ai.agents.selfheal_agent import SelfHealAgent
 @pytest.mark.asyncio
 async def test_auxiliary_agent_budget_fails_before_model_and_preserves_fallback(monkeypatch):
     from app.core.config import settings
-    from app.services.ai.adapters.deepseek_adapter import DeepSeekAdapter
+    from app.services.ai.adapters.openai_adapter import OpenAIAdapter
     from app.services.ai.adapters.factory import AIAdapterFactory
-    adapter = object.__new__(DeepSeekAdapter)
+    adapter = object.__new__(OpenAIAdapter)
     adapter.max_tokens = 8000
     adapter.chat = AsyncMock(return_value='[]')
     monkeypatch.setattr(settings, 'AGENT_CONTEXT_TOKEN_BUDGET', 400)

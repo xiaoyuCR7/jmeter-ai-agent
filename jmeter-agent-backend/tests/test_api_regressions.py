@@ -250,98 +250,48 @@ def test_analysis_prompt_includes_evidence_only_when_given():
     assert '不得改判需求是否达标' in with_evidence and 'R1 不达标' in with_evidence
 
 
-async def _workflow_events(monkeypatch, items):
+async def _workflow_events(monkeypatch, items, lang=None):
     import json
     from app.api import routes
     from app.models.schemas import AIWorkflowRequest
     from app.services.ai.agents import workflow_agent
 
     class FakeAgent:
-        def __init__(self, adapter, **kwargs):
+        def __init__(self, adapter, lang='zh-CN'):
             pass
 
-        async def stream_from_doc(self, **kwargs):
+        async def stream_from_doc(self, *args, **kwargs):
             for item in items:
                 yield item
     monkeypatch.setattr(workflow_agent, 'WorkflowAgent', FakeAgent)
     monkeypatch.setattr(routes.AIAdapterFactory, 'get_adapter', lambda model: object())
-    response = await routes.ai_workflow_stream(AIWorkflowRequest(api_documentation='doc', testing_requirements='req'))
+    response = await routes.ai_workflow_stream(AIWorkflowRequest(api_documentation='doc', testing_requirements='req',
+                                                                 lang=lang))
     body = ''.join([chunk if isinstance(chunk, str) else chunk.decode() async for chunk in response.body_iterator])
     return [json.loads(line[6:]) for line in body.splitlines() if line.startswith('data: ')]
 
 
 @pytest.mark.asyncio
-async def test_workflow_stream_reports_each_tool_as_it_starts(monkeypatch):
-    from app.services.ai.agent.types import AgentEvent
-    result = {'success': True, 'plan_steps': [{'step_id': 1, 'success': True}], 'project_id': 'p1',
-              'test_plan_ids': ['plan1'], 'diagnostic_summary': 'ok', 'error': None}
+async def test_workflow_stream_relays_each_stage_then_completes(monkeypatch):
+    result = {'success': True, 'project_id': 'p1', 'test_plan_ids': ['plan1'], 'missing_endpoints': ['GET /x'],
+              'diagnostic_summary': 'ok', 'requirements_draft': None}
     events = await _workflow_events(monkeypatch, [
-        ('event', AgentEvent('tool_call', 'ReAct', {'tool': 'create_project'})),
-        ('event', AgentEvent('tool_call', 'ReAct', {'tool': 'create_jmx'})),
-        ('event', AgentEvent('tool_call', 'ReAct', {'tool': 'create_jmx'})),
+        ('progress', {'step': 'drafting_requirements', 'message': '读取', 'progress': 10}),
+        ('progress', {'step': 'writing_plans', 'message': '编写', 'progress': 30}),
         ('result', result),
     ])
-    messages = [e['message'] for e in events]
-    assert '正在创建项目...' in messages and messages.count('正在生成测试计划...') == 2
-    assert events[-1]['step'] == 'complete' and events[-1]['project_id'] == 'p1'
+    assert [e['step'] for e in events] == ['drafting_requirements', 'writing_plans', 'complete']
+    assert events[-1]['project_id'] == 'p1' and events[-1]['missing_endpoints'] == ['GET /x']
+    assert events[-1]['usage'] == {'calls': 0, 'input_tokens': 0, 'output_tokens': 0}
 
 
 @pytest.mark.asyncio
-async def test_workflow_whose_steps_all_finished_is_complete_even_if_the_summary_failed(monkeypatch):
-    result = {'success': False, 'plan_steps': [{'step_id': 1, 'success': True}], 'project_id': 'p1',
-              'test_plan_ids': ['plan1'], 'diagnostic_summary': '', 'error': 'Summary generation failed: budget'}
-    events = await _workflow_events(monkeypatch, [('result', result)])
-    assert events[-1]['step'] == 'complete' and events[-1]['project_id'] == 'p1'
-    assert '最后的总结没能生成' in events[-1]['diagnostic_summary']
-    failed = dict(result, plan_steps=[{'step_id': 1, 'success': False}])
-    events = await _workflow_events(monkeypatch, [('result', failed)])
-    assert events[-1]['step'] == 'error'
-
-
-@pytest.mark.asyncio
-async def test_workflow_always_returns_a_requirements_draft_for_review(monkeypatch):
-    from app.services import requirements as requirement_service
-    calls = []
-
-    async def extract(document, adapter, source_name=''):
-        calls.append(document)
-        return requirement_service.PerformanceRequirements(items=[requirement_service.RequirementItem(
-            id='R1', scope='transaction', transaction='POST /api/pizza', metric='p95', operator='lte', value=800)])
-    saved = []
-    monkeypatch.setattr(requirement_service, 'extract_requirements', extract)
-    monkeypatch.setattr(requirement_service, 'get_requirements', AsyncMock(return_value=None))
-    monkeypatch.setattr(requirement_service, 'save_requirements', AsyncMock(side_effect=saved.append))
-    result = {'success': True, 'plan_steps': [{'step_id': 1, 'success': True}], 'project_id': 'p1',
-              'test_plan_ids': [], 'diagnostic_summary': '', 'error': None}
-    events = await _workflow_events(monkeypatch, [('result', result)])
-    assert calls == ['req\n\ndoc']  # the user's goal and document, as typed
-    assert events[-1]['requirements_draft']['items'][0]['transaction'] == 'POST /api/pizza'
-    assert not saved  # a draft is for review; nothing applies until the user saves
-
-
-@pytest.mark.asyncio
-async def test_workflow_skips_the_draft_when_requirements_already_exist_or_drafting_fails(monkeypatch):
-    from app.services import requirements as requirement_service
-    existing = requirement_service.PerformanceRequirements(items=[requirement_service.RequirementItem(
-        id='R1', metric='error_rate', operator='lt', value=1)])
-    monkeypatch.setattr(requirement_service, 'get_requirements', AsyncMock(return_value=existing))
-    extract = AsyncMock()
-    monkeypatch.setattr(requirement_service, 'extract_requirements', extract)
-    result = {'success': True, 'plan_steps': [{'step_id': 1, 'success': True}], 'project_id': 'p1',
-              'test_plan_ids': [], 'diagnostic_summary': '', 'error': None}
-    events = await _workflow_events(monkeypatch, [('result', result)])
-    assert events[-1]['requirements_draft'] is None
-    extract.assert_not_awaited()
-    monkeypatch.setattr(requirement_service, 'get_requirements', AsyncMock(return_value=None))
-    monkeypatch.setattr(requirement_service, 'extract_requirements', AsyncMock(side_effect=ValueError('model down')))
-    events = await _workflow_events(monkeypatch, [('result', result)])
-    assert events[-1]['step'] == 'complete' and events[-1]['requirements_draft'] is None
-
-
-def test_workflow_agent_leaves_requirements_to_the_app():
-    from app.services.ai.agents.workflow_agent import WorkflowAgent
-    agent = WorkflowAgent(SimpleNamespace())
-    assert set(agent.tools._tools) == {'create_project', 'create_jmx'}
+async def test_workflow_failures_end_the_stream_with_an_error(monkeypatch):
+    events = await _workflow_events(monkeypatch, [('result', {'success': False, 'error': 'No test plan was created'})])
+    assert events[-1] == {'step': 'error', 'message': 'No test plan was created', 'progress': 100, 'error': True}
+    too_large = {'success': False, 'error': 'big', 'error_code': 'document_too_large', 'tokens': 900, 'limit': 100}
+    events = await _workflow_events(monkeypatch, [('result', too_large)], lang='en')
+    assert events[-1]['step'] == 'error' and 'about 900 tokens' in events[-1]['message']
 
 
 @pytest.mark.asyncio

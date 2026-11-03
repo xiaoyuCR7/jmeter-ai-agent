@@ -11,7 +11,7 @@ from app.models.schemas import (APIEndpoint, DetailedTestSummary, ExtractionRule
                                 TestConfig as LoadConfig, VariableBinding)
 from app.services import run_diagnostics
 from app.services.ai.adapters.base import BaseAIAdapter, ToolCallRequest, ToolCallResponse
-from app.services.ai.agent.base import AGENT_SAFETY_RULES, BaseAgent
+from app.services.ai.agent.base import BaseAgent
 from app.services.ai.agent.tool_registry import Tool, ToolRegistry
 from app.services.ai.agents.workflow_agent import WorkflowAgent
 from app.services.ai.prompts.analysis_rules import ANALYSIS_RULES
@@ -148,14 +148,10 @@ def test_a_failed_login_stops_only_that_user():
     assert len(actions) == 1 and actions[0].find("intProp[@name='OnError.action']").text == '1'
 
 
-def test_planning_agents_keep_to_their_job():
-    workflow = WorkflowAgent(FakeAdapter())
-    assert set(workflow.tools._tools) == {'create_project', 'create_jmx'}
-
-
-def test_resource_checks_are_for_runs_and_planners_see_the_domain():
-    assert 'Creating or inspecting a plan needs no resource check' in AGENT_SAFETY_RULES
-    assert '编写压测用例的规则' in WorkflowAgent(FakeAdapter()).system_prompt
+def test_planners_see_the_domain_and_nothing_about_runs():
+    prompt = WorkflowAgent(FakeAdapter()).system_prompt
+    assert '编写压测用例的规则' in prompt
+    assert 'check_system_resources' not in prompt and 'execute_test' not in prompt
 
 
 class FakeAdapter(BaseAIAdapter):
@@ -195,7 +191,7 @@ async def test_generating_a_plan_takes_one_tool_call_and_no_extra_model_calls():
         return {'test_plan_id': 'p'}
     adapter = FakeAdapter([ToolCallResponse(tool_calls=[ToolCallRequest('1', 'create_jmx', {})]),
                            ToolCallResponse(text='计划 p 已创建')])
-    result = await WorkflowAgent(adapter, tools=registry(create)).run('写一个计划')
+    result = await BaseAgent('planner', adapter, registry(create)).run('写一个计划')
     assert result.success and result.output == '计划 p 已创建' and calls == [1]
     assert adapter.tool_count == 2 and adapter.chat_count == 0  # No planner and no summary call.
 
@@ -206,7 +202,7 @@ async def test_an_empty_model_reply_is_not_a_conclusion():
         return {'test_plan_id': 'p'}
     adapter = FakeAdapter([ToolCallResponse(text=''), ToolCallResponse(tool_calls=[ToolCallRequest('1', 'create_jmx', {})]),
                            ToolCallResponse(text='完成')])
-    result = await WorkflowAgent(adapter, tools=registry(create)).run('写一个计划')
+    result = await BaseAgent('planner', adapter, registry(create)).run('写一个计划')
     assert result.success and adapter.tool_count == 3
 
 
@@ -215,7 +211,7 @@ async def test_tool_calls_have_room_for_a_long_scenario():
     adapter = FakeAdapter([ToolCallResponse(tool_calls=[ToolCallRequest('1', 'create_jmx', {})]), ToolCallResponse(text='完成')])
     async def create():
         return {}
-    agent = WorkflowAgent(adapter, tools=registry(create))
+    agent = BaseAgent('planner', adapter, registry(create))
     await agent.run('写一个计划')
     assert adapter.budget == min(8000, max(2000, adapter.context_budget // 4))
 

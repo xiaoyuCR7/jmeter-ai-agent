@@ -5,6 +5,7 @@ from anthropic import AsyncAnthropic
 
 from app.services.ai.adapters.base import managed_request, managed_stream, BaseAIAdapter, ToolCallResponse, ToolCallRequest
 from app.models.schemas import AIChatMessage
+from app.services.ai import usage
 
 
 class AnthropicAdapter(BaseAIAdapter):
@@ -53,6 +54,7 @@ class AnthropicAdapter(BaseAIAdapter):
             max_tokens=kwargs.get("max_tokens", 8000),
             temperature=kwargs.get("temperature", 0.2),
         )
+        usage.record_anthropic(response)
         return "".join(block.text for block in response.content if block.type == "text")
 
     @managed_stream
@@ -102,6 +104,7 @@ class AnthropicAdapter(BaseAIAdapter):
             temperature=kwargs.get("temperature", 0.2),
         )
 
+        usage.record_anthropic(response)
         # Parse response content blocks
         text = ""
         tool_calls = []

@@ -173,7 +173,7 @@ async def extract_requirements(document: str, adapter, source_name: str = '') ->
     response = await adapter.chat([
         AIChatMessage(role='system', content=EXTRACTION_PROMPT),
         AIChatMessage(role='user', content=document[:60000]),
-    ], temperature=0)
+    ], temperature=0, json_mode=True)
     data = _json_object(response if isinstance(response, str) else str(response))
     items = []
     for index, raw in enumerate(data.get('items') or [], start=1):

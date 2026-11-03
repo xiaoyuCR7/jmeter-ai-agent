@@ -557,3 +557,52 @@ class OpenAPIImporter:
         return APIEndpoint(name=ep.name, method=ep.method, path=path, description=ep.description,
             headers=headers, query_params=query, body=body, content_type=content_type,
             expected_status=success_codes[0] if success_codes else 200)
+
+
+def endpoints_from_document(text: str) -> Optional[dict]:
+    """The endpoints of an OpenAPI/Swagger document, parsed by code; None for any other text.
+
+    A model that reads a spec can skip or invent endpoints; the parsed list cannot.
+    """
+    stripped = (text or '').strip()
+    if not stripped or len(stripped.encode('utf-8')) > MAX_SPEC_BYTES:
+        return None
+    # JSON is cheap to try; YAML only when a top-level openapi/swagger key says it is a spec.
+    if not stripped.startswith('{') and not re.search(r'''^["']?(openapi|swagger)["']?\s*:''', stripped, re.MULTILINE):
+        return None
+    try:
+        if stripped.startswith('{'):
+            spec = json.loads(stripped)
+        else:
+            import yaml
+            spec = yaml.safe_load(stripped)
+        importer = OpenAPIImporter()
+        parsed = importer._parse_spec(spec, '')
+    except Exception:
+        return None
+    if not parsed.endpoints:
+        return None
+    endpoints, notes = [], []
+    for ep in parsed.endpoints:
+        item = {'name': ep.name, 'method': ep.method, 'path': ep.path}
+        try:
+            api = importer._api_endpoint(ep, parsed, notes)
+        except (ValueError, TypeError, KeyError, AttributeError) as error:
+            # Still listed: the model fills in what the spec leaves out, from the parameters.
+            item['parameters'] = [{key: parameter[key] for key in ('name', 'in', 'required') if key in parameter}
+                                  for parameter in ep.parameters]
+            item['note'] = str(error)
+        else:
+            if api.path != ep.path:
+                item.update(path=api.path, documented_path=ep.path)
+            item.update({key: value for key, value in (
+                ('headers', api.headers), ('query_params', api.query_params), ('body', api.body),
+                ('content_type', api.content_type if api.body is not None else None),
+                ('expected_status', api.expected_status)) if value})
+        if ep.description:
+            item['description'] = str(ep.description)[:200]
+        if ep.tags:
+            item['tags'] = ep.tags
+        endpoints.append(item)
+    return {'title': parsed.title, 'version': parsed.version, 'base_url': parsed.base_url,
+            'auth': parsed.auth_type, 'endpoints': endpoints, 'notes': notes}

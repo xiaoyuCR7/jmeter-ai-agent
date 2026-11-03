@@ -7,16 +7,6 @@ from enum import Enum
 from datetime import datetime
 
 
-class AgentState(str, Enum):
-    IDLE = "idle"
-    EXECUTING = "executing"
-    REFLECTING = "reflecting"
-    WAITING = "waiting"  # waiting for user input
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-
-
 class ErrorCategory(str, Enum):
     """Classifies tool errors so the agent can decide: retry, fix input, or stop."""
     RETRYABLE = "retryable"        # transient: timeout, rate-limit, connection refused
@@ -29,7 +19,7 @@ class ErrorCategory(str, Enum):
 @dataclass
 class AgentEvent:
     """Event emitted during agent execution (for SSE streaming)."""
-    type: str  # "step_start", "step_complete", "tool_call", "tool_result", "reflect", "error", "complete"
+    type: str  # e.g. "step_start", "tool_call", "tool_result", "queued", "complete", "error"
     message: str
     data: Optional[dict] = None
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
@@ -110,29 +100,18 @@ def _compact_tool_data(value, budget=1800, depth=0):
 
 
 @dataclass
-class PlanStep:
-    """The step an agent run executes, with its result and retry count."""
-    step_id: int
-    description: str
-    success: bool = False
-    result: Optional[ToolResult] = None
-    retries: int = 0
-    max_retries: int = 2
-
-
-@dataclass
 class AgentResult:
     """Final result from an agent run."""
     success: bool
     task: str
-    receipt: Optional[dict] = field(default=None, kw_only=True)
-    plan: list[PlanStep] = field(default_factory=list)
     output: str = ""
     events: list[AgentEvent] = field(default_factory=list)
-    iterations: int = 0
+    iterations: int = 0  # attempts, counting retries
+    retries: int = 0
     error: Optional[str] = None
-    error_traceback: Optional[str] = None
+    error_category: Optional[ErrorCategory] = None
     duration_seconds: float = 0.0
+    data: dict = field(default_factory=dict)  # tool statuses and payloads of the last attempt
     analysis: Optional[dict] = None
 
 
@@ -183,3 +162,22 @@ def classify_error(error_message: str) -> ErrorCategory:
         if _re.search(pat, msg_lower):
             return ErrorCategory.INPUT_ERROR
     return ErrorCategory.TOOL_ERROR
+
+
+def classify_exception(error: BaseException) -> ErrorCategory:
+    """The exception's type says more than its wording; the message decides only when the type does not."""
+    if isinstance(error, (TimeoutError, ConnectionError)):
+        return ErrorCategory.RETRYABLE
+    if isinstance(error, (FileNotFoundError, NotADirectoryError)):
+        return ErrorCategory.INPUT_ERROR
+    if isinstance(error, (PermissionError, MemoryError)):
+        return ErrorCategory.SYSTEM_ERROR
+    return classify_error(str(error))
+
+
+def reported_category(result: dict, message: str) -> ErrorCategory:
+    """A tool may name the category of its own failure; otherwise it is read from the message."""
+    try:
+        return ErrorCategory(result.get('error_category'))
+    except ValueError:
+        return classify_error(message)

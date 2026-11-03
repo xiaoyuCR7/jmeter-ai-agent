@@ -14,6 +14,7 @@
       <h4>{{ L('AI 说明', 'AI notes') }}</h4>
       <div class="markdown" v-html="md.render(diagnostic)"></div>
     </div>
+    <p v-if="usageText(usage, currentLang)" class="usage">{{ usageText(usage, currentLang) }}</p>
     <div class="actions"><el-button text @click="emit('reset')">{{ L('再导入一份', 'Start another') }}</el-button></div>
   </section>
 </template>
@@ -22,8 +23,9 @@
 import { useRouter } from 'vue-router'
 import MarkdownIt from 'markdown-it'
 import { useI18n } from '@/composables/useI18n'
+import { usageText, type ModelUsage } from '@/utils/format'
 
-defineProps<{ projectId: string; title: string; detail: string; diagnostic?: string; draftCount?: number }>()
+defineProps<{ projectId: string; title: string; detail: string; diagnostic?: string; draftCount?: number; usage?: ModelUsage }>()
 const emit = defineEmits<{ review: []; reset: [] }>()
 const md = new MarkdownIt()
 const router = useRouter()
@@ -32,6 +34,7 @@ const L = (zh: string, en: string) => currentLang.value === 'en' ? en : zh
 </script>
 
 <style scoped lang="scss">
+.usage { margin: 12px 0 0; font-size: 12px; color: var(--app-text-muted); }
 .diagnostic {
   border-top: 1px solid var(--app-border);
   padding-top: 12px;

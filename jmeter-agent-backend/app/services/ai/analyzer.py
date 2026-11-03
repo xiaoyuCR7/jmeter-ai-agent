@@ -46,6 +46,7 @@ class TestAnalyzer:
 
     def __init__(self, model_type: Optional[str] = None):
         self.adapter = AIAdapterFactory.create(model_type)
+        self._exchange: list = []  # The prompt and the model's reply, for one correction round.
 
     async def analyze(self, summary_data: dict, test_config: dict, test_type: str,
                       evidence_text: str = '') -> ReportAnalysis:
@@ -73,11 +74,14 @@ class TestAnalyzer:
         for attempt in range(AI_ANALYSIS_MAX_RETRIES + 1):
             try:
                 response = await asyncio.wait_for(
-                    self.adapter.chat(chat_messages, temperature=0.3, max_tokens=AI_ANALYSIS_MAX_TOKENS, max_retries=0),
+                    self.adapter.chat(chat_messages, temperature=0.3, max_tokens=AI_ANALYSIS_MAX_TOKENS, max_retries=0,
+                                      json_mode=True),
                     timeout=AI_ANALYSIS_TIMEOUT_SECONDS,
                 )
                 try:
-                    return self._parse_response(response)
+                    parsed = self._parse_response(response)
+                    self._exchange = [*chat_messages, AIChatMessage(role='assistant', content=response)]
+                    return parsed
                 except (ValueError, TypeError):
                     if attempt < AI_ANALYSIS_MAX_RETRIES:
                         logger.warning("AI analysis attempt %d/%d returned unusable output",
@@ -120,6 +124,25 @@ class TestAnalyzer:
             risk_areas=[],
             conclusion="AI分析不可用，请参考原始指标数据人工判断"
         )
+
+    async def correct_numbers(self, mismatches: list[dict]) -> Optional[ReportAnalysis]:
+        """The last analysis rewritten with its mismatched numbers fixed or removed; None if that fails."""
+        from app.models.schemas import AIChatMessage
+        from app.services.ai.memory.validators import correction_request
+        if not self._exchange:
+            return None
+        messages = [*self._exchange, AIChatMessage(role='user', content=correction_request(
+            mismatches, '输出改正后的完整 JSON，字段和结构与上次相同。'))]
+        try:
+            messages = self.adapter.prepare_chat_messages(messages, response_tokens=AI_ANALYSIS_MAX_TOKENS)
+            response = await asyncio.wait_for(
+                self.adapter.chat(messages, temperature=0.0, max_tokens=AI_ANALYSIS_MAX_TOKENS, max_retries=0,
+                                  json_mode=True),
+                timeout=AI_ANALYSIS_TIMEOUT_SECONDS)
+            return self._parse_response(response)
+        except Exception as error:
+            logger.warning("Number correction failed: %s", type(error).__name__)
+            return None
 
     @staticmethod
     def _extract_balanced_json(text: str) -> Optional[str]:

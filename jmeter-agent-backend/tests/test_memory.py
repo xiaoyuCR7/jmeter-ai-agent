@@ -285,14 +285,14 @@ async def test_a_follow_up_question_sees_the_same_recall_as_the_report(monkeypat
     agent = object.__new__(module.AnalysisAgent)
     agent._build_fact_sheet = AsyncMock(return_value=FactSheet(execution_id='now', module='plan-a', total_requests=5))
     agent._collect_evidence = AsyncMock(return_value=None)
-    agent.run = AsyncMock(return_value=SimpleNamespace(success=True, output='上次 P95 是 777ms', error=None,
+    agent.converse = AsyncMock(return_value=SimpleNamespace(success=True, output='上次 P95 是 777ms', error=None,
                                                        plan=[], iterations=1))
     monkeypatch.setattr('app.services.ai.memory.provenance.load_execution_scope', AsyncMock(return_value=''))
     monkeypatch.setattr('app.services.storage.store.get_execution', lambda execution_id: SimpleNamespace(id=execution_id))
     monkeypatch.setattr(module.analysis_context, 'recall', AsyncMock(return_value=analysis_context.Recall(
         text='\n\n## 这个计划最近的运行 X', numbers=[777.0], counts={'same_config': 1})))
     result = await agent.analyze_with_rag(execution_id='now', module='plan-a', user_task='和上次比呢？')
-    assert '## 这个计划最近的运行 X' in agent.run.call_args.args[0]
+    assert '## 这个计划最近的运行 X' in agent.converse.call_args.args[0]
     assert result['validation']['mismatches'] == [] and result['recall'] == {'same_config': 1}
 
 

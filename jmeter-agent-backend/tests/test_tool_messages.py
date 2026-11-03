@@ -62,8 +62,8 @@ def tool_exchange():
 @pytest.mark.asyncio
 async def test_text_fallback_checks_final_prompt_budget_and_keeps_tool_groups():
     from app.services.ai.adapters.base import BaseAIAdapter
-    from app.services.ai.adapters.deepseek_adapter import DeepSeekAdapter
-    adapter = object.__new__(DeepSeekAdapter)
+    from app.services.ai.adapters.openai_adapter import OpenAIAdapter
+    adapter = object.__new__(OpenAIAdapter)
     adapter.max_tokens = 8000
     adapter.chat = AsyncMock(return_value='done')
     history = tool_exchange()
@@ -82,8 +82,8 @@ async def test_text_fallback_checks_final_prompt_budget_and_keeps_tool_groups():
 @pytest.mark.asyncio
 async def test_text_fallback_rejects_oversized_tool_policy_without_model_call():
     from app.services.ai.adapters.base import BaseAIAdapter
-    from app.services.ai.adapters.deepseek_adapter import DeepSeekAdapter
-    adapter = object.__new__(DeepSeekAdapter)
+    from app.services.ai.adapters.openai_adapter import OpenAIAdapter
+    adapter = object.__new__(OpenAIAdapter)
     adapter.max_tokens = 8000
     adapter.chat = AsyncMock()
     with pytest.raises(ValueError, match='context budget'):
@@ -176,23 +176,10 @@ def test_text_tool_fallback_preserves_nested_json(payload):
     assert 'tool_call' not in result.text
 
 
-def test_memory_compaction_keeps_native_exchange_atomic():
-    from app.services.ai.agent.memory import ConversationMemory
-    memory = ConversationMemory(summary_keep=2)
-    for message in [*tool_exchange(), AIChatMessage(role='user', content='next')]:
-        memory.add(message)
-    old, recent = memory.prepare_for_compression()
-    assert recent[0].role != 'tool'
-    assert len(recent) == 3
-
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize('provider', ['openai', 'deepseek', 'qwen'])
 @pytest.mark.parametrize('ending', ['complete', 'close', 'error'])
-async def test_model_stream_always_closes_response(provider, ending):
-    from importlib import import_module
-    cls = getattr(import_module(f'app.services.ai.adapters.{provider}_adapter'),
-                  {'openai': 'OpenAIAdapter', 'deepseek': 'DeepSeekAdapter', 'qwen': 'QwenAdapter'}[provider])
+async def test_model_stream_always_closes_response(ending):
+    from app.services.ai.adapters.openai_adapter import OpenAIAdapter as cls
     class Stream:
         def __init__(self):
             self.close = AsyncMock()
@@ -215,10 +202,6 @@ async def test_model_stream_always_closes_response(provider, ending):
         with pytest.raises(StopAsyncIteration):
             await anext(iterator)
     stream.close.assert_awaited_once()
-    if provider != 'openai':
-        messages = adapter.client.chat.completions.create.call_args.kwargs['messages']
-        assert messages[-1]['role'] == 'user'
-        assert 'call-A' in messages[-1]['content']
 
 
 @pytest.mark.asyncio

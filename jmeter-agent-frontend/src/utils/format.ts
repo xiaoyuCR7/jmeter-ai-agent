@@ -28,3 +28,18 @@ export function testTypeText(type: string | undefined, lang: string): string {
   if (!names) return type || '-'
   return lang === 'en' ? names[1] : names[0]
 }
+
+export interface ModelUsage {
+  calls: number
+  input_tokens: number
+  output_tokens: number
+}
+
+// What a piece of AI work cost, as the provider counted it; empty when nothing was counted.
+export function usageText(usage: ModelUsage | null | undefined, lang: string): string {
+  if (!usage?.calls) return ''
+  const n = (value: number) => value.toLocaleString()
+  return lang === 'en'
+    ? `${usage.calls} model ${usage.calls === 1 ? 'call' : 'calls'}, ${n(usage.input_tokens)} input and ${n(usage.output_tokens)} output tokens`
+    : `调用模型 ${usage.calls} 次，输入 ${n(usage.input_tokens)} token，输出 ${n(usage.output_tokens)} token`
+}

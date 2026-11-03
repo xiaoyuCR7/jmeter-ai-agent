@@ -329,7 +329,7 @@ class TestPlanInfo(BaseModel):
 
 class AIWorkflowRequest(BaseModel):
     """AI 工作流请求 —— 从API文档和测试需求自动创建项目和测试用例"""
-    api_documentation: str = Field(..., description="API接口文档内容，支持OpenAPI/Swagger或纯文本")
+    api_documentation: str = Field(..., max_length=10_000_000, description="API接口文档内容，支持OpenAPI/Swagger或纯文本")
     testing_requirements: str = Field(..., description="测试需求描述，如'测试登录和支付接口在高并发下的性能'")
     ai_model: Optional[str] = Field(None, description="使用的AI模型ID")
     lang: Optional[str] = Field(None, description="输出语言: zh-CN 或 en")
@@ -419,6 +419,7 @@ class ReportAnalysis(BaseModel):
     analysis_status: Literal["completed", "invalid", "failed"] = "completed"
     evidence_status: Literal["unverified", "verified", "mismatch"] = "unverified"
     fact_check: Optional[Dict[str, Any]] = Field(None, description="AI 文本中的数字与实测值的核对结果")
+    usage: Optional[Dict[str, int]] = Field(None, description="写这份分析用的模型调用次数和 token")
     overall_assessment: str = Field(..., description="整体性能评估总结")
     key_findings: List[str] = Field(default_factory=list, description="关键发现列表")
     specific_issues: List[str] = Field(default_factory=list, description="具体问题定位，如'并发数达到500时响应时间突增到5s'")

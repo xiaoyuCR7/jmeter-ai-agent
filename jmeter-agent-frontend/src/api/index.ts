@@ -289,6 +289,19 @@ export const api = {
 
   askAboutRun: (executionId: string, question: string) =>
     instance.post(`/executions/${encodeURIComponent(executionId)}/questions`, { question }, { timeout: 300000 }),
+  // Progress arrives as {step: 'progress'} events, then {step: 'answer'} or {step: 'error'}.
+  askAboutRunStream: (executionId: string, question: string, signal?: AbortSignal) => {
+    const lang = currentLang()
+    return fetch(`${baseURL}/executions/${encodeURIComponent(executionId)}/questions/stream?lang=${lang}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept-Language': lang },
+      body: JSON.stringify({ question }),
+      signal,
+    }).then((response) => {
+      if (response.status === 401) requestAccess()
+      return response
+    })
+  },
   reanalyzeRun: (executionId: string) => instance.post(`/executions/${encodeURIComponent(executionId)}/analysis`),
 
   // What the agent remembers: hypotheses, lessons people saved, and how much of it is used

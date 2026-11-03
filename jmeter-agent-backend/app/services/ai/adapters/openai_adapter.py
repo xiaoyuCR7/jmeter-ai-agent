@@ -1,10 +1,11 @@
 import json
 from typing import AsyncIterator, List, Optional
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, BadRequestError
 
 from app.services.ai.adapters.base import managed_request, managed_stream, BaseAIAdapter, ToolCallResponse, ToolCallRequest
 from app.models.schemas import AIChatMessage
+from app.services.ai import usage
 
 
 class OpenAIAdapter(BaseAIAdapter):
@@ -16,13 +17,22 @@ class OpenAIAdapter(BaseAIAdapter):
 
     @managed_request
     async def chat(self, messages: List[AIChatMessage], **kwargs) -> str:
+        """``json_mode=True`` asks for one JSON object (the prompt must say JSON); a provider that
+        refuses the option is asked again without it, and not asked with it again."""
         client = self.client.with_options(max_retries=kwargs['max_retries']) if 'max_retries' in kwargs else self.client
-        response = await client.chat.completions.create(
-            model=self.model,
-            messages=[m.to_wire() for m in messages],
-            temperature=kwargs.get("temperature", 0.2),
-            max_tokens=kwargs.get("max_tokens", 8000),
-        )
+        request = dict(model=self.model, messages=[m.to_wire() for m in messages],
+                       temperature=kwargs.get("temperature", 0.2), max_tokens=kwargs.get("max_tokens", 8000))
+        if kwargs.get('json_mode') and not getattr(self, '_json_mode_refused', False):
+            try:
+                response = await client.chat.completions.create(**request, response_format={'type': 'json_object'})
+            except BadRequestError as error:
+                if 'response_format' not in str(error) and 'json' not in str(error).lower():
+                    raise
+                self._json_mode_refused = True
+                response = await client.chat.completions.create(**request)
+        else:
+            response = await client.chat.completions.create(**request)
+        usage.record_openai(response)
         return response.choices[0].message.content or ""
 
     @managed_stream
@@ -63,6 +73,7 @@ class OpenAIAdapter(BaseAIAdapter):
             max_tokens=kwargs.get("max_tokens", 8000),
         )
 
+        usage.record_openai(response)
         choice = response.choices[0]
         text = choice.message.content or ""
         tool_calls = []

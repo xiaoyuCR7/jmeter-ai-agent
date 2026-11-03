@@ -146,6 +146,7 @@
               :title="L('需求判定已变化，这份分析可能过时', 'The requirement verdict has changed since this analysis was written')"
               :description="L(`生成分析时：${staleVerdict.then}；现在：${staleVerdict.now}。`, `When written: ${staleVerdict.then}. Now: ${staleVerdict.now}.`)" />
             <el-alert :title="factCheck.title" :description="factCheck.detail" :type="factCheck.type" :closable="false" show-icon />
+            <p v-if="usageText(ai.usage, currentLang)" class="ai-usage">{{ L('写这份分析：', 'Writing this analysis: ') }}{{ usageText(ai.usage, currentLang) }}</p>
             <div class="ai-block lead">
               <h4>{{ t('report.evaluation') }}</h4>
               <p>{{ ai.overall_assessment }}</p>
@@ -214,7 +215,7 @@ import RunQuestions from '@/components/RunQuestions.vue'
 import RunMemory from '@/components/RunMemory.vue'
 import SaveLessonDialog from '@/components/SaveLessonDialog.vue'
 import { useI18n } from '@/composables/useI18n'
-import { formatDuration, formatMs, formatPct, formatTime, formatTps } from '@/utils/format'
+import { formatDuration, formatMs, formatPct, formatTime, formatTps, usageText } from '@/utils/format'
 
 use([CanvasRenderer, BarChart, LineChart, GridComponent, TooltipComponent, LegendComponent])
 
@@ -403,13 +404,15 @@ const staleVerdict = computed(() => {
 
 const factCheck = computed(() => {
   const a = ai.value
+  const fixed = a?.fact_check?.corrected_from
+  const fixedNote = fixed ? L(`初稿有 ${fixed} 处数字与实测不符，已让模型按核对结果改写。`, `The first draft had ${fixed} numbers that did not match; the model rewrote them.`) : ''
   if (a?.evidence_status === 'mismatch') {
     const wrong = (a.fact_check?.mismatches || []).map((m: any) => `${m.metric}: ${m.claimed} → ${m.actual}`).join('；')
-    return { type: 'error' as const, title: L('AI 文本里有数字与实测不符，请以指标为准', 'Some numbers in the AI text do not match the measurements; trust the metrics'), detail: wrong }
+    return { type: 'error' as const, title: L('AI 文本里有数字与实测不符，请以指标为准', 'Some numbers in the AI text do not match the measurements; trust the metrics'), detail: fixedNote + wrong }
   }
   if (a?.evidence_status === 'verified') {
     const count = a.fact_check?.checked ?? 0
-    return { type: 'info' as const, title: L(`已核对 ${count} 处指标数字，均与实测相符`, `${count} metric values checked against the measurements`), detail: L('这只核对数字；原因和建议仍是推测，不等于已验证的根因。', 'Only the numbers are checked. Causes and advice are still hypotheses, not verified root causes.') }
+    return { type: 'info' as const, title: L(`已核对 ${count} 处指标数字，均与实测相符`, `${count} metric values checked against the measurements`), detail: fixedNote + L('这只核对数字；原因和建议仍是推测，不等于已验证的根因。', 'Only the numbers are checked. Causes and advice are still hypotheses, not verified root causes.') }
   }
   return { type: 'warning' as const, title: t('report.evidenceWarning'), detail: '' }
 })
@@ -489,6 +492,7 @@ onUnmounted(() => {
 </script>
 
 <style scoped lang="scss">
+.ai-usage { margin: 0; font-size: 12px; color: var(--app-text-muted); }
 .report-page { max-width: 1440px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; min-height: 200px; }
 
 .report-head {

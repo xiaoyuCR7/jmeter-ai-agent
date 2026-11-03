@@ -82,11 +82,10 @@ class BaseAIAdapter(ABC):
     """AI模型适配器基类"""
 
     def __init__(self, api_key: str, model: str, api_base: Optional[str] = None,
-                 max_retries: int = 3, max_tokens: int = DEFAULT_MAX_TOKENS):
+                 max_tokens: int = DEFAULT_MAX_TOKENS):
         self.api_key = api_key
         self.model = model
         self.api_base = api_base
-        self.max_retries = max_retries
         self.max_tokens = max_tokens
         self.context_window: Optional[int] = None
 
@@ -127,29 +126,6 @@ class BaseAIAdapter(ABC):
         self._retired = True
         if not getattr(self, '_active_calls', 0):
             await self._close_client()
-
-    async def _retry_api_call(self, call: Callable, name: str = "API call") -> Any:
-        """Execute an API call with exponential backoff retry on 429/5xx errors."""
-        last_error = None
-        for attempt in range(self.max_retries):
-            try:
-                return await call()
-            except Exception as e:
-                last_error = e
-                msg = str(e).lower()
-                is_retryable = any(kw in msg for kw in (
-                    "rate", "429", "too many", "timeout", "server error",
-                    "500", "502", "503", "504", "connection", "overloaded"
-                ))
-                if not is_retryable or attempt == self.max_retries - 1:
-                    raise
-                wait = min(2 ** attempt, 30)
-                logger.warning(
-                    f"{name} attempt {attempt + 1}/{self.max_retries} failed: {e}. "
-                    f"Retrying in {wait}s..."
-                )
-                await asyncio.sleep(wait)
-        raise last_error
 
     def _truncate_messages(self, messages: List[AIChatMessage],
                            max_tokens: int = None, *, text_fallback: bool = False) -> List[AIChatMessage]:
