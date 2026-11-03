@@ -233,23 +233,11 @@ async def test_report_hypotheses_join_the_ledger_once(monkeypatch):
         {'statement': '首页慢在建连', 'category': 'bottleneck', 'testable_prediction': 'p99 should decrease by >20%'},
         {'statement': '', 'category': 'risk'}, {'statement': '分类写错了', 'category': 'nonsense'}])
     await post_run.record_hypotheses(SimpleNamespace(id='run', ai_analysis=analysis),
-                                    SimpleNamespace(module='plan', version='unknown', test_type='baseline'))
+                                    SimpleNamespace(module='plan', version='unknown', test_type='baseline',
+                                                    per_label={}, project_id='p'))
     assert len(added) == 2 and all(flag for _, flag in added)
     assert added[0][0].testable_prediction == 'p99 should decrease by >20%' and added[0][0].status.value == 'untested'
     assert added[1][0].category.value == 'bottleneck'
-
-
-@pytest.mark.asyncio
-async def test_reports_see_what_earlier_runs_left_open(monkeypatch):
-    from app.services import post_run
-    from app.models.schemas import Hypothesis, HypothesisCategory
-    from app.services.ai import memory
-    found = [Hypothesis(hypothesis_id='h', source_execution_id='old', module='plan', category=HypothesisCategory.RISK,
-                        statement='连接池可能不够')]
-    monkeypatch.setattr(memory.hypothesis_ledger, 'list_for_module', AsyncMock(return_value=found))
-    assert '连接池可能不够' in await post_run.open_hypotheses(SimpleNamespace(test_plan_id='plan'))
-    monkeypatch.setattr(memory.hypothesis_ledger, 'list_for_module', AsyncMock(return_value=[]))
-    assert await post_run.open_hypotheses(SimpleNamespace(test_plan_id='plan')) == ''
 
 
 def test_an_average_of_one_request_phase_is_a_real_number():

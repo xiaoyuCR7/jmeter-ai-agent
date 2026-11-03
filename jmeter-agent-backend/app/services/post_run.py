@@ -125,39 +125,18 @@ async def analysis_evidence(execution):
         return "", None, []
     req = evidence.requirements
     verdict = {"verdict": req.verdict, "passed": req.passed, "failed": req.failed, "missing": req.missing}
-    history, history_numbers = await history_context(execution)
-    return (format_for_prompt(evidence) + await open_hypotheses(execution) + history, verdict,
-            [*comparison_values(evidence), *history_numbers])
+    from app.services.ai.analysis_context import recall
+    remembered = await recall(execution)
+    return (format_for_prompt(evidence) + remembered.text, verdict,
+            [*comparison_values(evidence), *remembered.numbers])
 
 
-async def history_context(execution) -> tuple[str, list[float]]:
-    """Earlier runs of this plan and what people archived about it. A report does not depend on either."""
-    from app.services.ai import analysis_context
-    from app.services.ai.memory.provenance import load_execution_scope
-    from app.services.ai.rag.retriever import RAGRetriever
-    try:
-        scope = await load_execution_scope(execution.id)
-        facts = await analysis_context.recent_facts(execution.test_plan_id, 'unknown', scope, execution.id)
-    except Exception as error:
-        logger.warning('History unavailable for analysis of %s: %s', execution.id, error)
-        facts = []
-    plan = store.get_test_plan(execution.test_plan_id)
-    knowledge = await analysis_context.knowledge_context(
-        RAGRetriever(), execution.summary.model_dump(), plan.name if plan else execution.test_plan_id)
-    recent = analysis_context.format_recent_facts(facts)
-    return ('\n\n' + recent if recent else '') + knowledge, analysis_context.fact_values(facts)
-
-
-async def open_hypotheses(execution) -> str:
-    """What earlier runs of this plan left to check, so a report can pick the thread up."""
-    from app.services.ai.memory import hypothesis_ledger
-    from app.services.ai.memory.hypothesis_ledger import HypothesisLedger
-    found = await hypothesis_ledger.list_for_module(execution.test_plan_id, limit=10)
-    return '\n\n## 这个计划的历史假设\n' + HypothesisLedger.format_for_prompt(found) if found else ''
+HYPOTHESIS_MAX_AGE_DAYS = 30
 
 
 async def record_facts(execution: TestExecutionInfo):
-    """Give later analyses of this plan a measured history, and test the hypotheses waiting for one."""
+    """Give later analyses a measured history, and check the project's hypotheses waiting for a run like this."""
+    from app.services.ai.analysis_context import run_context
     from app.services.ai.memory import fact_ledger, hypothesis_ledger
     from app.services.ai.memory.provenance import load_execution_scope
     jtl_path = os.path.join(execution.report_dir or '', 'result.jtl')
@@ -169,15 +148,31 @@ async def record_facts(execution: TestExecutionInfo):
         fact_ledger.compute_from_summary, summary=execution.summary, execution_id=execution.id, jtl_path=jtl_path,
         module=execution.test_plan_id, version='unknown', test_type=config.get('test_type', ''))
     fact.context_scope = scope
+    for key, value in run_context(execution).items():
+        setattr(fact, key, value)
     if await fact_ledger.save(fact):
-        await hypothesis_ledger.evaluate_module_hypotheses(execution.test_plan_id, execution.id)
+        if fact.project_id:
+            await hypothesis_ledger.evaluate_project_hypotheses(fact.project_id, execution.id)
+            await hypothesis_ledger.expire(fact.project_id, HYPOTHESIS_MAX_AGE_DAYS)
         await record_hypotheses(execution, fact)
 
 
 async def record_hypotheses(execution: TestExecutionInfo, fact):
     """Report explanations join the ledger as untested, so a later run can settle them."""
     from app.models.schemas import Hypothesis, HypothesisCategory, HypothesisStatus
-    from app.services.ai.memory import hypothesis_ledger
+    from app.services.ai.memory import hypothesis_ledger, prediction
+    from app.services.ai.memory.hypothesis_ledger import REF_LENGTH, HypothesisUpdateConflict
+    labels = set(fact.per_label or {})
+    # Reports of a plan run again and again restate the same claim; the newest wording replaces the open one,
+    # found by the number the report quotes or, failing that, by making the same prediction.
+    open_hypotheses = [hyp for hyp in await hypothesis_ledger.list_for_project(
+        fact.project_id, status=HypothesisStatus.UNTESTED, limit=200) if hyp.source_execution_id != execution.id]
+    by_ref = {hyp.hypothesis_id[:REF_LENGTH]: hyp for hyp in open_hypotheses}
+    open_claims = {}
+    for hyp in open_hypotheses:
+        if hyp.module == fact.module and hyp.prediction:
+            open_claims.setdefault((hyp.category, prediction.signature(hyp.prediction)), []).append(hyp)
+    replaced = set()
     for item in (execution.ai_analysis.hypotheses if execution.ai_analysis else []):
         statement = str(item.get('statement') or '').strip()
         if not statement:
@@ -186,11 +181,29 @@ async def record_hypotheses(execution: TestExecutionInfo, fact):
             category = HypothesisCategory(item.get('category'))
         except ValueError:
             category = HypothesisCategory.BOTTLENECK
+        # Without a checkable prediction it waits for a person to decide it on the report page.
+        expected = prediction.normalize(item.get('prediction'), labels)
+        hypothesis_id = hashlib.sha256(json.dumps([execution.id, statement], ensure_ascii=False).encode()).hexdigest()
         await hypothesis_ledger.add(Hypothesis(
-            hypothesis_id=hashlib.sha256(json.dumps([execution.id, statement], ensure_ascii=False).encode()).hexdigest(),
+            hypothesis_id=hypothesis_id,
             source_execution_id=execution.id, module=fact.module, version=fact.version, test_type=fact.test_type,
             category=category, statement=statement, confidence=0.5, status=HypothesisStatus.UNTESTED,
-            testable_prediction=str(item.get('testable_prediction') or '') or None), if_absent=True)
+            testable_prediction=str(item.get('testable_prediction') or '') or None,
+            prediction=expected, project_id=fact.project_id), if_absent=True)
+        same = open_claims.pop((category, prediction.signature(expected)), []) if expected else []
+        quoted = by_ref.get(str(item.get('replaces') or '').strip()[:REF_LENGTH])
+        for old in ([quoted] if quoted else []) + same:
+            if old.hypothesis_id in replaced:
+                continue
+            replaced.add(old.hypothesis_id)
+            why = '更新了这条假设' if old is quoted else '提出了同样的预测'
+            try:
+                await hypothesis_ledger.update_status(
+                    old.hypothesis_id, HypothesisStatus.DEPRECATED,
+                    notes=f'运行 {execution.id[:8]} 的报告{why}，以新的为准',
+                    expected_status=HypothesisStatus.UNTESTED)
+            except HypothesisUpdateConflict:
+                pass  # A run or a person settled it meanwhile; that answer stands.
 
 
 async def _write_analysis(execution: TestExecutionInfo, ai_model):
@@ -288,16 +301,27 @@ async def finish_run(execution: TestExecutionInfo, ai_model=None):
     if settings.AUTO_ANALYSIS_ENABLED:
         await _write_analysis(execution, ai_model)
     try:
-        from app.services.ai.rag.archiver import rag_archiver
-        plan = store.get_test_plan(execution.test_plan_id)
-        # Takes a write lock and writes to disk, so it stays off the event loop.
-        await asyncio.to_thread(
-            rag_archiver.archive_raw_report, report_data=execution.summary.model_dump(),
-            module=plan.name if plan else execution.test_plan_id,
-            version=execution.id, execution_id=execution.id, plan_id=execution.test_plan_id)
-    except Exception as error:
-        logger.warning("RAG archiving skipped for %s: %s", execution.id, error)
-    try:
         await record_facts(execution)
     except Exception as error:
         logger.warning("Fact recording skipped for %s: %s", execution.id, error)
+
+
+async def backfill_memory():
+    """Runs recorded before facts carried a project and load get them, so they join project history."""
+    from app.services.ai.analysis_context import run_context
+    from app.services.ai.memory import fact_ledger, hypothesis_ledger
+    updated = 0
+    for execution in list(store.executions.values()):
+        if execution.status != TestExecutionStatus.COMPLETED or not execution.context_snapshot:
+            continue
+        try:
+            context = await asyncio.to_thread(run_context, execution)
+            if not context['project_id']:
+                continue
+            if await fact_ledger.annotate(execution.id, only_missing=True, **context):
+                updated += 1
+            await hypothesis_ledger.assign_project(execution.id, context['project_id'])
+        except Exception as error:
+            logger.warning('Memory backfill skipped %s: %s', execution.id, error)
+    if updated:
+        logger.info('Added project and load to %d earlier runs', updated)

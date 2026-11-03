@@ -1,91 +1,19 @@
 """Tests for HypothesisLedger — falsifiable interpretation ledger."""
 
 import os
-import tempfile
 import pytest
 import pytest_asyncio
 
 from app.services.ai.memory.hypothesis_ledger import HypothesisLedger
 from app.services.ai.memory.fact_ledger import FactLedger
-from app.models.schemas import Hypothesis, HypothesisCategory, HypothesisStatus
+from app.models.schemas import FactSheet, Hypothesis, HypothesisCategory, HypothesisStatus
 
 
-@pytest_asyncio.fixture
-async def read_contract_evaluation(temp_hypothesis_ledger, temp_fact_ledger, monkeypatch):
-    import importlib
-    from app.models.schemas import FactSheet
-    module = importlib.import_module('app.services.ai.memory.hypothesis_ledger')
-    monkeypatch.setattr(module, 'fact_ledger', temp_fact_ledger)
-    for key, value in [('old', 100), ('new', 50)]:
-        assert await temp_fact_ledger.save(FactSheet(execution_id=key, module='api', version='v1',
-            context_scope='scope', total_requests=10, percentiles={'p99': value}))
-    hyp = Hypothesis(hypothesis_id='first', source_execution_id='old', module='api', version='v1',
-                     category=HypothesisCategory.RECOMMENDATION, statement='prediction',
-                     testable_prediction='p99 decrease')
-    await temp_hypothesis_ledger.add(hyp)
-    return temp_hypothesis_ledger, temp_fact_ledger, hyp
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize('phase', ['list', 'get', 'new_fact', 'old_fact', 'final_get', 'conflict_get'])
-async def test_ledger_read_contract_evaluation_propagates_each_read_failure(read_contract_evaluation, monkeypatch, phase):
-    from unittest.mock import AsyncMock
-    from app.services.ai.memory.read_errors import LedgerReadError
-    from app.services.ai.memory.hypothesis_ledger import HypothesisUpdateConflict
-    ledger, facts, hyp = read_contract_evaluation
-    target = facts if phase.endswith('_fact') else ledger
-    db = await target._get_db()
-    original = db.execute
-    reads = 0
-    def execute(sql, args=()):
-        nonlocal reads
-        if sql.startswith('SELECT'):
-            if phase == 'list' and 'WHERE module' in sql:
-                raise OSError('PRIVATE_SENTINEL list')
-            if 'WHERE hypothesis_id' in sql:
-                reads += 1
-                if (phase == 'get' and reads == 1) or (phase in ('final_get', 'conflict_get') and reads == 2):
-                    raise OSError('PRIVATE_SENTINEL get')
-            if phase.endswith('_fact') and args == ('new' if phase == 'new_fact' else 'old',):
-                raise OSError('PRIVATE_SENTINEL fact')
-        return original(sql, args)
-    update = AsyncMock(wraps=ledger.update_status)
-    with monkeypatch.context() as patch:
-        patch.setattr(db, 'execute', execute)
-        if phase == 'conflict_get':
-            update.side_effect = HypothesisUpdateConflict('fixture concurrent update')
-        patch.setattr(ledger, 'update_status', update)
-        with pytest.raises(LedgerReadError) as failure:
-            await ledger.evaluate_module_hypotheses('api', 'new', strict=True)
-        assert 'PRIVATE_SENTINEL' not in str(failure.value)
-    stored = await ledger.get(hyp.hypothesis_id)
-    assert stored.status == (HypothesisStatus.CONFIRMED if phase == 'final_get' else HypothesisStatus.UNTESTED)
-    assert update.await_count == (1 if phase in ('final_get', 'conflict_get') else 0)
-
-
-@pytest.mark.asyncio
-async def test_ledger_read_contract_evaluation_keeps_prior_commits_without_replay(read_contract_evaluation, monkeypatch):
-    from unittest.mock import AsyncMock
-    from app.services.ai.memory.read_errors import LedgerReadError
-    ledger, _, hyp = read_contract_evaluation
-    await ledger.add(hyp.model_copy(update={'hypothesis_id': 'second'}))
-    db = await ledger._get_db()
-    await db.execute("UPDATE hypotheses SET updated_at='2000-01-01' WHERE hypothesis_id='second'")
-    await db.commit()
-    original = db.execute
-    def execute(sql, args=()):
-        if sql.startswith('SELECT') and 'WHERE hypothesis_id' in sql and args == ('second',):
-            raise OSError('PRIVATE_SENTINEL second')
-        return original(sql, args)
-    update = AsyncMock(wraps=ledger.update_status)
-    with monkeypatch.context() as patch:
-        patch.setattr(db, 'execute', execute)
-        patch.setattr(ledger, 'update_status', update)
-        with pytest.raises(LedgerReadError):
-            await ledger.evaluate_module_hypotheses('api', 'new', strict=True)
-    assert (await ledger.get('first')).status == HypothesisStatus.CONFIRMED
-    assert (await ledger.get('second')).status == HypothesisStatus.UNTESTED
-    update.assert_awaited_once()
+def _fact(key, p99, **changes):
+    """A run of project p in environment env with 5 threads: comparable with the others unless changed."""
+    values = dict(execution_id=key, module='api', version='v1', project_id='p', environment_fingerprint='env',
+                  load={'threads': 5, 'think_time_ms': 1000}, total_requests=10, percentiles={'p99': p99})
+    return FactSheet(**values | changes)
 
 
 @pytest.mark.asyncio
@@ -237,37 +165,21 @@ def sample_jtl():
 
 
 @pytest_asyncio.fixture
-async def temp_hypothesis_ledger():
-    # Use the project directory for temp files to avoid Windows Unicode path issues
-    # with aiosqlite (system temp may contain non-ASCII characters).
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False, dir=".") as f:
-        path = f.name
-    ledger = HypothesisLedger(db_path=path)
+async def temp_hypothesis_ledger(tmp_path):
+    ledger = HypothesisLedger(db_path=str(tmp_path / 'hypotheses.db'))
     try:
         yield ledger
     finally:
         await ledger.close()
-        for ext in ("", "-wal", "-shm"):
-            try:
-                os.unlink(path + ext)
-            except OSError:
-                pass
 
 
 @pytest_asyncio.fixture
-async def temp_fact_ledger():
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False, dir=".") as f:
-        path = f.name
-    ledger = FactLedger(db_path=path)
+async def temp_fact_ledger(tmp_path):
+    ledger = FactLedger(db_path=str(tmp_path / 'facts.db'))
     try:
         yield ledger
     finally:
         await ledger.close()
-        for ext in ("", "-wal", "-shm"):
-            try:
-                os.unlink(path + ext)
-            except OSError:
-                pass
 
 
 @pytest.mark.asyncio
@@ -321,8 +233,7 @@ async def test_automatic_evaluation_preserves_a_newer_decision(temp_hypothesis_l
     db = await ledger._get_db()
     await db.execute("UPDATE hypotheses SET updated_at = '2000-01-01T00:00:00' WHERE hypothesis_id = ?", (hid,))
     await db.commit()
-    facts = {key: FactSheet(execution_id=key, module='api', version='v1', context_scope='same',
-                           total_requests=10, percentiles={'p99': value}) for key, value in [('old', 100), ('new', 50)]}
+    facts = {key: _fact(key, value) for key, value in [('old', 100), ('new', 50)]}
     newer = None
 
     async def change_decision():
@@ -372,8 +283,7 @@ async def test_concurrent_evaluations_do_not_overwrite_the_first_decision(temp_h
     ledger = temp_hypothesis_ledger
     hid = await ledger.add(Hypothesis(hypothesis_id='', source_execution_id='old', module='api', version='v1',
         category=HypothesisCategory.RECOMMENDATION, statement='prediction', testable_prediction='p99 decrease'))
-    facts = {key: FactSheet(execution_id=key, module='api', version='v1', context_scope='same',
-                           total_requests=10, percentiles={'p99': value})
+    facts = {key: _fact(key, value)
              for key, value in [('old', 100), ('improved', 50), ('regressed', 150)]}
     monkeypatch.setattr(module.fact_ledger, 'load', AsyncMock(side_effect=lambda key: facts[key]))
     original_get, original_update = ledger.get, ledger.update_status
@@ -462,8 +372,7 @@ async def test_evaluation_write_failure_is_not_silently_reported_as_processed(te
     from unittest.mock import AsyncMock
     from app.models.schemas import FactSheet
     module = importlib.import_module('app.services.ai.memory.hypothesis_ledger')
-    facts = {key: FactSheet(execution_id=key, module='api', version='v1', test_type='baseline',
-                           total_requests=10, percentiles={'p99': value})
+    facts = {key: _fact(key, value)
              for key, value in [('old', 100), ('new', new_p99)]}
     monkeypatch.setattr(module.fact_ledger, 'load', AsyncMock(side_effect=lambda key: facts[key]))
     monkeypatch.setattr(temp_hypothesis_ledger, 'update_status', AsyncMock(return_value=False))
@@ -476,25 +385,23 @@ async def test_evaluation_write_failure_is_not_silently_reported_as_processed(te
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('case', ['no_old_samples', 'no_new_samples', 'negative_error', 'error_above_100',
-                                  'source_module', 'source_version', 'hypothesis_test_type', 'overflow_change',
+                                  'other_project', 'other_environment', 'other_load', 'overflow_change',
                                   'overflow_threshold'])
 async def test_unusable_facts_do_not_confirm_or_refute_predictions(temp_hypothesis_ledger, monkeypatch, case):
     import importlib
     from unittest.mock import AsyncMock
     from app.models.schemas import FactSheet
     module = importlib.import_module('app.services.ai.memory.hypothesis_ledger')
-    facts = {key: FactSheet(execution_id=key, module='api', version='v1', test_type='baseline',
-                           context_scope='same', total_requests=10, error_rate=0,
-                           percentiles={'p99': 100 if key == 'old' else 50}) for key in ('old', 'new')}
+    facts = {key: _fact(key, 100 if key == 'old' else 50, error_rate=0) for key in ('old', 'new')}
     prediction = 'error_rate below 1%'
     test_type = 'baseline'
     if case == 'no_old_samples': facts['old'].total_requests = 0
     elif case == 'no_new_samples': facts['new'].total_requests = 0
     elif case == 'negative_error': facts['new'].error_rate = -1
     elif case == 'error_above_100': facts['new'].error_rate = 101
-    elif case == 'source_module': facts['old'].module = 'other'
-    elif case == 'source_version': facts['old'].version = 'v0'
-    elif case == 'hypothesis_test_type': test_type = 'stress'
+    elif case == 'other_project': facts['old'].project_id = 'other'
+    elif case == 'other_environment': facts['new'].environment_fingerprint = 'elsewhere'
+    elif case == 'other_load': facts['new'].load = {'threads': 50, 'think_time_ms': 1000}
     elif case == 'overflow_change':
         prediction = 'p99 increase'
         facts['old'].percentiles['p99'] = 1e-308
@@ -563,25 +470,23 @@ async def test_hypothesis_cannot_verify_itself(temp_hypothesis_ledger, monkeypat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('prediction,old,new,scope', [
-    ('p99 should decrease by >20%', 100, 99, 'same'),
-    ('p99 should decrease', 100, 50, 'different'),
+@pytest.mark.parametrize('prediction,old,new,threads', [
+    ('p99 should decrease by >20%', 100, 99, 5),
+    ('p99 should decrease', 100, 50, 8),
 ])
-async def test_hypothesis_respects_threshold_and_context(temp_hypothesis_ledger, monkeypatch, prediction, old, new, scope):
-    from types import SimpleNamespace
+async def test_hypothesis_respects_threshold_and_context(temp_hypothesis_ledger, monkeypatch, prediction, old, new, threads):
     from unittest.mock import AsyncMock
     import importlib
     module = importlib.import_module('app.services.ai.memory.hypothesis_ledger')
-    facts = {key: SimpleNamespace(module='api', version='v1', context_scope=context, test_type='baseline',
-                                  total_requests=10, percentiles={'p99': value})
-             for key, context, value in [('old', 'same', old), ('new', scope, new)]}
+    facts = {'old': _fact('old', old), 'new': _fact('new', new, load={'threads': threads, 'think_time_ms': 1000})}
     monkeypatch.setattr(module.fact_ledger, 'load', AsyncMock(side_effect=lambda key: facts[key]))
     hyp = Hypothesis(hypothesis_id='', source_execution_id='old', module='api', version='v1',
                      statement='testable prediction', category=HypothesisCategory.RECOMMENDATION,
                      testable_prediction=prediction)
     hid = await temp_hypothesis_ledger.add(hyp)
     result = await temp_hypothesis_ledger.evaluate_against_facts(hid, 'new')
-    assert result.status == (HypothesisStatus.REFUTED if scope == 'same' else HypothesisStatus.UNTESTED)
+    # Another load is not the run a load-free prediction was about.
+    assert result.status == (HypothesisStatus.REFUTED if threads == 5 else HypothesisStatus.UNTESTED)
 
 
 @pytest.mark.asyncio
@@ -623,6 +528,7 @@ async def test_evaluate_hypothesis_against_new_fact(
         fact1 = fl.compute_from_jtl(
             sample_jtl, execution_id="exec-old", module="api", version="v1"
         )
+        fact1.project_id, fact1.environment_fingerprint, fact1.load = 'p', 'env', {'threads': 5}
         await fl.save(fact1)
 
         hyp = Hypothesis(
@@ -677,3 +583,71 @@ async def test_prompt_formatting(temp_hypothesis_ledger):
     assert "已记录的确认结果" in prompt and "不代表因果已证实" in prompt
     assert "未验证假设" in prompt
     assert "已记录的证伪结果" in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('threads, p95, status', [
+    (12, 300, HypothesisStatus.CONFIRMED),   # the stated load, and the request got 50% slower
+    (12, 210, HypothesisStatus.REFUTED),     # the stated load, but it hardly moved
+    (5, 300, HypothesisStatus.UNTESTED),     # not the load the prediction was about
+])
+async def test_a_structured_prediction_is_checked_on_the_run_it_names(temp_hypothesis_ledger, monkeypatch,
+                                                                       threads, p95, status):
+    import importlib
+    from unittest.mock import AsyncMock
+    module = importlib.import_module('app.services.ai.memory.hypothesis_ledger')
+    row = lambda value: {'GET /orders': {'count': 20, 'p95_response_time': value}}
+    facts = {'old': _fact('old', 100, per_label=row(200)),
+             'new': _fact('new', 100, per_label=row(p95), module='another-plan',
+                          load={'threads': threads, 'think_time_ms': 1000})}
+    monkeypatch.setattr(module.fact_ledger, 'load', AsyncMock(side_effect=lambda key: facts[key]))
+    hid = await temp_hypothesis_ledger.add(Hypothesis(
+        hypothesis_id='', source_execution_id='old', module='api', project_id='p', statement='orders queue up',
+        category=HypothesisCategory.BOTTLENECK,
+        prediction={'metric': 'p95', 'label': 'GET /orders', 'change': 'increase', 'value': 30, 'threads': 12}))
+    result = await temp_hypothesis_ledger.evaluate_project_hypotheses('p', 'new')
+    assert result[0].status == status
+    if status != HypothesisStatus.UNTESTED:
+        assert 'GET /orders' in result[0].verification_notes and '只检查了预测' in result[0].verification_notes
+
+
+@pytest.mark.asyncio
+async def test_project_listing_assignment_and_expiry(temp_hypothesis_ledger):
+    ledger = temp_hypothesis_ledger
+    for hid, project in (('mine', 'p'), ('legacy', ''), ('theirs', 'q')):
+        await ledger.add(Hypothesis(hypothesis_id=hid, source_execution_id=hid, module='api', project_id=project,
+                                    statement=f'{hid} statement'))
+    assert await ledger.assign_project('legacy', 'p') == 1
+    assert await ledger.assign_project('mine', 'q') == 0  # A known project is never overwritten.
+    assert {h.hypothesis_id for h in await ledger.list_for_project('p')} == {'mine', 'legacy'}
+    db = await ledger._get_db()
+    await db.execute("UPDATE hypotheses SET created_at = '2000-01-01T00:00:00' WHERE hypothesis_id = 'mine'")
+    await db.commit()
+    assert await ledger.expire('p', 30) == 1
+    expired = await ledger.get('mine')
+    assert expired.status == HypothesisStatus.DEPRECATED and '30 天' in expired.verification_notes
+    assert (await ledger.get('legacy')).status == HypothesisStatus.UNTESTED
+
+
+@pytest.mark.asyncio
+async def test_a_table_from_before_projects_gains_the_new_columns(tmp_path):
+    import sqlite3
+    path = tmp_path / 'old.db'
+    with sqlite3.connect(path) as db:
+        db.execute("""CREATE TABLE hypotheses (hypothesis_id TEXT PRIMARY KEY, source_execution_id TEXT NOT NULL,
+            module TEXT NOT NULL, version TEXT, test_type TEXT, category TEXT NOT NULL, statement TEXT NOT NULL,
+            confidence REAL NOT NULL DEFAULT 0.5, status TEXT NOT NULL DEFAULT 'untested',
+            supporting_facts TEXT NOT NULL DEFAULT '[]', testable_prediction TEXT, falsification_design TEXT,
+            verified_by_execution_id TEXT, refuted_by_execution_id TEXT, verification_notes TEXT,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+        db.execute("INSERT INTO hypotheses (hypothesis_id, source_execution_id, module, category, statement, "
+                   "created_at, updated_at) VALUES ('old', 'run', 'api', 'risk', 'kept', '2026-01-01', '2026-01-01')")
+    ledger = HypothesisLedger(db_path=str(path))
+    try:
+        kept = await ledger.get('old')
+        assert kept.statement == 'kept' and kept.project_id == '' and kept.prediction is None
+        await ledger.add(Hypothesis(hypothesis_id='new', source_execution_id='r2', module='api', project_id='p',
+                                    statement='new one', prediction={'metric': 'p95', 'change': 'below', 'value': 300}))
+        assert (await ledger.get('new')).prediction == {'metric': 'p95', 'change': 'below', 'value': 300}
+    finally:
+        await ledger.close()

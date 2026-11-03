@@ -2,7 +2,6 @@
 
 import os
 import asyncio
-import tempfile
 import pytest
 import pytest_asyncio
 
@@ -112,7 +111,6 @@ async def test_registered_question_end_to_end_from_jtl_to_a_checked_answer(regis
     analysis_mod = importlib.import_module('app.services.ai.agents.analysis_agent')
     monkeypatch.setattr(analysis_mod, 'fact_ledger', temp_ledger)
     monkeypatch.setattr(analysis_mod.analysis_context, 'fact_ledger', temp_ledger)
-    monkeypatch.setattr(analysis_mod.hypothesis_ledger, 'list_for_module', AsyncMock(return_value=[]))
     monkeypatch.setattr(execution_cache, 'get_execution', lambda _: None)
     adapter = Mock()
     adapter.prepare_chat_messages.side_effect = lambda messages, **kwargs: messages
@@ -404,7 +402,6 @@ async def test_an_answer_is_checked_only_when_the_model_gave_one(monkeypatch, ou
     agent.run = AsyncMock(return_value=SimpleNamespace(success=outcome != 'model_failed', output=output,
                                                      error='model down' if outcome == 'model_failed' else None,
                                                      plan=[], iterations=1))
-    monkeypatch.setattr(module.hypothesis_ledger, 'list_for_module', AsyncMock(return_value=[]))
     result = await agent.analyze_with_rag(module='api', user_task='why?')
     assert result['fact']['execution_id'] == 'fixture' and result['output'] == output
     if outcome == 'answered':
@@ -416,7 +413,7 @@ async def test_an_answer_is_checked_only_when_the_model_gave_one(monkeypatch, ou
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('phase', ['scope', 'facts', 'hypotheses', 'heuristics', 'rag_context', 'base_task'])
+@pytest.mark.parametrize('phase', ['scope', 'recall', 'heuristics', 'base_task'])
 @pytest.mark.parametrize('cancelled', [False, True])
 async def test_analysis_context_preparation_failure_stops_before_model_and_keeps_fact(monkeypatch, phase, cancelled):
     import importlib
@@ -429,14 +426,13 @@ async def test_analysis_context_preparation_failure_stops_before_model_and_keeps
     fact = FactSheet(execution_id='run', module='api', total_requests=42)
     agent._build_fact_sheet = AsyncMock(return_value=fact)
     agent.run = AsyncMock()
-    calls = {key: AsyncMock(return_value=value) for key, value in
-             [('scope', 'scope-a'), ('facts', []), ('hypotheses', [])]}
-    calls.update({key: Mock(return_value='context') for key in ['heuristics', 'rag_context', 'base_task']})
+    calls = {'scope': AsyncMock(return_value='scope-a'),
+             'recall': AsyncMock(return_value=module.analysis_context.Recall())}
+    calls.update({key: Mock(return_value='context') for key in ['heuristics', 'base_task']})
     monkeypatch.setattr(provenance, 'load_execution_scope', calls['scope'])
-    monkeypatch.setattr(module.fact_ledger, 'get_facts_for_module_version', calls['facts'])
-    monkeypatch.setattr(module.hypothesis_ledger, 'list_for_module', calls['hypotheses'])
+    monkeypatch.setattr('app.services.storage.store.get_execution', lambda execution_id: SimpleNamespace())
+    monkeypatch.setattr(module.analysis_context, 'recall', calls['recall'])
     monkeypatch.setattr(module, 'get_heuristics_prompt', calls['heuristics'])
-    agent._build_rag_context = calls['rag_context']
     agent._build_base_task = calls['base_task']
     calls[phase].side_effect = asyncio.CancelledError() if cancelled else OSError('private fixture detail')
     if cancelled:
@@ -448,28 +444,6 @@ async def test_analysis_context_preparation_failure_stops_before_model_and_keeps
         assert 'private fixture detail' not in result['error']
         assert result['fact']['execution_id'] == 'run' and result['fact']['total_requests'] == 42
     agent.run.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_analysis_retrieval_uses_verified_execution_scope(monkeypatch):
-    from types import SimpleNamespace
-    from unittest.mock import AsyncMock
-    import importlib
-    from app.models.schemas import FactSheet
-    module = importlib.import_module('app.services.ai.agents.analysis_agent')
-    provenance = importlib.import_module('app.services.ai.memory.provenance')
-    agent = object.__new__(module.AnalysisAgent)
-    current = FactSheet(execution_id='current', module='api', version='v1')
-    agent._build_fact_sheet = AsyncMock(return_value=current)
-    agent.run = AsyncMock(return_value=SimpleNamespace(success=False, output='', error=None, plan=[], iterations=0))
-    monkeypatch.setattr(provenance, 'load_execution_scope', AsyncMock(return_value='verified-scope'))
-    query = AsyncMock(return_value=[current, current.model_copy(update={'execution_id': 'previous'})])
-    hypotheses = AsyncMock(return_value=[])
-    monkeypatch.setattr(module.fact_ledger, 'get_facts_for_module_version', query)
-    monkeypatch.setattr(module.hypothesis_ledger, 'list_for_module', hypotheses)
-    await agent.analyze_with_rag(execution_id='current', module='api', version='v1')
-    query.assert_awaited_once_with('api', 'v1', limit=5, context_scope='verified-scope')
-    assert hypotheses.call_args.kwargs['source_execution_ids'] == ['previous']
 
 
 @pytest.mark.asyncio
@@ -607,21 +581,13 @@ def sample_jtl():
 
 
 @pytest_asyncio.fixture
-async def temp_ledger():
-    # Use the project directory for temp files to avoid Windows Unicode path issues
-    # with aiosqlite (system temp may contain non-ASCII characters).
-    with tempfile.NamedTemporaryFile(suffix=".db", delete=False, dir=".") as f:
-        path = f.name
-    ledger = FactLedger(db_path=path)
+async def temp_ledger(tmp_path):
+    # Interrupted runs used to leave tmp*.db files in the backend folder; tmp_path is cleaned by pytest.
+    ledger = FactLedger(db_path=str(tmp_path / 'facts.db'))
     try:
         yield ledger
     finally:
         await ledger.close()
-        for ext in ("", "-wal", "-shm"):
-            try:
-                os.unlink(path + ext)
-            except OSError:
-                pass
 
 
 def test_compute_from_jtl_matches_report_parser(sample_jtl):

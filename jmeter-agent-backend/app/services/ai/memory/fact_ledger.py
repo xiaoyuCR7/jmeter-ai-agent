@@ -301,6 +301,58 @@ class FactLedger:
             logger.warning('Skipping unreadable fact row: %s', type(error).__name__)
             return None
 
+    async def get_project_facts(self, project_id: str, limit: int = 50) -> list[FactSheet]:
+        """Newest runs of every plan in a project whose source JTL is still intact."""
+        if not project_id or limit <= 0:
+            return []
+        await self._ensure_table()
+        query = ("SELECT facts_json, jtl_hash, execution_id FROM fact_sheets "
+                 "WHERE json_valid(facts_json) AND json_extract(facts_json, '$.project_id') = ? "
+                 "ORDER BY computed_at DESC, execution_id DESC")
+        async with self._get_lock():
+            db = await self._get_db()
+            found = []
+            async with db.execute(query, (project_id,)) as cursor:
+                async for row in cursor:
+                    fact = await self._verified_row(row)
+                    if fact is not None:
+                        found.append(fact)
+                        if len(found) == limit:
+                            break
+            return found
+
+    async def count_project_facts(self, project_id: str) -> int:
+        await self._ensure_table()
+        async with self._get_lock():
+            db = await self._get_db()
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM fact_sheets WHERE json_valid(facts_json) "
+                "AND json_extract(facts_json, '$.project_id') = ?", (project_id,))
+            return (await cursor.fetchone())[0]
+
+    async def annotate(self, execution_id: str, *, only_missing: bool = False, **fields) -> bool:
+        """Add context recorded after the fact (project, environment, load); the measurements stay as they were.
+
+        ``only_missing`` leaves a fact that already has its context alone. True when it wrote something.
+        """
+        await self._ensure_table()
+        async with self._get_lock():
+            db = await self._get_db()
+            cursor = await db.execute('SELECT facts_json FROM fact_sheets WHERE execution_id = ?', (execution_id,))
+            row = await cursor.fetchone()
+            if not row:
+                return False
+            data = json.loads(row[0])
+            if only_missing:
+                fields = {key: value for key, value in fields.items() if not data.get(key)}
+            if all(data.get(key) == value for key, value in fields.items()):
+                return False
+            data.update(fields)
+            await db.execute('UPDATE fact_sheets SET facts_json = ? WHERE execution_id = ?',
+                             (json.dumps(data, ensure_ascii=False, default=str), execution_id))
+            await db.commit()
+            return True
+
     async def get_latest_fact(self, module: str, version: Optional[str] = None) -> Optional[FactSheet]:
         """Get the most recent fact for a module/version."""
         facts = await self.get_facts_for_module_version(module, version, limit=1)

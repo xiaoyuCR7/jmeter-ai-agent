@@ -122,7 +122,6 @@ def registered_agent(monkeypatch):
     agent._build_fact_sheet = AsyncMock(return_value=fact)
     monkeypatch.setattr(provenance, 'load_execution_scope', AsyncMock(return_value='scope'))
     monkeypatch.setattr(module.fact_ledger, 'get_facts_for_module_version', AsyncMock(return_value=[]))
-    monkeypatch.setattr(module.hypothesis_ledger, 'list_for_module', AsyncMock(return_value=[]))
     evidence = dict(execution_id='run-A', jtl_path='fixture.jtl', module='plan-A', version='unknown',
                     test_type='baseline', context_scope='scope')
     return agent, evidence, fact
@@ -143,7 +142,7 @@ async def test_registered_ledger_read_contract_does_not_change_legacy_failure_be
     monkeypatch.setattr(module.analysis_context, 'fact_ledger', ledger)
     result = await agent.analyze_with_rag(execution_id=evidence['execution_id'], module=evidence['module'],
                                           user_task='why?')
-    assert result['success'] and not result['rag']['history_found']
+    assert result['success'] and result['recall'] == {}
     assert agent.adapter.chat_with_tools_calls == 1
 
 

@@ -81,10 +81,8 @@ async def test_invalid_analysis_is_recorded_on_the_analysis_not_the_report(monke
     from app.services import post_run
     from app.models.schemas import TestExecutionStatus
     from app.models.schemas import ReportAnalysis
-    from app.services.ai.rag.archiver import rag_archiver
     analysis = ReportAnalysis(analysis_status='invalid', overall_assessment='Invalid model response', conclusion='Unknown')
     monkeypatch.setattr(post_run, 'TestAnalyzer', lambda **kwargs: SimpleNamespace(analyze=AsyncMock(return_value=analysis)))
-    monkeypatch.setattr(rag_archiver, 'archive_raw_report', lambda **kwargs: None)
     execution = SimpleNamespace(id='fixture', status=TestExecutionStatus.COMPLETED,
         summary=SimpleNamespace(model_dump=lambda: {'total_requests': 10}), test_plan_id='fixture',
         report_dir=str(tmp_path), error_message=None, log_path=None, report_status='running', report_error=None, context_snapshot={})
@@ -222,11 +220,10 @@ async def test_post_run_analysis_sees_the_report_evidence_and_records_its_verdic
     from app.models.schemas import DetailedTestSummary, ReportAnalysis
     from app.services import evidence as evidence_service
     from app.services import requirements as requirement_service
-    from app.services.ai.rag.archiver import rag_archiver
     analyze = AsyncMock(return_value=ReportAnalysis(overall_assessment='ok', conclusion='ok'))
     monkeypatch.setattr(post_run, 'TestAnalyzer', lambda **kwargs: SimpleNamespace(analyze=analyze))
-    monkeypatch.setattr(rag_archiver, 'archive_raw_report', lambda **kwargs: None)
-    monkeypatch.setattr(post_run, 'history_context', AsyncMock(return_value=('', [])))
+    from app.services.ai import analysis_context
+    monkeypatch.setattr(analysis_context, 'recall', AsyncMock(return_value=analysis_context.Recall()))
     summary = DetailedTestSummary(total_requests=10, avg_response_time=100, min_response_time=1, max_response_time=200,
                                   error_rate=0, throughput=5, received_bytes_per_sec=1, sent_bytes_per_sec=1)
     evaluation = requirement_service.RequirementEvaluation(verdict='fail', passed=1, failed=2, missing=0)
@@ -351,11 +348,9 @@ def test_workflow_agent_leaves_requirements_to_the_app():
 async def test_analysis_crash_is_recorded_on_the_analysis_and_announced(monkeypatch, tmp_path):
     from app.services import post_run
     from app.models.schemas import TestExecutionStatus
-    from app.services.ai.rag.archiver import rag_archiver
     from app.services.execution_lifecycle import execution_lifecycle
     monkeypatch.setattr(post_run, 'TestAnalyzer', lambda **kwargs: SimpleNamespace(
         analyze=AsyncMock(side_effect=TimeoutError('model timed out'))))
-    monkeypatch.setattr(rag_archiver, 'archive_raw_report', lambda **kwargs: None)
     monkeypatch.setattr(post_run, 'analysis_evidence', AsyncMock(return_value=('', None, [])))
     emit = AsyncMock()
     monkeypatch.setattr(execution_lifecycle, 'emit', emit)

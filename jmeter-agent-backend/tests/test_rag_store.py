@@ -234,12 +234,6 @@ def test_cold_rag_pagination_is_globally_newest_first_and_stats_are_persistent(s
     assert cold.get_stats()['by_module']['login-api'] == 5
 
 
-def test_legacy_manual_archive_does_not_claim_numeric_validation(store):
-    from app.services.ai.rag.archiver import RAGArchiver
-    doc_id = RAGArchiver(store).archive_analysis_conclusion(CONTENT * 8, 'api', 'v1')
-    assert store.get(doc_id).metadata['validated'] is False
-
-
 def test_filtered_rag_queries_choose_newest_before_limit(store):
     store.add(make_doc(doc_id='old', created_at='2026-01-01'))
     store.add(make_doc(doc_id='new', created_at='2026-08-27'))
@@ -306,18 +300,6 @@ class TestSearchIsolation:
         store.add(other); store.add(wanted)
         assert [doc.id for doc in store.hybrid_search(query_text='p99', limit=1,
                                                       context_scope='scope-one')] == ['scoped-wanted']
-
-    def test_archiver_does_not_overwrite_another_execution(self, store):
-        from app.services.ai.rag.archiver import RAGArchiver
-        archiver = RAGArchiver(store)
-        args = dict(doc_type='analysis_conclusion', module='api', version='v1', title='same title',
-                    content=CONTENT * 3, keywords=['p99'])
-        first = archiver._upsert(**args, source_execution_id='run-a')
-        second = archiver._upsert(**args, source_execution_id='run-b')
-        again = archiver._upsert(**args, source_execution_id='run-a')
-        assert first != second and again == first
-        assert store.count() == 2
-        assert store.get(first).source_execution_id == 'run-a'
 
     def test_cold_metadata_search_reads_persisted_rows(self, store):
         store.add(make_doc(doc_id='persisted'))

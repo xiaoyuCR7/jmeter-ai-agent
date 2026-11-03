@@ -480,6 +480,10 @@ class FactSheet(BaseModel):
     test_type: Optional[str] = Field(None, description="测试类型")
     jtl_path: Optional[str] = Field(None, description="原始 JTL 文件路径")
     context_scope: str = ""
+    # Where and under what load it ran, so runs of other plans and other loads can be compared.
+    project_id: str = ""
+    environment_fingerprint: str = ""
+    load: Dict[str, Any] = Field(default_factory=dict, description="实际线程组的总线程数、时长和 think time")
     jtl_sha256: str = ""
     schema_version: str = Field("1.0", description="事实 schema 版本")
     computed_at: datetime = Field(default_factory=datetime.now, description="计算时间")
@@ -530,6 +534,8 @@ class Hypothesis(BaseModel):
     # 结构化依赖与预测
     supporting_facts: List[str] = Field(default_factory=list, description="依赖的指标字段名")
     testable_prediction: Optional[str] = Field(None, description="可验证预测")
+    prediction: Optional[Dict[str, Any]] = Field(None, description="程序能检查的预测：指标、接口、方向、数值和运行条件")
+    project_id: str = Field("", description="所属项目；同项目其它计划的运行也能验证它")
     falsification_design: Optional[str] = Field(None, description="建议的证伪实验设计")
 
     # 验证追踪

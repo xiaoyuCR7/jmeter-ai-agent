@@ -69,6 +69,11 @@
         <el-tag v-if="history?.is_baseline" type="success" size="small">{{ L('本次即当前基线', 'This run is the baseline') }}</el-tag>
         <el-button v-else text size="small" :loading="promoting" @click="promote">{{ L('设为基线', 'Set as baseline') }}</el-button>
       </div>
+      <el-alert v-if="suggestBaseline" type="success" :closable="false" show-icon
+        :title="L('所有需求都达标，这个计划还没有基线', 'Every requirement passed and this plan has no baseline yet')"
+        :description="L('设为基线后，之后的运行会自动和它对比，发现回归。', 'Later runs will be compared with it, so regressions show up.')">
+        <el-button type="primary" size="small" :loading="promoting" @click="promote">{{ L('设为基线', 'Set as baseline') }}</el-button>
+      </el-alert>
       <p v-if="!history?.baseline && !history?.previous" class="muted">
         {{ L('还没有可对比的基线或同一测试计划的历史执行。', 'No baseline or earlier run of this test plan to compare with.') }}
       </p>
@@ -210,6 +215,8 @@ const planErrors = computed(() => (props.evidence?.plan_issues ?? []).filter(iss
 } as Record<string, string>)[issue.code] ?? issue.message))
 
 const history = computed(() => props.evidence?.baseline ?? null)
+// A run that met every requirement is the natural first baseline; without one, regressions go unnoticed.
+const suggestBaseline = computed(() => req.value?.verdict === 'pass' && !history.value?.baseline && !history.value?.is_baseline)
 const comparisons = computed(() => [
   ...(history.value?.baseline ? [{ kind: 'baseline', data: history.value.baseline }] : []),
   ...(history.value?.previous ? [{ kind: 'previous', data: history.value.previous }] : []),

@@ -146,7 +146,12 @@
             <div class="ai-grid">
               <div v-for="block in aiLists" :key="block.title" class="ai-block">
                 <h4>{{ block.title }}</h4>
-                <ul><li v-for="(item, i) in block.items" :key="i">{{ item }}</li></ul>
+                <ul>
+                  <li v-for="(item, i) in block.items" :key="i">
+                    {{ item }}
+                    <el-button class="keep" text size="small" @click="openLesson(item)">{{ L('存为经验', 'Save as lesson') }}</el-button>
+                  </li>
+                </ul>
               </div>
             </div>
             <div v-if="ai.timeline_analysis" class="ai-block">
@@ -160,6 +165,7 @@
             <div v-if="ai.conclusion" class="ai-block">
               <h4>{{ t('report.conclusion') }}</h4>
               <p>{{ ai.conclusion }}</p>
+              <el-button class="keep" text size="small" @click="openLesson(ai.conclusion)">{{ L('存为经验', 'Save as lesson') }}</el-button>
             </div>
           </section>
           <section v-else class="panel analysis-state">
@@ -173,7 +179,13 @@
           </section>
           <RunQuestions v-if="ai?.analysis_status === 'completed'" :execution-id="report.execution_id" :follow-ups="ai.follow_ups" />
         </el-tab-pane>
+
+        <el-tab-pane :label="L('经验与假设', 'Lessons')" name="memory" lazy>
+          <RunMemory :execution-id="report.execution_id" :refresh-key="lessonsSaved" @save-lesson="openLesson()" />
+        </el-tab-pane>
       </el-tabs>
+      <SaveLessonDialog ref="lessonDialog" :execution-id="report.execution_id" :labels="transactions.map(row => row.label)"
+        @saved="lessonsSaved++" />
     </template>
 
     <el-empty v-else-if="!loading" :description="t('report.notFound')" />
@@ -192,6 +204,8 @@ import VChart from 'vue-echarts'
 import { api } from '@/api'
 import EvidencePanel from '@/components/EvidencePanel.vue'
 import RunQuestions from '@/components/RunQuestions.vue'
+import RunMemory from '@/components/RunMemory.vue'
+import SaveLessonDialog from '@/components/SaveLessonDialog.vue'
 import { useI18n } from '@/composables/useI18n'
 import { formatDuration, formatMs, formatPct, formatTime, formatTps } from '@/utils/format'
 
@@ -219,6 +233,11 @@ const missingAnalysis = computed(() => {
   return L('这次运行还没有 AI 分析。', 'This run has no AI analysis yet.')
 })
 const reanalyzing = ref(false)
+const lessonDialog = ref<InstanceType<typeof SaveLessonDialog>>()
+const lessonsSaved = ref(0)
+// A finding names requests the way the report does, so those requests are preselected.
+const openLesson = (content = '') =>
+  lessonDialog.value?.open(content, transactions.value.map(row => row.label).filter(label => content.includes(label)))
 const POLL_MS = 4000
 let pollTimer: ReturnType<typeof setTimeout> | undefined
 let disposed = false
@@ -567,5 +586,8 @@ onUnmounted(() => {
   p, li { color: var(--app-text-secondary); line-height: 1.7; }
   ul, ol { margin: 0; padding-left: 20px; }
   &.lead p { color: var(--app-text); }
+  // Quiet until the reader is on that item, but always reachable by keyboard.
+  .keep { height: auto; margin-left: 4px; padding: 0 4px; font-size: 12px; opacity: .6; }
+  li:hover .keep, p:hover + .keep, .keep:hover, .keep:focus-visible { opacity: 1; }
 }
 </style>

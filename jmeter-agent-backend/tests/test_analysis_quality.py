@@ -307,52 +307,6 @@ def test_correlation_needs_enough_points(points, strong):
     assert result['metrics'][0]['corr_strong'] is strong and bool(result['findings']) is strong
 
 
-@pytest.mark.asyncio
-async def test_knowledge_is_included_only_when_people_archived_some():
-    from app.services.ai.agents.analysis_agent import AnalysisAgent
-    agent = AnalysisAgent.__new__(AnalysisAgent)
-    fact_sheet = fact().model_copy(update={'raw_summary': summary_of()})
-    calls = []
-
-    def retrieve(report, limit, module):
-        calls.append(module)
-        return {'similar_defects': [], 'known_issues': [1], 'module_standards': [], 'formatted_context': '已知问题 A'}
-    agent.retriever = SimpleNamespace(retrieve=retrieve)
-    text = await agent._knowledge_context(fact_sheet, 'Checkout')
-    assert '已知问题 A' in text and '不是本次测试的事实' in text and calls == ['Checkout']
-
-    agent.retriever = SimpleNamespace(retrieve=lambda *args: (_ for _ in ()).throw(OSError('store down')))
-    assert await agent._knowledge_context(fact_sheet, 'Checkout') == ''
-
-
-@pytest.mark.asyncio
-async def test_a_finished_run_joins_the_measured_history(monkeypatch, tmp_path):
-    from app.services import post_run
-    from app.services.ai import memory
-    from app.services.ai.memory import provenance
-    jtl = tmp_path / 'result.jtl'
-    jtl.write_text(HEADER + row(1000, 50), encoding='utf-8')
-    saved, evaluated = [], []
-
-    async def save(item):
-        saved.append(item)
-        return True
-
-    async def evaluate(module, execution_id):
-        evaluated.append((module, execution_id))
-
-    async def scope(execution_id):
-        return 'scope-1'
-    monkeypatch.setattr(memory.fact_ledger, 'save', save)
-    monkeypatch.setattr(memory.hypothesis_ledger, 'evaluate_module_hypotheses', evaluate)
-    monkeypatch.setattr(provenance, 'load_execution_scope', scope)
-    execution = SimpleNamespace(id='run-1', report_dir=str(tmp_path), test_plan_id='plan-1', summary=summary_of(), ai_analysis=None,
-                                context_snapshot={'test_config': {'test_type': 'baseline'}})
-    await post_run.record_facts(execution)
-    assert saved[0].module == 'plan-1' and saved[0].context_scope == 'scope-1' and saved[0].test_type == 'baseline'
-    assert evaluated == [('plan-1', 'run-1')]
-
-
 def test_reports_parsed_before_diagnostics_still_build_their_evidence():
     summary = summary_of(per_label={'A': {'count': 10, 'error_rate': 0, 'p95_response_time': 300}})
     run = run_diagnostics.build(summary)

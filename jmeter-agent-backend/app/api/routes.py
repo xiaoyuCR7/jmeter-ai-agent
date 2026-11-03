@@ -1300,10 +1300,6 @@ async def download_analysis_report(execution_id: str):
 # ===== RAG Knowledge Base Management =====
 
 from app.services.ai.rag.store import rag_store, RAGDocument, ALLOWED_DOC_TYPES
-from app.services.ai.rag.retriever import RAGRetriever
-from app.services.ai.rag.archiver import rag_archiver
-
-rag_retriever = RAGRetriever()
 
 
 @router.get("/rag/stats")

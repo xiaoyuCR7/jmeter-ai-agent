@@ -168,7 +168,7 @@ def test_every_built_in_tool_has_a_deliberate_risk():
 def test_analysis_agent_can_only_read():
     from unittest.mock import Mock
     from app.services.ai.agents.analysis_agent import AnalysisAgent
-    agent = AnalysisAgent(adapter=Mock(), retriever=Mock())
+    agent = AnalysisAgent(adapter=Mock())
     assert {tool.risk for tool in agent.tools.list_tools()} == {'read'}
     assert 'read_file' in agent.tools and 'write_file' not in agent.tools and 'execute_test' not in agent.tools
 

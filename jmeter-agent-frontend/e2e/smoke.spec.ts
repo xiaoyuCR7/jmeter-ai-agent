@@ -205,3 +205,76 @@ test('a failed analysis says why and can be written again', async ({ page }) => 
   await expect(page.getByText('The AI analysis is being written')).toBeVisible()
   expect(started).toBe(true)
 })
+
+test('a finding becomes a lesson and a hypothesis is settled by hand', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('jmeter-agent-lang', 'en'))
+  await mockApi(page)
+  const finding = 'GET /orders slows down first: its P95 reaches 250 ms at 10 users.'
+  await page.route(url => url.pathname.endsWith('/executions/run1/report'), route => route.fulfill({ json: {
+    ...report, summary: { ...report.summary, per_label: { 'GET /orders': { count: 50 }, 'POST /pay': { count: 20 } } },
+    ai_analysis: { ...report.ai_analysis, key_findings: [finding] },
+  } }))
+  const saved: any[] = []
+  const decided: any[] = []
+  const lesson = { id: 'l1', kind: 'known_issue', title: 'Orders queue at 10 users', content: finding, labels: ['GET /orders'],
+    status: 'active', cited_count: 0, needs_review: false }
+  const hypothesis = { id: 'h1', statement: 'The order lookup waits for a lock', category: 'bottleneck', status: 'untested',
+    prediction: 'Retry after the stock sync and P95 drops', checkable: false, notes: null }
+  await page.route(url => url.pathname.endsWith('/executions/run1/experiences'), route => {
+    saved.push(route.request().postDataJSON())
+    return route.fulfill({ json: lesson })
+  })
+  await page.route(url => url.pathname.endsWith('/executions/run1/memory'), route => route.fulfill({ json: {
+    labels: ['GET /orders', 'POST /pay'], hypotheses: [hypothesis], experiences: saved.length ? [lesson] : [] } }))
+  await page.route(url => url.pathname.endsWith('/hypotheses/h1'), route => {
+    decided.push(route.request().postDataJSON())
+    return route.fulfill({ json: { ...hypothesis, status: 'refuted', notes: '人工判定：no change after the sync' } })
+  })
+
+  await page.goto('/executions/run1')
+  await page.getByRole('tab', { name: 'AI analysis' }).click()
+  await page.getByRole('button', { name: 'Save as lesson' }).first().click()
+  const dialog = page.getByRole('dialog', { name: 'Save as a lesson' })
+  await dialog.getByPlaceholder(/One line/).fill('Orders queue at 10 users')
+  await expect(dialog.getByText('GET /orders')).toBeVisible()  // The finding names it, so it is preselected.
+  await dialog.getByRole('button', { name: 'Save lesson' }).click()
+  await expect(dialog).toBeHidden()
+  expect(saved).toEqual([{ kind: 'known_issue', title: 'Orders queue at 10 users', content: finding, labels: ['GET /orders'] }])
+
+  await page.getByRole('tab', { name: 'Lessons' }).click()
+  await expect(page.getByText('Orders queue at 10 users')).toBeVisible()
+  await expect(page.getByText('No program can check this')).toBeVisible()
+  await page.getByRole('button', { name: 'It did not hold' }).click()
+  const decision = page.getByRole('dialog', { name: 'Mark as not held' })
+  await decision.getByRole('textbox').fill('no change after the sync')
+  await decision.getByRole('button', { name: 'Save decision' }).click()
+  const panel = page.getByRole('tabpanel', { name: 'Lessons' })
+  await expect(panel.getByText('Did not hold', { exact: true })).toBeVisible()
+  await expect(panel.getByText('Prediction:')).toBeVisible()  // Decided: no longer asks for a decision.
+  expect(decided).toEqual([{ status: 'refuted', note: 'no change after the sync' }])
+})
+
+test('settings show whether memory is used and a retired lesson can come back', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('jmeter-agent-lang', 'en'))
+  await mockApi(page)
+  const restored: any[] = []
+  await page.route(url => url.pathname.endsWith('/memory/overview'), route => route.fulfill({ json: {
+    project_id: 'p1', runs: 15, hypotheses: { untested: 12, confirmed: 2, refuted: 1 }, checkable_open: 4,
+    experiences: {}, needs_review: 0, most_cited: [], recently_refuted: [
+      { id: 'h9', statement: 'Login is slow because of DNS', notes: 'P95 stayed at 1.2 s with DNS cached' }] } }))
+  await page.route(url => url.pathname.endsWith('/projects/p1/experiences'), route => route.fulfill({ json: [
+    { id: 'l2', kind: 'module_standard', title: 'Payments under 800 ms', labels: [], status: 'retired', cited_count: 3,
+      needs_review: false }] }))
+  await page.route(url => url.pathname.endsWith('/experiences/l2'), route => {
+    restored.push(route.request().postDataJSON())
+    return route.fulfill({ json: { id: 'l2', kind: 'module_standard', title: 'Payments under 800 ms', labels: [],
+      status: 'active', cited_count: 3, needs_review: false } })
+  })
+
+  await page.goto('/settings?tab=memory')
+  await expect(page.getByText('Open hypotheses, 4 checkable')).toBeVisible()
+  await expect(page.getByText('Login is slow because of DNS')).toBeVisible()
+  await page.getByRole('button', { name: 'Restore' }).click()
+  await expect(page.getByRole('button', { name: 'Retire' })).toBeVisible()
+  expect(restored).toEqual([{ status: 'active', reason: '' }])
+})

@@ -33,7 +33,6 @@ def completed(tmp_path, **overrides):
 @pytest.fixture
 def steps(monkeypatch):
     """Records which post-run steps ran."""
-    from app.services.ai.rag.archiver import rag_archiver
     ran = []
     async def analyze(execution, ai_model):
         ran.append(('analysis', ai_model))
@@ -41,21 +40,20 @@ def steps(monkeypatch):
         ran.append('facts')
     monkeypatch.setattr(post_run, '_write_analysis', analyze)
     monkeypatch.setattr(post_run, 'record_facts', record)
-    monkeypatch.setattr(rag_archiver, 'archive_raw_report', lambda **kwargs: ran.append('archive'))
     return ran
 
 
 @pytest.mark.asyncio
-async def test_a_finished_run_gets_its_analysis_archive_and_history(steps, tmp_path):
+async def test_a_finished_run_gets_its_analysis_and_history(steps, tmp_path):
     await post_run.finish_run(completed(tmp_path), 'model-a')
-    assert steps == [('analysis', 'model-a'), 'archive', 'facts']
+    assert steps == [('analysis', 'model-a'), 'facts']
 
 
 @pytest.mark.asyncio
 async def test_turning_analysis_off_keeps_the_measured_history(steps, tmp_path, monkeypatch):
     monkeypatch.setattr(settings, 'AUTO_ANALYSIS_ENABLED', False)
     await post_run.finish_run(completed(tmp_path))
-    assert steps == ['archive', 'facts']
+    assert steps == ['facts']
 
 
 @pytest.mark.asyncio
@@ -63,16 +61,6 @@ async def test_turning_analysis_off_keeps_the_measured_history(steps, tmp_path, 
 async def test_a_run_without_results_gets_no_post_run_work(steps, tmp_path, overrides):
     await post_run.finish_run(completed(tmp_path, **overrides))
     assert steps == []
-
-
-@pytest.mark.asyncio
-async def test_archiving_runs_off_the_event_loop(steps, tmp_path, monkeypatch):
-    import threading
-    from app.services.ai.rag.archiver import rag_archiver
-    seen = []
-    monkeypatch.setattr(rag_archiver, 'archive_raw_report', lambda **kwargs: seen.append(threading.current_thread()))
-    await post_run.finish_run(completed(tmp_path))
-    assert seen and seen[0] is not threading.current_thread()
 
 
 @pytest.mark.parametrize('decision', [SchedulerDecision.OVERLOADED, SchedulerDecision.WAIT])
@@ -117,25 +105,6 @@ def test_recent_runs_can_be_quoted_without_counting_as_wrong_about_this_one():
     assert '321.0' in text and '987.0' in text and '12.5' in text
     assert {321.0, 654.0, 987.0, 12.5, 1.5} <= set(analysis_context.fact_values([fact()]))
     assert analysis_context.format_recent_facts([]) == ''
-
-
-@pytest.mark.asyncio
-async def test_a_report_reads_history_and_knowledge(monkeypatch):
-    monkeypatch.setattr(analysis_context.fact_ledger, 'get_facts_for_module_version', AsyncMock(return_value=[fact()]))
-    monkeypatch.setattr('app.services.ai.memory.provenance.load_execution_scope', AsyncMock(return_value='scope'))
-    monkeypatch.setattr('app.services.ai.rag.retriever.RAGRetriever', lambda: SimpleNamespace(
-        retrieve=lambda *args: {'similar_defects': [], 'known_issues': ['x'], 'module_standards': [],
-                                'formatted_context': '登录接口有已知慢查询'}))
-    text, numbers = await post_run.history_context(completed(None))
-    assert '最近的运行' in text and '登录接口有已知慢查询' in text and 987.0 in numbers
-
-
-@pytest.mark.asyncio
-async def test_a_report_is_still_written_when_history_is_unreadable(monkeypatch):
-    monkeypatch.setattr('app.services.ai.memory.provenance.load_execution_scope', AsyncMock(side_effect=OSError('down')))
-    monkeypatch.setattr('app.services.ai.rag.retriever.RAGRetriever', lambda: SimpleNamespace(
-        retrieve=lambda *args: (_ for _ in ()).throw(OSError('down'))))
-    assert await post_run.history_context(completed(None)) == ('', [])
 
 
 @pytest.mark.parametrize('error, log, code', [

@@ -80,6 +80,12 @@ async def lifespan(app: FastAPI):
         cleanup.push_async_callback(execution_lifecycle.shutdown)
         cleanup.push_async_callback(post_run.stop_reanalyses)
         await post_run.recover_interrupted()
+        # Older runs join project history in the background; reading their plans can take a while.
+        backfill = _asyncio.create_task(post_run.backfill_memory())
+        async def stop_backfill():
+            backfill.cancel()
+            await _asyncio.gather(backfill, return_exceptions=True)
+        cleanup.push_async_callback(stop_backfill)
 
         await init_mcp_server()
 
@@ -149,6 +155,10 @@ app.include_router(data_router, prefix="/api/v1")
 # MCP Server routes
 from app.api.mcp_routes import router as mcp_router
 app.include_router(mcp_router, prefix="/api/v1")
+
+# Hypotheses, lessons and the memory overview
+from app.api.memory_routes import router as memory_router
+app.include_router(memory_router, prefix="/api/v1")
 
 # Static files for reports
 class ReportFiles(StaticFiles):

@@ -2,6 +2,15 @@ import axios from 'axios'
 import { withScriptApproval } from './scriptApproval'
 import { baseURL, requestAccess } from './session'
 
+export type LessonKind = 'known_issue' | 'defect_retrospective' | 'module_standard'
+
+export interface LessonInput {
+  kind: LessonKind
+  title: string
+  content: string
+  labels: string[]
+}
+
 export type RequirementMetric = 'avg_response_time' | 'p90' | 'p95' | 'p99' | 'max_response_time' | 'error_rate' | 'throughput'
 export type RequirementOperator = 'lte' | 'lt' | 'gte' | 'gt'
 
@@ -281,6 +290,17 @@ export const api = {
   askAboutRun: (executionId: string, question: string) =>
     instance.post(`/executions/${encodeURIComponent(executionId)}/questions`, { question }, { timeout: 300000 }),
   reanalyzeRun: (executionId: string) => instance.post(`/executions/${encodeURIComponent(executionId)}/analysis`),
+
+  // What the agent remembers: hypotheses, lessons people saved, and how much of it is used
+  getRunMemory: (executionId: string) => instance.get(`/executions/${encodeURIComponent(executionId)}/memory`),
+  saveLesson: (executionId: string, data: LessonInput) =>
+    instance.post(`/executions/${encodeURIComponent(executionId)}/experiences`, data),
+  getProjectLessons: (projectId: string) => instance.get(`/projects/${encodeURIComponent(projectId)}/experiences`),
+  setLessonStatus: (id: string, status: 'active' | 'retired', reason = '') =>
+    instance.patch(`/experiences/${encodeURIComponent(id)}`, { status, reason }),
+  decideHypothesis: (id: string, status: 'confirmed' | 'refuted' | 'deprecated', note = '') =>
+    instance.patch(`/hypotheses/${encodeURIComponent(id)}`, { status, note }),
+  getMemoryOverview: (projectId: string) => instance.get('/memory/overview', { params: { project_id: projectId } }),
 
   runAIWorkflowStream: (data: any) => {
     const lang = currentLang()

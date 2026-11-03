@@ -3,7 +3,8 @@
 Flow:
 1. Compute deterministic FactSheet from JTL (ground truth).
 2. Retrieve historical facts + confirmed/untested hypotheses + heuristics.
-3. Build the task: fact sheet, evidence, history and knowledge, then the question.
+3. Build the task: fact sheet, evidence, what is remembered about the run (the same recall
+   the report used), then the question.
 4. Run the LLM, which may look further with read-only tools.
 5. Validate all numeric claims in the answer against the FactSheet and evidence.
 """
@@ -24,9 +25,8 @@ from app.services.ai.agent.base import BaseAgent
 from app.services.ai.agent.types import AgentEvent, AgentResult, AgentState
 from app.services.ai.agent.tool_registry import ToolRegistry
 from app.services.ai.agent.tools import get_all_builtin_tools
-from app.services.ai.rag.retriever import RAGRetriever
 from app.services.ai import analysis_context
-from app.services.ai.memory import fact_ledger, hypothesis_ledger, fact_validator, get_heuristics_prompt
+from app.services.ai.memory import fact_ledger, fact_validator, get_heuristics_prompt
 from app.models.schemas import FactSheet, DetailedTestSummary
 from app.services.jmeter.report_parser import ReportParser
 from app.core.config import settings
@@ -88,7 +88,6 @@ class AnalysisAgent(BaseAgent):
         self,
         adapter: BaseAIAdapter,
         tools: Optional[ToolRegistry] = None,
-        retriever: Optional[RAGRetriever] = None,
     ):
         if tools is None:
             # Analysis reads evidence; nothing it finds in a report may change or run anything.
@@ -102,7 +101,6 @@ class AnalysisAgent(BaseAgent):
             system_prompt=ANALYSIS_SYSTEM_PROMPT,
         )
 
-        self.retriever = retriever or RAGRetriever()
         self._analysis_active = False
         self._analysis_task: Optional[asyncio.Task] = None
 
@@ -203,8 +201,7 @@ class AnalysisAgent(BaseAgent):
             analysis = await self.analyze_with_rag(
                 jtl_path=evidence['jtl_path'], execution_id=evidence['execution_id'],
                 module=evidence['module'], version=evidence['version'], test_type=evidence['test_type'],
-                user_task=task, _runner=run_core, _expected_scope=evidence['context_scope'], _strict_reads=True,
-                _knowledge_module=evidence.get('plan_name'))
+                user_task=task, _runner=run_core, _expected_scope=evidence['context_scope'])
             analysis['execution_id'] = evidence['execution_id']
             for key in ('output', 'steps', 'iterations'):
                 analysis.pop(key, None)  # Already carried by the outer AgentResult.
@@ -241,8 +238,6 @@ class AnalysisAgent(BaseAgent):
         *, user_task: Optional[str] = None,
         _runner: Optional[Callable[[str], Awaitable[AgentResult]]] = None,
         _expected_scope: Optional[str] = None,
-        _strict_reads: bool = False,
-        _knowledge_module: Optional[str] = None,
     ) -> dict:
         """Answer ``user_task`` from the run's fact sheet, evidence and history, then check its numbers."""
         if not module:
@@ -252,7 +247,6 @@ class AnalysisAgent(BaseAgent):
             }
 
         exec_ref = execution_id or jtl_path or "当前测试"
-        read_options = {'strict': True} if _strict_reads else {}
 
         # Step 1: Build deterministic FactSheet
         try:
@@ -277,25 +271,17 @@ class AnalysisAgent(BaseAgent):
                     raise ValueError('Execution scope changed during preparation')
                 if fact.total_requests <= 0:
                     raise ValueError('JTL contains no usable samples')
-            historical_facts = await analysis_context.recent_facts(
-                module, version, fact.context_scope, fact.execution_id, **read_options)
-            historical_hypotheses = await hypothesis_ledger.list_for_module(
-                module, version, limit=20, source_execution_ids=[item.execution_id for item in historical_facts],
-                **read_options)
+            from app.services.storage import store
+            execution = store.get_execution(execution_id) if execution_id else None
+            remembered = await analysis_context.recall(execution) if execution else analysis_context.Recall()
             heuristics_prompt = get_heuristics_prompt()
-
-            rag_context = self._build_rag_context(
-                fact=fact,
-                historical_facts=historical_facts,
-                historical_hypotheses=historical_hypotheses,
-            )
 
             # Step 3: Build task. Deterministic evidence (requirements, baseline,
             # server metrics) is computed here, never left to the model.
             evidence = await self._collect_evidence(execution_id, fact)
             base_task = self._build_base_task(exec_ref, fact, heuristics_prompt, evidence)
-            knowledge = await self._knowledge_context(fact, _knowledge_module or module)
-            task = FOLLOW_UP_TASK.format(base_task=base_task, history=rag_context + knowledge, question=user_task)
+            task = FOLLOW_UP_TASK.format(base_task=base_task, history=remembered.text.strip() or '（没有相关历史）',
+                                         question=user_task)
         except LedgerReadError:
             return {'success': False, 'error': 'Historical data read failed; analysis stopped',
                     'phase': 'history', 'error_code': 'ledger_read_failed', 'fact': fact.model_dump()}
@@ -314,7 +300,7 @@ class AnalysisAgent(BaseAgent):
             error = 'The model did not answer'
         elif result.success:
             from app.services.evidence import comparison_values
-            quotable = (*comparison_values(evidence), *analysis_context.fact_values(historical_facts))
+            quotable = (*comparison_values(evidence), *remembered.numbers)
             validation = fact_validator.validate(result.output, fact, quotable)
 
         return {
@@ -326,11 +312,7 @@ class AnalysisAgent(BaseAgent):
             "fact": fact.model_dump() if fact else None,
             "evidence": evidence.model_dump() if evidence else None,
             "validation": validation.model_dump() if validation else None,
-            "rag": {
-                "history_found": bool(historical_facts or historical_hypotheses),
-                "historical_facts_count": len(historical_facts),
-                "historical_hypotheses_count": len(historical_hypotheses),
-            },
+            "recall": remembered.counts,
         }
 
     # === Fact building ===
@@ -432,31 +414,3 @@ class AnalysisAgent(BaseAgent):
             parts.append("\n" + format_for_prompt(evidence))
         return "\n".join(parts)
 
-    async def _knowledge_context(self, fact: FactSheet, module: str) -> str:
-        if fact.raw_summary is None:
-            return ''
-        return await analysis_context.knowledge_context(self.retriever, fact.raw_summary.model_dump(), module)
-
-    def _build_rag_context(
-        self,
-        fact: FactSheet,
-        historical_facts: list[FactSheet],
-        historical_hypotheses: list,
-    ) -> str:
-        """Build historical context separating facts from hypotheses."""
-        from app.services.ai.memory.hypothesis_ledger import HypothesisLedger
-
-        parts = ["## 本次测试事实\n"]
-        parts.append(f"- 模块: {fact.module}, 版本: {fact.version}, 测试类型: {fact.test_type}")
-        parts.append(f"- 总请求数: {fact.total_requests}, TPS: {fact.throughput}, 错误率: {fact.error_rate}%")
-        parts.append(f"- p99: {fact.percentiles.get('p99', 'N/A')}ms, p95: {fact.percentiles.get('p95', 'N/A')}ms")
-        parts.append("")
-
-        if historical_facts:
-            parts.append(analysis_context.format_recent_facts(historical_facts))
-            parts.append("")
-
-        hypothesis_context = HypothesisLedger.format_for_prompt(historical_hypotheses)
-        parts.append(hypothesis_context)
-
-        return "\n".join(parts)

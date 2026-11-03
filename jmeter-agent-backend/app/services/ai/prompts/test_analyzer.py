@@ -56,6 +56,8 @@ def build_analysis_prompt(summary_data: dict, test_config: dict, test_type: str,
                   for row in errors[:10]]
     data = {
         'test_type': str(test_type)[:80],
+        # Exact request names, so a prediction about one request names it the way the next run will.
+        'requests': [str(label)[:160] for label in list(summary_data.get('per_label') or {})[:40]],
         'configured_load': {key: finite(test_config.get(key)) for key in
                             ('concurrent_users', 'duration_seconds', 'ramp_up_seconds', 'target_rps')},
         'measured_summary': {key: finite(summary_data.get(key)) for key in
@@ -81,5 +83,12 @@ def build_analysis_prompt(summary_data: dict, test_config: dict, test_type: str,
             '每条写清做什么、怎么验证，不虚构参数调整值），risk_areas（字符串列表，最多 3 条），'
             'limitations（字符串列表，最多 3 条，这次分析缺什么证据，其它字段不再提），'
             'hypotheses（对象列表，最多 3 条，每条 {"statement":"假设内容","category":"bottleneck|root_cause|recommendation|risk",'
-            '"testable_prediction":"下次运行能验证的预测，能量化时写成 p99 should decrease by >20% 这样的格式"}），'
+            '"testable_prediction":"下次运行能验证的预测，一句话",'
+            '"prediction":{"metric":"p95|p99|avg|error_rate|throughput","label":"requests 里的接口名，整体指标时省略",'
+            '"change":"decrease|increase|below|above","value":数字（decrease/increase 是变化百分比，below/above 是阈值，'
+            '单位同实测：毫秒、百分比、每秒请求数）,"threads":验证时的总线程数（负载不变时省略）,'
+            '"after":"验证前必须先做的改动，例如加连接预热、调大连接池（只改线程数或原样重跑时省略）"}}；'
+            '只有能用一次运行的数字判定时才写 prediction，否则省略它；'
+            '历史假设里仍未验证、这次数据也没有带来新信息的，不要换个说法再写一遍；'
+            '这次的数据修正或细化了某条未验证的历史假设时，照写新的一条并加 "replaces":"那条的编号"，旧的会被它取代），'
             'conclusion（字符串，一两句）。同一事实只在一个字段里写一次。')

@@ -7,7 +7,8 @@ Each interpretation (bottleneck, root cause, recommendation) is a hypothesis wit
 - supporting facts (metric field references)
 - testable prediction + falsification design
 
-Subsequent executions automatically evaluate predictions and update status.
+Later runs of the same project check structured predictions and update status. A prediction
+that held says only that the numbers moved as predicted; the explanation stays a hypothesis.
 """
 
 import os
@@ -15,7 +16,7 @@ import uuid
 import json
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 from fastapi import HTTPException
 
@@ -23,10 +24,12 @@ from app.core.config import settings
 from app.models.schemas import (
     Hypothesis, HypothesisStatus, HypothesisCategory, FactSheet,
 )
+from app.services.ai.memory import prediction as predictions
 from app.services.ai.memory.fact_ledger import fact_ledger
 from app.services.ai.memory.read_errors import ledger_read_boundary
 
 logger = logging.getLogger(__name__)
+REF_LENGTH = 8  # Characters of a hypothesis id a prompt shows and a report quotes back.
 
 
 class HypothesisUpdateConflict(RuntimeError):
@@ -98,8 +101,20 @@ class HypothesisLedger:
                     refuted_by_execution_id TEXT,
                     verification_notes TEXT,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    project_id TEXT NOT NULL DEFAULT '',
+                    prediction_json TEXT
                 )
+            """)
+            # Tables from before projects and structured predictions get the columns at the end.
+            columns = {row[1] async for row in await db.execute('PRAGMA table_info(hypotheses)')}
+            if 'project_id' not in columns:
+                await db.execute("ALTER TABLE hypotheses ADD COLUMN project_id TEXT NOT NULL DEFAULT ''")
+            if 'prediction_json' not in columns:
+                await db.execute('ALTER TABLE hypotheses ADD COLUMN prediction_json TEXT')
+            await db.execute("""
+                CREATE INDEX IF NOT EXISTS idx_hyp_project
+                ON hypotheses(project_id, status)
             """)
             await db.execute("""
                 CREATE INDEX IF NOT EXISTS idx_hyp_module_version
@@ -135,6 +150,8 @@ class HypothesisLedger:
             verification_notes=row[14] or None,
             created_at=datetime.fromisoformat(row[15]),
             updated_at=datetime.fromisoformat(row[16]),
+            project_id=row[17] if len(row) > 17 else '',
+            prediction=json.loads(row[18]) if len(row) > 18 and row[18] else None,
         )
 
     async def add(
@@ -156,7 +173,8 @@ class HypothesisLedger:
             json.dumps(hypothesis.supporting_facts, ensure_ascii=False),
             hypothesis.testable_prediction, hypothesis.falsification_design,
             hypothesis.verified_by_execution_id, hypothesis.refuted_by_execution_id,
-            hypothesis.verification_notes, now, now,
+            hypothesis.verification_notes, now, now, hypothesis.project_id,
+            json.dumps(hypothesis.prediction, ensure_ascii=False) if hypothesis.prediction else None,
         )
         conflict_clause = ' ON CONFLICT(hypothesis_id) DO NOTHING' if if_absent else ''
         await self._ensure_table()
@@ -175,8 +193,8 @@ class HypothesisLedger:
                         category, statement, confidence, status, supporting_facts,
                         testable_prediction, falsification_design,
                         verified_by_execution_id, refuted_by_execution_id,
-                        verification_notes, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""" + conflict_clause,
+                        verification_notes, created_at, updated_at, project_id, prediction_json)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""" + conflict_clause,
                     values,
                 )
                 await db.commit()
@@ -344,103 +362,77 @@ class HypothesisLedger:
                     logger.error(f"Failed to list hypotheses for {module}: {e}")
                     return []
 
+    async def list_for_project(
+        self,
+        project_id: str,
+        status: Optional[HypothesisStatus] = None,
+        limit: int = 50,
+    ) -> list[Hypothesis]:
+        """Hypotheses from every plan of a project, newest first."""
+        if not project_id or limit <= 0:
+            return []
+        await self._ensure_table()
+        query = 'SELECT * FROM hypotheses WHERE project_id = ?'
+        params: list = [project_id]
+        if status:
+            query += ' AND status = ?'
+            params.append(status.value)
+        query += ' ORDER BY updated_at DESC, hypothesis_id DESC LIMIT ?'
+        params.append(limit)
+        async with self._get_lock():
+            db = await self._get_db()
+            found = []
+            async with db.execute(query, tuple(params)) as cursor:
+                async for row in cursor:
+                    try:
+                        found.append(self._row_to_hypothesis(row))
+                    except (ValueError, TypeError) as error:
+                        logger.warning('Skipping malformed hypothesis row: %s', type(error).__name__)
+            return found
+
+    async def assign_project(self, source_execution_id: str, project_id: str) -> int:
+        """Give hypotheses recorded before projects were tracked the project of the run they came from."""
+        await self._ensure_table()
+        async with self._get_lock():
+            db = await self._get_db()
+            cursor = await db.execute(
+                "UPDATE hypotheses SET project_id = ? WHERE source_execution_id = ? AND project_id = ''",
+                (project_id, source_execution_id))
+            await db.commit()
+            return cursor.rowcount
+
     async def evaluate_against_facts(
         self,
         hypothesis_id: str,
         new_execution_id: str,
         *, strict: bool = False,
     ) -> Optional[Hypothesis]:
-        """Evaluate a hypothesis against a new execution's FactSheet.
+        """Check a hypothesis's prediction against a new run, when that run is the one it was about.
 
-        This is intentionally simple for now: if the new fact is for the same
-        module/version and the hypothesis has a testable prediction, we check
-        whether the prediction's direction holds.
-
-        In the future, this can call an LLM to interpret the prediction against
-        the new facts, but the goal is to keep the barrier high for confirming
-        a hypothesis.
+        Only the prediction is checked, whatever the category: the notes say so, and the prompt
+        presents a prediction that held as such, not as a proven cause.
         """
         read_options = {'strict': True} if strict else {}
         hyp = await self.get(hypothesis_id, **read_options)
-        if not hyp or hyp.status != HypothesisStatus.UNTESTED or not hyp.testable_prediction:
+        if not hyp or hyp.status != HypothesisStatus.UNTESTED or hyp.source_execution_id == new_execution_id:
             return hyp
-        if hyp.source_execution_id == new_execution_id:
-            return hyp
-
+        expected = hyp.prediction or predictions.from_text(hyp.testable_prediction)
+        if not predictions.checkable(expected):
+            return hyp  # Not checkable by a program; the user can decide it on the report page.
         new_fact = await fact_ledger.load(new_execution_id, **read_options)
-        if not new_fact:
+        source = await fact_ledger.load(hyp.source_execution_id, **read_options)
+        if not new_fact or not source:
             return hyp
-
-        # Only evaluate if same module/version
-        if hyp.module != new_fact.module or (hyp.version and hyp.version != new_fact.version):
+        outcome = predictions.check(expected, source, new_fact)
+        if outcome is None:
             return hyp
-
-        prev = await fact_ledger.load(hyp.source_execution_id, **read_options)
-        if not prev or getattr(prev, 'context_scope', '') != getattr(new_fact, 'context_scope', ''):
-            return hyp
-        if prev.module != new_fact.module or prev.version != new_fact.version:
-            return hyp
-        if getattr(prev, 'test_type', None) != getattr(new_fact, 'test_type', None):
-            return hyp
-        if hyp.test_type and hyp.test_type != new_fact.test_type:
-            return hyp
-        if getattr(prev, 'total_requests', 0) <= 0 or getattr(new_fact, 'total_requests', 0) <= 0:
-            return hyp  # Default zero metrics are not measurements from a test.
-        # Matching a metric cannot establish a root cause or an intervention.
-        if hyp.category in (HypothesisCategory.ROOT_CAUSE, HypothesisCategory.BOTTLENECK):
-            return hyp
-
-        # Simple keyword-based checks on the prediction
-        prediction = hyp.testable_prediction.lower()
-        import re
-        import math
-        directional = re.fullmatch(
-            r'(p99|throughput|tps|吞吐量)\s*(?:should\s*)?(decrease|下降|降低|increase|提升|增加)'
-            r'(?:\s*(?:by\s*)?(>=|>|至少|超过)?\s*(\d+(?:\.\d+)?)%)?', prediction.strip())
-        error_bound = re.fullmatch(
-            r'(?:error_rate|错误率)\s*(?:should\s*)?(?:drop\s*)?(?:below|低于)\s*(\d+(?:\.\d+)?)%',
-            prediction.strip())
-        if not directional and not error_bound:
-            return hyp  # Unsupported/conditional predictions require an explicit experiment.
-        notes = f"Evaluated against execution {new_execution_id}. "
-
-        confirmed = None
-        # Examples of supported simple predictions:
-        # - "p99 should decrease by >20%"
-        # - "error_rate should drop below 1%"
-        # - "throughput should increase"
-        if directional:
-            # Need a previous fact to compare
-            metric, direction, operator, threshold = directional.groups()
-            old_value = prev.percentiles.get('p99') if metric == 'p99' else prev.throughput
-            new_value = new_fact.percentiles.get('p99') if metric == 'p99' else new_fact.throughput
-            if (old_value is None or new_value is None or old_value <= 0 or new_value < 0
-                    or not math.isfinite(old_value) or not math.isfinite(new_value)):
-                return hyp
-            delta = (new_value - old_value) / old_value * 100
-            if direction in ('decrease', '下降', '降低'):
-                delta = -delta
-            required = float(threshold or 0)
-            if not math.isfinite(delta) or not math.isfinite(required):
-                return hyp
-            confirmed = delta >= required if operator in ('>=', '至少') else delta > required
-            notes += f'Only the metric prediction was checked: {metric} {old_value} -> {new_value}; change={delta:.3f}%.'
-
-        elif error_bound and math.isfinite(new_fact.error_rate) and 0 <= new_fact.error_rate <= 100:
-            threshold = float(error_bound.group(1))
-            if not 0 <= threshold <= 100:
-                return hyp
-            confirmed = new_fact.error_rate < threshold
-            notes += f'Only the metric prediction was checked: error_rate={new_fact.error_rate}%, threshold={threshold}%.'
-
-        if confirmed is None:
-            return hyp
+        held, notes = outcome
         try:
             saved = await self.update_status(
                 hypothesis_id,
-                HypothesisStatus.CONFIRMED if confirmed else HypothesisStatus.REFUTED,
-                verified_by=new_execution_id if confirmed else None,
-                refuted_by=None if confirmed else new_execution_id,
+                HypothesisStatus.CONFIRMED if held else HypothesisStatus.REFUTED,
+                verified_by=new_execution_id if held else None,
+                refuted_by=None if held else new_execution_id,
                 notes=notes,
                 expected_status=HypothesisStatus.UNTESTED,
                 expected_updated_at=hyp.updated_at,
@@ -450,24 +442,31 @@ class HypothesisLedger:
             return await self.get(hypothesis_id, **read_options)
         if not saved:
             raise RuntimeError(f'Failed to persist hypothesis evaluation for {hypothesis_id}')
-
         return await self.get(hypothesis_id, **read_options)
 
-    async def evaluate_module_hypotheses(
-        self,
-        module: str,
-        new_execution_id: str,
-        *, strict: bool = False,
-    ) -> list[Hypothesis]:
-        """Evaluate all untested hypotheses for a module against a new execution."""
-        read_options = {'strict': True} if strict else {}
-        untested = await self.list_for_module(module, status=HypothesisStatus.UNTESTED, **read_options)
+    async def evaluate_project_hypotheses(self, project_id: str, new_execution_id: str) -> list[Hypothesis]:
+        """Check every open hypothesis of the project against a new run; any plan's run may answer one."""
         results = []
-        for hyp in untested:
-            updated = await self.evaluate_against_facts(hyp.hypothesis_id, new_execution_id, **read_options)
+        for hyp in await self.list_for_project(project_id, status=HypothesisStatus.UNTESTED, limit=200):
+            updated = await self.evaluate_against_facts(hyp.hypothesis_id, new_execution_id)
             if updated:
                 results.append(updated)
         return results
+
+    async def expire(self, project_id: str, max_age_days: int) -> int:
+        """Open hypotheses no run has answered in ``max_age_days`` stop reaching the prompt."""
+        cutoff = (datetime.now() - timedelta(days=max_age_days)).isoformat()
+        await self._ensure_table()
+        async with self._get_lock():
+            db = await self._get_db()
+            cursor = await db.execute(
+                "UPDATE hypotheses SET status = ?, updated_at = ?, verification_notes = ? "
+                "WHERE project_id = ? AND status = ? AND created_at < ?",
+                (HypothesisStatus.DEPRECATED.value, datetime.now().isoformat(),
+                 f'超过 {max_age_days} 天没有可比的运行，已过期', project_id,
+                 HypothesisStatus.UNTESTED.value, cutoff))
+            await db.commit()
+            return cursor.rowcount
 
     @staticmethod
     def format_for_prompt(
@@ -493,9 +492,12 @@ class HypothesisLedger:
         if untested:
             parts.append("### 未验证假设（仅供参考，不可直接当作事实引用）")
             for h in untested:
-                parts.append(f"- [{h.category.value}] {h.statement} (来源: {h.source_execution_id})")
-                if h.testable_prediction:
-                    parts.append(f"  · 可验证预测: {h.testable_prediction}")
+                # The number lets a report say which open hypothesis it restates, so the old one is retired.
+                parts.append(f"- [{h.category.value}] 编号 {h.hypothesis_id[:REF_LENGTH]}：{h.statement} "
+                             f"(来源: {h.source_execution_id})")
+                expected = predictions.describe(h.prediction) or h.testable_prediction
+                if expected:
+                    parts.append(f"  · 可验证预测: {expected}")
             parts.append("")
 
         if refuted:

@@ -31,6 +31,21 @@ it('run questions and re-analysis go to their own routes', () => {
   expect(instance.post).toHaveBeenLastCalledWith('/executions/run%2F1/analysis')
 })
 
+it('memory calls name the run, lesson or hypothesis they change', () => {
+  const source = readFileSync(new URL('../src/api/index.ts', import.meta.url), 'utf8')
+  const instance = { get: vi.fn(), post: vi.fn(), patch: vi.fn() }
+  const { api } = selected(source, ['api'], { instance })
+  const lesson = { kind: 'known_issue', title: 't', content: 'c', labels: ['GET /x'] }
+  api.saveLesson('run/1', lesson)
+  expect(instance.post).toHaveBeenLastCalledWith('/executions/run%2F1/experiences', lesson)
+  api.setLessonStatus('l/1', 'retired', 'fixed')
+  expect(instance.patch).toHaveBeenLastCalledWith('/experiences/l%2F1', { status: 'retired', reason: 'fixed' })
+  api.decideHypothesis('h1', 'refuted')
+  expect(instance.patch).toHaveBeenLastCalledWith('/hypotheses/h1', { status: 'refuted', note: '' })
+  api.getMemoryOverview('p1')
+  expect(instance.get).toHaveBeenLastCalledWith('/memory/overview', { params: { project_id: 'p1' } })
+})
+
 it('CSV preview maps the response columns and row arrays to table objects', async () => {
   const source = readFileSync(new URL('../src/views/TestCaseEditor.vue', import.meta.url), 'utf8').match(/<script setup lang="ts">([\s\S]*?)<\/script>/)![1]
   const context = { api: { previewCSV: vi.fn().mockResolvedValue({ data: { columns: ['name', 'age'], rows: [['Alice', '3']] } }) },

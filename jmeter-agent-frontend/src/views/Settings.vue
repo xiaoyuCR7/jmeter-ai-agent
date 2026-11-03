@@ -126,6 +126,9 @@
       <el-tab-pane :label="t('accessLink.title')" name="access" lazy>
         <AccessLinkPanel />
       </el-tab-pane>
+      <el-tab-pane :label="t('settings.memory')" name="memory" lazy>
+        <MemoryPanel />
+      </el-tab-pane>
       <el-tab-pane :label="t('settings.appearance')" name="appearance">
         <el-card>
           <template #header>
@@ -233,12 +236,13 @@ import { useI18n } from '@/composables/useI18n'
 import { useRoute, useRouter } from 'vue-router'
 import MCPConnectPanel from '@/components/MCPConnectPanel.vue'
 import AccessLinkPanel from '@/components/AccessLinkPanel.vue'
+import MemoryPanel from '@/components/MemoryPanel.vue'
 
 const { t, setLang } = useI18n()
 
 const route = useRoute()
 const router = useRouter()
-const SETTINGS_TABS = ['models', 'mcp', 'system', 'access', 'appearance']
+const SETTINGS_TABS = ['models', 'mcp', 'system', 'access', 'memory', 'appearance']
 const activeTab = ref(SETTINGS_TABS.includes(route.query.tab as string) ? route.query.tab as string : 'models')
 const onTabChange = (name: string | number) => router.replace({ query: name === 'models' ? {} : { tab: String(name) } })
 

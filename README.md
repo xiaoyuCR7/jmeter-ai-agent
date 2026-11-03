@@ -55,7 +55,7 @@ flowchart LR
 | **Start from a document** | One wizard for a requirements/API document or an OpenAPI URL; produces the project, test plans and a requirements draft. |
 | **Baselines that stay put** | One click on a report sets it as the baseline. The baseline keeps a metrics snapshot, so deleting old runs does not break comparisons. |
 | **Server-side evidence** | Prometheus presets for host (node_exporter), JVM + HikariCP and MySQL; collected per run window and cached. |
-| **Honest AI analysis** | Fact sheet, number validation, hypothesis ledger and a RAG knowledge base of past runs. DeepSeek, OpenAI, Claude, Qwen or any OpenAI-compatible endpoint. |
+| **Honest AI analysis** | Fact sheet and number validation. Reports compare with earlier runs of the plan, other loads and the same requests in other plans, check earlier predictions automatically, and cite lessons your team saved. DeepSeek, OpenAI, Claude, Qwen or any OpenAI-compatible endpoint. |
 | **MCP built in** | Streamable HTTP endpoint with evidence tools (`get_execution_evidence`, `extract_performance_requirements`, `promote_execution_to_baseline`, …). Writes need your confirmation in the UI. |
 | **Solid JMeter plumbing** | Streaming JTL parser with exact percentiles and flat memory use, queued runs when the load generator is busy, live progress over WebSocket, SelfHeal for broken extractors. |
 | **Private by default** | No accounts and no login; the server refuses to bind to anything but loopback, and Host/Origin checks block other sites in your browser. |
@@ -239,7 +239,7 @@ jmeter-ai-agent/
 │       ├── api/              REST + MCP routes
 │       ├── services/
 │       │   ├── requirements.py, evidence.py, baseline_compare.py, server_metrics.py
-│       │   ├── ai/           model adapters, agents, RAG
+│       │   ├── ai/           model adapters, agents, memory
 │       │   └── jmeter/       executor, JMX builder/parser, streaming JTL parser
 │       └── middleware/       loopback Host / Origin guard
 ├── jmeter-agent-frontend/    Vue 3 + TypeScript + Element Plus

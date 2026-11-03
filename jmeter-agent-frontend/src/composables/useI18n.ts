@@ -28,6 +28,7 @@ const messages: Translations = {
   'settings.languageHint': { 'zh-CN': '切换后立即生效，测试报告和AI输出将使用所选语言。', en: 'Takes effect immediately. Test reports and AI output will use the selected language.' },
   'settings.language.chinese': { 'zh-CN': '中文', en: '中文' },
   'settings.appearance': { 'zh-CN': '外观', en: 'Appearance' },
+  'settings.memory': { 'zh-CN': '记忆', en: 'Memory' },
   'accessLink.title': { 'zh-CN': '访问链接', en: 'Access link' },
   'accessLink.intro': { 'zh-CN': '复制这个链接，在本机的其他浏览器里打开，就能直接进入，不用再找启动窗口。', en: 'Copy this link and open it in another browser on this computer to sign in directly.' },
   'accessLink.show': { 'zh-CN': '显示', en: 'Show' },
