@@ -281,9 +281,9 @@ export const api = {
   getComponentChildren: (parent: string) => instance.get(`/jmeter/components/${parent}/children`),
   getFunctions: () => instance.get('/jmeter/functions'),
 
-  executeTest: (planId: string, aiModel?: string) => withScriptApproval(approvedSha256 =>
+  executeTest: (planId: string, aiModel?: string) => withScriptApproval((approvedSha256, confirmProduction) =>
     instance.post(`/test-plans/${planId}/execute`, null,
-      { params: { ai_model: aiModel, approved_sha256: approvedSha256 } })),
+      { params: { ai_model: aiModel, approved_sha256: approvedSha256, confirm_production: confirmProduction } })),
   getExecutions: (projectId?: string) => instance.get('/executions', { params: projectId ? { project_id: projectId } : {} }),
   cancelExecution: (id: string) => instance.post(`/executions/${id}/cancel`),
 

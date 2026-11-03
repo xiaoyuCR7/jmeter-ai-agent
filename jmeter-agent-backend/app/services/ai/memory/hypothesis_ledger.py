@@ -453,6 +453,17 @@ class HypothesisLedger:
                 results.append(updated)
         return results
 
+    async def forget_project(self, project_id: str, execution_ids: list[str]) -> int:
+        """A deleted project's hypotheses, including ones recorded before they carried their project."""
+        await self._ensure_table()
+        async with self._get_lock():
+            db = await self._get_db()
+            cursor = await db.execute(
+                "DELETE FROM hypotheses WHERE project_id = ? OR source_execution_id IN (SELECT value FROM json_each(?))",
+                (project_id, json.dumps(execution_ids)))
+            await db.commit()
+            return cursor.rowcount
+
     async def expire(self, project_id: str, max_age_days: int) -> int:
         """Open hypotheses no run has answered in ``max_age_days`` stop reaching the prompt."""
         cutoff = (datetime.now() - timedelta(days=max_age_days)).isoformat()

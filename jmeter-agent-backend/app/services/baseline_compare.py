@@ -100,14 +100,21 @@ async def _active_baseline(project_id: str, test_plan_id: Optional[str]) -> Opti
         return db_store._baseline_to_dict(rows[0]) if rows else None
 
 
-def _previous_run(execution_id: str, project_id: str, test_plan_id: Optional[str], start: Optional[datetime]):
+def _environment(execution) -> Optional[str]:
+    return ((getattr(execution, 'context_snapshot', None) or {}).get('environment_id')
+            if not isinstance(execution, dict) else (execution.get('context_snapshot') or {}).get('environment_id'))
+
+
+def _previous_run(execution_id: str, project_id: str, test_plan_id: Optional[str], start: Optional[datetime],
+                  environment_id: Optional[str] = None):
+    """The plan's last finished run in the same environment: staging is not a slower production."""
     from app.services.storage import store
     if not test_plan_id or start is None:
         return None
     candidates = [e for e in store.executions.values()
                   if e.id != execution_id and e.project_id == project_id and e.test_plan_id == test_plan_id
                   and e.status == TestExecutionStatus.COMPLETED and e.start_time and e.start_time < start
-                  and e.summary is not None and e.summary.total_requests > 0]
+                  and e.summary is not None and e.summary.total_requests > 0 and _environment(e) == environment_id]
     return max(candidates, key=lambda e: e.start_time, default=None)
 
 
@@ -134,7 +141,7 @@ async def evidence_for(execution, summary: DetailedTestSummary) -> dict:
     elif baseline:
         result['is_baseline'] = True
 
-    previous = _previous_run(execution_id, project_id, plan_id, start)
+    previous = _previous_run(execution_id, project_id, plan_id, start, _environment(execution))
     if previous is not None:
         result['previous'] = _comparison(previous.start_time.strftime('%Y-%m-%d %H:%M'), previous.summary, summary,
                                          execution_id=previous.id)

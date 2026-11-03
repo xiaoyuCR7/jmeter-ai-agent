@@ -8,6 +8,7 @@ from dataclasses import replace
 
 from app.core.config import settings
 from app.services.execution_lifecycle import execution_lifecycle
+from app.services.jmeter.environment import ProductionRunNeedsConfirmation
 from app.services.jmeter.script_risk import ScriptApprovalRequired
 from app.services.jmeter.report_parser import ReportParser
 from app.services.jmeter.test_scheduler import TestScheduler, SchedulerDecision
@@ -29,15 +30,21 @@ async def _with_script_approval(run, tool_name: str, jmx_path: str, *args, **kwa
     again with the list. The approval covers exactly the bytes that were listed; the model
     can never grant it itself.
     """
-    try:
-        return await run(jmx_path, *args, **kwargs)
-    except ScriptApprovalRequired as error:
-        from app.services.confirmations import confirmations
-        if not await confirmations.request(tool_name, {'jmx_path': jmx_path,
-                                                       'runs_scripts_on_this_machine': error.findings}):
-            raise ValueError(f'{error} The user did not approve it; do not retry automatically.') from error
-        approved = error.sha256
-    return await run(jmx_path, *args, approved_sha256=approved, **kwargs)
+    from app.services.confirmations import confirmations
+    for _ in range(3):  # Scripts, then a production environment: each asked once.
+        try:
+            return await run(jmx_path, *args, **kwargs)
+        except ScriptApprovalRequired as error:
+            if not await confirmations.request(tool_name, {'jmx_path': jmx_path,
+                                                           'runs_scripts_on_this_machine': error.findings}):
+                raise ValueError(f'{error} The user did not approve it; do not retry automatically.') from error
+            kwargs['approved_sha256'] = error.sha256
+        except ProductionRunNeedsConfirmation as error:
+            if not await confirmations.request(tool_name, {'jmx_path': jmx_path, 'production_environment': error.environment,
+                                                           'base_url': error.base_url, 'threads': error.threads}):
+                raise ValueError(f'{error} The user did not confirm it; do not retry automatically.') from error
+            kwargs['confirm_production'] = True
+    return await run(jmx_path, *args, **kwargs)
 
 
 async def execute_with_script_approval(tool_name: str, jmx_path: str, *args, **kwargs):

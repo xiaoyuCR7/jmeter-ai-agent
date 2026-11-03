@@ -22,7 +22,7 @@
           <div class="danger-row">
             <div>
               <div class="danger-title">{{ localText('删除项目', 'Delete project') }}</div>
-              <div class="danger-hint">{{ localText('同时删除项目下的测试计划、需求、基线和监控配置，无法恢复。', 'Also deletes its test plans, requirements, baselines and monitoring settings. This cannot be undone.') }}</div>
+              <div class="danger-hint">{{ localText('同时删除项目下的测试计划、执行记录和报告、需求、基线、监控配置，以及它积累的经验和假设，无法恢复。', 'Also deletes its test plans, runs and reports, requirements, baselines, monitoring settings, and the lessons and hypotheses it gathered. This cannot be undone.') }}</div>
             </div>
             <el-button type="danger" plain @click="deleteProject">{{ localText('删除项目', 'Delete project') }}</el-button>
           </div>
@@ -61,6 +61,7 @@
                   </el-icon>
                   <span>{{ env.name }}</span>
                   <el-tag v-if="activeEnvId === env.id" size="small" type="success">{{ t('projectSettings.env.active') }}</el-tag>
+                  <el-tag v-if="env.kind === 'production'" size="small" type="danger">{{ kindLabel('production') }}</el-tag>
                 </div>
                 <div class="env-card-actions">
                   <el-button
@@ -86,11 +87,31 @@
               </div>
             </template>
 
-            <el-form label-position="top" size="small">
-              <el-form-item label="Base URL">
+            <el-form label-position="top" size="small" class="env-form">
+              <el-form-item label="Base URL" class="wide">
                 <el-input v-model="env.base_url" placeholder="https://api.example.com" @change="updateEnv(env)" />
               </el-form-item>
+              <el-form-item :label="localText('环境类型', 'Kind')">
+                <el-select v-model="env.kind" @change="updateEnv(env)">
+                  <el-option v-for="kind in envKinds" :key="kind.value" :label="kind.label" :value="kind.value" />
+                </el-select>
+              </el-form-item>
+              <el-form-item :label="localText('最大线程数', 'Thread cap')">
+                <el-input-number v-model="env.max_threads" :min="1" :max="100000" :step="10" controls-position="right"
+                  :placeholder="localText('不限制', 'No cap')" @change="updateEnv(env)" />
+              </el-form-item>
+              <el-form-item :label="localText('Prometheus 地址（可选）', 'Prometheus URL (optional)')" class="wide">
+                <el-input v-model="env.prometheus_url" clearable placeholder="http://prometheus:9090"
+                  @change="updateEnv(env)" />
+              </el-form-item>
             </el-form>
+            <p class="env-hint">
+              {{ env.kind === 'production'
+                ? localText('生产环境：每次运行前都会请你确认。', 'Production: every run asks you first.')
+                : '' }}
+              {{ localText('运行时请求发往这里的地址；下面的请求头和变量会覆盖计划里同名的。不填 Prometheus 地址时用项目的监控配置。',
+                           'Runs send requests to this address; the headers and variables below replace ones of the same name in the plan. Without a Prometheus URL the project monitoring is used.') }}
+            </p>
 
             <el-divider>{{ t('projectSettings.env.variables') }}</el-divider>
             <div class="env-table-wrapper">
@@ -102,7 +123,13 @@
                 </el-table-column>
                 <el-table-column :label="t('projectSettings.env.varValue')" min-width="200">
                   <template #default="{ row }">
-                    <el-input v-model="row.value" size="small" :placeholder="t('projectSettings.env.varValuePlaceholder')" @change="applyEnvVars(env)" />
+                    <el-input v-model="row.value" size="small" :type="row.secret ? 'password' : 'text'"
+                      :placeholder="t('projectSettings.env.varValuePlaceholder')" @change="applyEnvVars(env)" />
+                  </template>
+                </el-table-column>
+                <el-table-column :label="localText('敏感', 'Secret')" width="64" align="center">
+                  <template #default="{ row }">
+                    <el-checkbox v-model="row.secret" :aria-label="localText('敏感值', 'Secret value')" @change="applyEnvVars(env)" />
                   </template>
                 </el-table-column>
                 <el-table-column width="60">
@@ -128,7 +155,13 @@
                 </el-table-column>
                 <el-table-column :label="t('projectSettings.env.headerValue')" min-width="200">
                   <template #default="{ row }">
-                    <el-input v-model="row.value" size="small" :placeholder="t('projectSettings.env.headerValuePlaceholder')" @change="applyEnvHeaders(env)" />
+                    <el-input v-model="row.value" size="small" :type="row.secret ? 'password' : 'text'"
+                      :placeholder="t('projectSettings.env.headerValuePlaceholder')" @change="applyEnvHeaders(env)" />
+                  </template>
+                </el-table-column>
+                <el-table-column :label="localText('敏感', 'Secret')" width="64" align="center">
+                  <template #default="{ row }">
+                    <el-checkbox v-model="row.secret" :aria-label="localText('敏感值', 'Secret value')" @change="applyEnvHeaders(env)" />
                   </template>
                 </el-table-column>
                 <el-table-column width="60">
@@ -167,6 +200,11 @@
         <el-form-item label="Base URL">
           <el-input v-model="envDialogForm.base_url" placeholder="https://api.example.com" />
         </el-form-item>
+        <el-form-item :label="localText('环境类型', 'Kind')">
+          <el-select v-model="envDialogForm.kind" style="width: 100%">
+            <el-option v-for="kind in envKinds" :key="kind.value" :label="kind.label" :value="kind.value" />
+          </el-select>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="envDialogVisible = false">{{ t('projectSettings.cancel') }}</el-button>
@@ -192,7 +230,9 @@ import { useI18n } from '@/composables/useI18n'
 const { t, currentLang } = useI18n()
 const localText = (zh: string, en: string) => currentLang.value === 'en' ? en : zh
 
-interface KVRow { key: string; value: string }
+interface KVRow { key: string; value: string; secret?: boolean }
+
+type EnvKind = 'development' | 'testing' | 'staging' | 'production'
 
 interface EnvData {
   id: string
@@ -200,9 +240,26 @@ interface EnvData {
   base_url: string
   variables: Record<string, string>
   headers: Record<string, string>
+  kind: EnvKind
+  secret_keys: string[]
+  max_threads: number | null
+  prometheus_url: string | null
   varRows?: KVRow[]
   headerRows?: KVRow[]
 }
+
+const KIND_LABELS: Record<EnvKind, [string, string]> = {
+  development: ['开发', 'Development'], testing: ['测试', 'Testing'],
+  staging: ['预发', 'Staging'], production: ['生产', 'Production'],
+}
+const kindLabel = (kind: EnvKind) => localText(...KIND_LABELS[kind])
+const envKinds = computed(() => (Object.keys(KIND_LABELS) as EnvKind[]).map(value => ({ value, label: kindLabel(value) })))
+
+// Secret values arrive as ****** and go back unchanged unless edited, which the server reads as "keep it".
+const toRows = (values: Record<string, string>, secret: string[]): KVRow[] =>
+  Object.entries(values || {}).map(([key, value]) => ({ key, value: String(value), secret: secret.includes(key) }))
+const secretKeys = (env: EnvData) => [...(env.varRows || []), ...(env.headerRows || [])]
+  .filter(row => row.secret && row.key.trim()).map(row => row.key.trim())
 
 const props = defineProps<{ projectId: string }>()
 const emit = defineEmits<{ updated: []; deleted: [] }>()
@@ -232,6 +289,7 @@ const editingEnvId = ref<string | null>(null)
 const envDialogForm = reactive({
   name: '',
   base_url: '',
+  kind: 'testing' as EnvKind,
 })
 
 // Rebuild a record from table rows; returns null when duplicate keys exist.
@@ -319,8 +377,12 @@ async function loadEnvironments() {
         ...e,
         variables: e.variables || {},
         headers: e.headers || {},
-        varRows: Object.entries(e.variables || {}).map(([key, value]) => ({ key, value: String(value) })),
-        headerRows: Object.entries(e.headers || {}).map(([key, value]) => ({ key, value: String(value) })),
+        kind: e.kind || 'testing',
+        secret_keys: e.secret_keys || [],
+        max_threads: e.max_threads ?? null,
+        prometheus_url: e.prometheus_url ?? null,
+        varRows: toRows(e.variables, e.secret_keys || []),
+        headerRows: toRows(e.headers, e.secret_keys || []),
       }))
     }
     activeEnvId.value = res.data?.active_id || null
@@ -368,6 +430,7 @@ function showAddEnvDialog() {
   editingEnvId.value = null
   envDialogForm.name = ''
   envDialogForm.base_url = ''
+  envDialogForm.kind = 'testing'
   envDialogVisible.value = true
 }
 
@@ -375,6 +438,7 @@ function editEnv(env: EnvData) {
   editingEnvId.value = env.id
   envDialogForm.name = env.name
   envDialogForm.base_url = env.base_url
+  envDialogForm.kind = env.kind
   envDialogVisible.value = true
 }
 
@@ -390,12 +454,14 @@ async function submitEnvDialog() {
       await api.updateEnvironment(projectId.value, editingEnvId.value, {
         name: envDialogForm.name,
         base_url: envDialogForm.base_url,
+        kind: envDialogForm.kind,
       })
       ElMessage.success(t('projectSettings.message.envUpdated'))
     } else {
       await api.createEnvironment(projectId.value, {
         name: envDialogForm.name,
         base_url: envDialogForm.base_url,
+        kind: envDialogForm.kind,
         variables: {},
         headers: {},
       })
@@ -415,10 +481,16 @@ const envSaves = new Map<string, Promise<void>>()
 
 function updateEnv(env: EnvData) {
   const id = projectId.value
+  env.secret_keys = secretKeys(env)
   const payload = {
     base_url: env.base_url,
     variables: { ...env.variables },
     headers: { ...env.headers },
+    secret_keys: env.secret_keys,
+    kind: env.kind,
+    max_threads: env.max_threads || null,
+    clear_max_threads: !env.max_threads,
+    prometheus_url: env.prometheus_url || null,
   }
   const save = (envSaves.get(env.id) || Promise.resolve()).then(async () => {
     try {
@@ -448,6 +520,11 @@ async function duplicateEnv(env: EnvData) {
       base_url: env.base_url,
       variables: env.variables,
       headers: env.headers,
+      kind: env.kind,
+      secret_keys: env.secret_keys,
+      max_threads: env.max_threads,
+      prometheus_url: env.prometheus_url,
+      copy_from: env.id,
     })
     ElMessage.success(t('projectSettings.message.envCopied'))
     await loadEnvironments()
@@ -526,5 +603,12 @@ async function deleteEnv(env: EnvData) {
   }
 
   .env-table-wrapper { overflow-x: auto; }
+  .env-form {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 12px;
+    .wide { grid-column: 1 / -1; }
+    .el-select, .el-input-number { width: 100%; }
+    @media (max-width: 560px) { grid-template-columns: 1fr; }
+  }
+  .env-hint { margin: 0 0 4px; font-size: 12px; line-height: 1.6; color: var(--app-text-muted); }
 }
 </style>

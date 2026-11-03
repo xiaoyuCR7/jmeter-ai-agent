@@ -1,4 +1,9 @@
-from pydantic import BaseModel, Field, field_validator
+import hashlib
+import json
+import re
+from urllib.parse import urlsplit
+
+from pydantic import BaseModel, Field, SerializationInfo, field_serializer, field_validator
 from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 from enum import Enum
@@ -123,6 +128,13 @@ class CorrelationConfig(BaseModel):
     )
 
 
+SECRET_MASK = "******"
+EnvironmentKind = Literal["development", "testing", "staging", "production"]
+# What identified an environment before it had a kind, a thread cap or its own monitoring;
+# the fingerprint stays over these so earlier runs remain comparable.
+ENVIRONMENT_IDENTITY = ("id", "name", "base_url", "variables", "headers")
+
+
 class EnvironmentConfig(BaseModel):
     """单个环境配置"""
     id: str = Field(..., description="环境唯一标识")
@@ -130,6 +142,25 @@ class EnvironmentConfig(BaseModel):
     base_url: str = Field("", description="基础URL")
     variables: Dict[str, str] = Field(default_factory=dict, description="环境变量")
     headers: Dict[str, str] = Field(default_factory=dict, description="全局请求头")
+    kind: EnvironmentKind = Field("testing", description="环境类型；生产环境运行前需要确认")
+    secret_keys: List[str] = Field(default_factory=list, description="值为敏感信息的变量名和请求头名")
+    max_threads: Optional[int] = Field(None, ge=1, le=100000, description="在这个环境运行时允许的最大总线程数")
+    prometheus_url: Optional[str] = Field(None, description="这个环境的 Prometheus 地址，覆盖项目的监控地址")
+
+    @field_serializer("variables", "headers")
+    def _mask_secrets(self, values: Dict[str, str], info: SerializationInfo):
+        """Responses never carry a secret; only persistence and the run ask for the real values."""
+        if (info.context or {}).get("reveal_secrets"):
+            return values
+        return {key: SECRET_MASK if key in self.secret_keys else value for key, value in values.items()}
+
+    def revealed(self) -> dict:
+        return self.model_dump(context={"reveal_secrets": True})
+
+    def fingerprint(self) -> str:
+        data = self.revealed()
+        return hashlib.sha256(json.dumps({key: data[key] for key in ENVIRONMENT_IDENTITY},
+                                         sort_keys=True).encode()).hexdigest()
 
 
 class ProjectEnvironments(BaseModel):
@@ -173,20 +204,76 @@ class UpdateProjectRequest(BaseModel):
     environments: Optional[ProjectEnvironments] = Field(None, description="多环境配置(新版)")
 
 
-class CreateEnvironmentRequest(BaseModel):
+_VARIABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]{0,99}")
+_HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,100}")
+
+
+def check_environment_values(values: Optional[Dict[str, str]], pattern, what: str):
+    """Values are literals or ${name} references: a JMeter function here would run code the plan's review never saw."""
+    for key, value in (values or {}).items():
+        if not pattern.fullmatch(key):
+            raise ValueError(f"{what}名 {key!r} 不合法")
+        if "${__" in value or len(value) > 4000 or "\n" in value or "\r" in value:
+            raise ValueError(f"{what} {key} 的值不能包含 JMeter 函数或换行，且不超过 4000 字符")
+    return values
+
+
+def check_base_url(value: Optional[str], what: str = "base_url") -> Optional[str]:
+    if not value or not value.strip():
+        return value
+    parts = urlsplit(value.strip())
+    if parts.scheme not in ("http", "https") or not parts.hostname or parts.username or parts.password \
+            or parts.query or parts.fragment:
+        raise ValueError(f"{what} 必须是不带账号、查询参数的 http(s) 地址")
+    return value.strip().rstrip("/")
+
+
+class _EnvironmentFields(BaseModel):
+    @field_validator("variables", check_fields=False)
+    @classmethod
+    def _variables(cls, value):
+        return check_environment_values(value, _VARIABLE_NAME, "变量")
+
+    @field_validator("headers", check_fields=False)
+    @classmethod
+    def _headers(cls, value):
+        return check_environment_values(value, _HEADER_NAME, "请求头")
+
+    @field_validator("base_url", check_fields=False)
+    @classmethod
+    def _base_url(cls, value):
+        return check_base_url(value)
+
+    @field_validator("prometheus_url", check_fields=False)
+    @classmethod
+    def _prometheus_url(cls, value):
+        return check_base_url(value, "Prometheus 地址") or None
+
+
+class CreateEnvironmentRequest(_EnvironmentFields):
     """创建环境请求"""
-    name: str = Field(..., description="环境名称")
+    name: str = Field(..., min_length=1, max_length=100, description="环境名称")
     base_url: str = Field("", description="基础URL")
     variables: Dict[str, str] = Field(default_factory=dict, description="环境变量")
     headers: Dict[str, str] = Field(default_factory=dict, description="全局请求头")
+    kind: EnvironmentKind = "testing"
+    secret_keys: List[str] = Field(default_factory=list)
+    max_threads: Optional[int] = Field(None, ge=1, le=100000)
+    prometheus_url: Optional[str] = None
+    copy_from: Optional[str] = Field(None, description="复制的来源环境；值为 ****** 的敏感项从它那里取")
 
 
-class UpdateEnvironmentRequest(BaseModel):
-    """更新环境请求"""
-    name: Optional[str] = Field(None, description="环境名称")
+class UpdateEnvironmentRequest(_EnvironmentFields):
+    """更新环境请求；敏感值传回 ****** 表示保持原值"""
+    name: Optional[str] = Field(None, min_length=1, max_length=100, description="环境名称")
     base_url: Optional[str] = Field(None, description="基础URL")
     variables: Optional[Dict[str, str]] = Field(None, description="环境变量")
     headers: Optional[Dict[str, str]] = Field(None, description="全局请求头")
+    kind: Optional[EnvironmentKind] = None
+    secret_keys: Optional[List[str]] = None
+    max_threads: Optional[int] = Field(None, ge=1, le=100000)
+    clear_max_threads: bool = False
+    prometheus_url: Optional[str] = None
 
 
 class CsvDataFile(BaseModel):
@@ -402,6 +489,7 @@ class TestReport(BaseModel):
     report_status: str = Field("pending", description="结果解析和运行后分析的状态：running 时 AI 分析还在写")
     report_error: Optional[str] = None
     analysis_enabled: bool = Field(True, description="运行结束后是否自动写 AI 分析")
+    environment: Optional[Dict[str, Any]] = Field(None, description="这次运行用的环境：名称、类型、地址和替换了哪些主机")
 
 
 class AIChatMessage(BaseModel):

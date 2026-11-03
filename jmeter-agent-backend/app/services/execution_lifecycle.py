@@ -1,7 +1,8 @@
 """One persisted execution lifecycle shared by HTTP, agents and MCP.
 
-JMX is copied byte-for-byte; no parsing, rebuilding or script stripping occurs.
-This is bookkeeping and task ownership, not a sandbox: in local mode a plan with
+A run executes a copy of the plan: byte for byte, unless the project's active environment
+changes where requests go, their headers or variables (see ``jmeter.environment``); scripts are
+never stripped. ``source_sha256`` is the hash of that copy. This is bookkeeping and task ownership, not a sandbox: in local mode a plan with
 scripts runs only with the user's approval (``approved_sha256``); container mode
 is the isolation boundary.
 """
@@ -22,9 +23,30 @@ from app.models.schemas import (
 from app.services.db_store import db_store
 from app.services.storage import store
 from app.services.jmeter.executor import get_executor
+from app.services.jmeter import environment as environment_for_run, jmx_lint
+from app.services.jmeter.environment import ProductionRunNeedsConfirmation
 from app.services.jmeter.script_risk import ScriptApprovalRequired, content_hash, scan as scan_scripts
 
 logger = logging.getLogger(__name__)
+ENVIRONMENT_FILE = 'environment.json'  # Which environment a run used, next to its results.
+
+
+def active_environment(project):
+    """(id, config) of the project's active environment; ('legacy', None) for a project from before environments."""
+    if not project or not project.environments or not project.environments.active_id:
+        return 'legacy', None
+    active_id = project.environments.active_id
+    return active_id, next((env for env in project.environments.environments if env.id == active_id), None)
+
+
+def check_environment_limits(environment, content: bytes, confirm_production: bool):
+    """An environment's thread cap always holds; a production one also waits for an explicit yes."""
+    threads = sum(group['threads'] for group in jmx_lint.planned_load(content))
+    if environment.max_threads and threads > environment.max_threads:
+        raise ValueError(f'计划共 {threads} 个线程，超过环境「{environment.name}」允许的上限 '
+                         f'{environment.max_threads}；降低线程数或在环境设置里调整上限')
+    if environment.kind == 'production' and not confirm_production:
+        raise ProductionRunNeedsConfirmation(environment.name, environment.base_url, threads)
 
 
 def _directory_project(path):
@@ -57,7 +79,8 @@ def validate_id(value: str) -> str:
 
 
 async def persist_project(project: ProjectInfo, *, create=None):
-    data = project.model_dump()
+    # Stored with the real values; responses mask the secret ones.
+    data = project.model_dump(context={'reveal_secrets': True})
     data['environment_data'] = data.pop('environment')
     data['environments_data'] = data.pop('environments')
     data['base_url'] = data['environment_data'].get('base_url', '')
@@ -236,7 +259,7 @@ class ExecutionLifecycle:
             ))
 
     async def prepare(self, jmx_path, execution_id='', *, test_plan_id=None,
-                      project_id='default', test_config=None, approved_sha256=None):
+                      project_id='default', test_config=None, approved_sha256=None, confirm_production=False):
         """``approved_sha256`` is the user's approval to run these exact bytes on this machine."""
         if self._closed:
             raise RuntimeError('Execution lifecycle is shutting down')
@@ -267,34 +290,42 @@ class ExecutionLifecycle:
         root = Path(settings.REPORTS_DIR).resolve()
         root.mkdir(parents=True, exist_ok=True)
         run_dir = root / execution_id
+        project = store.get_project(plan.project_id)
+        environment_id, active = active_environment(project)
+        if active is not None:
+            fingerprint = active.fingerprint()
+            others = [env.base_url for env in project.environments.environments if env.id != active.id]
+            others.append(project.environment.base_url)
+            run_content, applied = environment_for_run.apply(content, active.revealed(), others)
+            check_environment_limits(active, run_content, confirm_production)
+        else:
+            environment = project.environment.model_dump() if project else {}
+            fingerprint = hashlib.sha256(json.dumps(environment, sort_keys=True).encode()).hexdigest()
+            run_content, applied = content, None
         # Never reuse an existing output directory, even when it has no DB row.
         run_dir.mkdir(exist_ok=False)
         snapshot = run_dir / 'snapshot.jmx'
         with snapshot.open('xb') as output:
-            output.write(content)
+            output.write(run_content)
+        if active is not None:
+            (run_dir / ENVIRONMENT_FILE).write_text(json.dumps({
+                'id': active.id, 'name': active.name, 'kind': active.kind,
+                'prometheus_url': active.prometheus_url, **applied}, ensure_ascii=False), encoding='utf-8')
         source_path = str(path)
         # Re-running a known snapshot preserves the original resource directory.
         for existing in store.executions.values():
             if Path(existing.jmx_path).resolve() == path and existing.source_jmx_path:
                 source_path = existing.source_jmx_path
                 break
-        project = store.get_project(plan.project_id)
-        environment = project.environment.model_dump() if project else {}
-        environment_id = 'legacy'
-        if project and project.environments and project.environments.active_id:
-            environment_id = project.environments.active_id
-            active = next((e for e in project.environments.environments if e.id == environment_id), None)
-            if active is not None:
-                environment = active.model_dump()
         context_snapshot = {
             'project_id': plan.project_id, 'test_plan_id': plan.id, 'environment_id': environment_id,
-            'environment_fingerprint': hashlib.sha256(json.dumps(environment, sort_keys=True).encode()).hexdigest(),
+            'environment_fingerprint': fingerprint,
             'test_config': plan.test_config.model_dump(mode='json'),
         }
         execution = TestExecutionInfo(
             id=execution_id, project_id=plan.project_id, test_plan_id=plan.id,
             status=TestExecutionStatus.PENDING, jmx_path=str(snapshot),
-            source_jmx_path=source_path, source_sha256=hashlib.sha256(content).hexdigest(),
+            source_jmx_path=source_path, source_sha256=hashlib.sha256(run_content).hexdigest(),
             context_snapshot=context_snapshot,
             report_dir=str(run_dir), log_path=str(run_dir / 'jmeter.log'),
         )
@@ -343,6 +374,8 @@ class ExecutionLifecycle:
                 remote_engines=remote_engines,
                 working_directory=str(Path(execution.source_jmx_path).parent),
             )
+            # JMeter has read the plan; its copy need not hold the environment's secrets any longer.
+            await asyncio.to_thread(environment_for_run.scrub, execution.jmx_path)
             for field in ('status', 'end_time', 'error_message', 'resource_snapshot_pre', 'resource_snapshot_post'):
                 value = getattr(result, field, None)
                 if value is not None:
@@ -427,6 +460,8 @@ class ExecutionLifecycle:
             await self.emit('finished', execution)
             raise
         finally:
+            # Also when the run failed before or while JMeter ran.
+            await asyncio.to_thread(environment_for_run.scrub, execution.jmx_path)
             self._prepared.discard(execution_id)
             if self._tasks.get(execution_id) is current:
                 self._tasks.pop(execution_id, None)
@@ -435,10 +470,11 @@ class ExecutionLifecycle:
                 self._executors.pop(execution_id, None)
 
     async def execute(self, jmx_path, execution_id='', *, test_plan_id=None,
-                      project_id='default', test_config=None, approved_sha256=None, **kwargs):
+                      project_id='default', test_config=None, approved_sha256=None,
+                      confirm_production=False, **kwargs):
         execution = await self.prepare(jmx_path, execution_id, test_plan_id=test_plan_id,
                                        project_id=project_id, test_config=test_config,
-                                       approved_sha256=approved_sha256)
+                                       approved_sha256=approved_sha256, confirm_production=confirm_production)
         return await self._run_prepared(execution, **kwargs)
 
     async def _run_prepared(self, execution, **kwargs):
@@ -463,10 +499,11 @@ class ExecutionLifecycle:
             raise
 
     async def submit(self, jmx_path, execution_id='', *, test_plan_id=None,
-                     project_id='default', test_config=None, approved_sha256=None, **kwargs):
+                     project_id='default', test_config=None, approved_sha256=None,
+                     confirm_production=False, **kwargs):
         execution = await self.prepare(jmx_path, execution_id, test_plan_id=test_plan_id,
                                        project_id=project_id, test_config=test_config,
-                                       approved_sha256=approved_sha256)
+                                       approved_sha256=approved_sha256, confirm_production=confirm_production)
         task = asyncio.create_task(self._run_prepared(execution, **kwargs))
         self._tasks[execution.id] = task
         def finished(done):

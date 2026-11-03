@@ -330,6 +330,17 @@ class FactLedger:
                 "AND json_extract(facts_json, '$.project_id') = ?", (project_id,))
             return (await cursor.fetchone())[0]
 
+    async def forget_project(self, project_id: str, execution_ids: list[str]) -> int:
+        """A deleted project's runs, including ones recorded before facts carried their project."""
+        await self._ensure_table()
+        async with self._get_lock():
+            db = await self._get_db()
+            cursor = await db.execute(
+                "DELETE FROM fact_sheets WHERE (json_valid(facts_json) AND json_extract(facts_json, '$.project_id') = ?)"
+                " OR execution_id IN (SELECT value FROM json_each(?))", (project_id, json.dumps(execution_ids)))
+            await db.commit()
+            return cursor.rowcount
+
     async def annotate(self, execution_id: str, *, only_missing: bool = False, **fields) -> bool:
         """Add context recorded after the fact (project, environment, load); the measurements stay as they were.
 

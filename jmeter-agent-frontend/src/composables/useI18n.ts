@@ -455,7 +455,7 @@ const messages: Translations = {
   // ── Test Case Editor view ──
 
   // ── Test Plans view ──
-  'testPlans.confirmDeleteProject': { 'zh-CN': '确定删除项目"{{ name }}"吗？该操作将同时删除项目下所有测试计划。', en: 'Delete project "{{ name }}"? This will also delete all test plans under it.' },
+  'testPlans.confirmDeleteProject': { 'zh-CN': '确定删除项目"{{ name }}"吗？它的测试计划、执行记录和报告、经验与假设都会一起删除。', en: 'Delete project "{{ name }}"? Its test plans, runs and reports, lessons and hypotheses go with it.' },
   'testPlans.message.projectDeleted': { 'zh-CN': '项目已删除', en: 'Project deleted' },
 
   // ── Project Settings view ──

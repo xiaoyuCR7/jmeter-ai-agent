@@ -25,7 +25,7 @@ from app.models.schemas import (
     TestExecutionInfo, TestReport, TestExecutionStatus,
     AIChatMessage, TestTemplate, TestType, AIModelConfig,
     JMXTreeNode, UpdateJMXTreeRequest,
-    ProjectInfo, ProjectEnvironment, ProjectEnvironments, EnvironmentConfig,
+    ProjectInfo, ProjectEnvironment, ProjectEnvironments, EnvironmentConfig, SECRET_MASK,
     CreateProjectRequest, UpdateProjectRequest,
     CreateEnvironmentRequest, UpdateEnvironmentRequest,
     AIWorkflowRequest, AIWorkflowCreateResponse,
@@ -45,6 +45,7 @@ from app.services.jmeter.report_parser import ReportParser
 from app.services.jmeter.jmx_parser import parse_jmx
 from app.services.jmeter.jmx_builder import build_jmx
 from app.services.jmeter.script_risk import ScriptApprovalRequired
+from app.services.jmeter.environment import ProductionRunNeedsConfirmation
 from app.services.jmeter.component_registry import get_all_components, get_allowed_children
 from app.services.jmeter.sla_engine import SLAEngine, SLAConfig
 from app.services.jmeter.function_registry import get_all_functions
@@ -54,8 +55,10 @@ from app.services.ai.agents.analysis_agent import AnalysisExecutionError
 from app.services.openapi_importer import OpenAPIImporter
 from app.services.ml_analysis import ml_detector
 from app.services.storage import store
-from app.services.execution_lifecycle import execution_lifecycle, persist_project, persist_execution
-from app.services import run_diagnostics
+from app.services.execution_lifecycle import (
+    execution_lifecycle, persist_project, persist_execution, active_environment,
+)
+from app.services import run_diagnostics, server_metrics
 from app.services import post_run
 from app.services.post_run import save_analysis_markdown
 
@@ -391,11 +394,12 @@ async def generate_test_plan(request: GenerateTestPlanRequest, project_id: str =
 
         generator = JMXGenerator(model_type=request.ai_model)
 
-        # Determine base_url
+        # Determine base_url: the request's, else the active environment's, else the project's old single one.
         base_url = request.base_url
         if project_id in store.projects:
-            proj_env = store.projects[project_id].environment
-            base_url = base_url or proj_env.base_url
+            project = store.projects[project_id]
+            _, active = active_environment(project)
+            base_url = base_url or (active.base_url if active else '') or project.environment.base_url
 
         # Use AI to generate if endpoints are provided or for complex scenarios
         if request.endpoints and len(request.endpoints) > 0 and base_url:
@@ -576,6 +580,7 @@ async def execute_test_plan(
     background_tasks: BackgroundTasks,
     ai_model: Optional[str] = Query(None, description="AI model for analysis"),
     approved_sha256: Optional[str] = Query(None, description="The plan content the user approved to run on this machine"),
+    confirm_production: bool = Query(False, description="The user confirmed running against a production environment"),
 ):
     """执行测试计划"""
     if plan_id not in store.test_plans:
@@ -587,7 +592,12 @@ async def execute_test_plan(
     try:
         return await execution_lifecycle.submit(
             plan.jmx_path, test_plan_id=plan_id, approved_sha256=approved_sha256,
+            confirm_production=confirm_production,
             before_execute=before_execute, postprocess=postprocess, ai_model=ai_model)
+    except ProductionRunNeedsConfirmation as error:
+        raise HTTPException(status_code=409, detail={
+            "code": "production_needs_confirmation", "message": str(error), "environment": error.environment,
+            "base_url": error.base_url, "threads": error.threads}) from error
     except ScriptApprovalRequired as error:
         # The UI lists these and asks before retrying with this exact content's hash.
         raise HTTPException(status_code=409, detail={
@@ -749,6 +759,7 @@ async def get_report(execution_id: str):
         sla_result=sla_result,
         evidence=evidence,
         failure_diagnosis=failure_diagnosis,
+        environment=server_metrics.run_environment(execution.report_dir) or None,
         status=execution.status,
         report_status=execution.report_status,
         report_error=execution.report_error,
@@ -970,7 +981,32 @@ async def delete_project(project_id: str):
             os.remove(plan.jmx_path)
     if os.path.exists(project_dir):
         shutil.rmtree(project_dir, ignore_errors=True)
+    await _forget_project(project_id, executions)
     return {"success": True}
+
+
+async def _forget_project(project_id: str, executions: list):
+    """Reports and memory of a deleted project; the project is already gone, so a failure is only logged."""
+    reports_root = os.path.realpath(settings.REPORTS_DIR)
+    for execution in executions:
+        if not execution.report_dir:
+            continue
+        report_dir = os.path.realpath(execution.report_dir)
+        try:
+            inside = report_dir != reports_root and os.path.commonpath([report_dir, reports_root]) == reports_root
+        except ValueError:  # Another drive on Windows: certainly not ours.
+            inside = False
+        if inside:
+            shutil.rmtree(report_dir, ignore_errors=True)
+    from app.services.ai.memory import experience, fact_ledger, hypothesis_ledger
+    execution_ids = [execution.id for execution in executions]
+    for name, forget in (('facts', lambda: fact_ledger.forget_project(project_id, execution_ids)),
+                         ('hypotheses', lambda: hypothesis_ledger.forget_project(project_id, execution_ids)),
+                         ('lessons', lambda: asyncio.to_thread(experience.forget_project, project_id))):
+        try:
+            await forget()
+        except Exception as error:
+            logger.warning('Could not remove the %s of deleted project %s: %s', name, project_id, error)
 
 
 # ===== Environment CRUD =====
@@ -993,13 +1029,15 @@ async def create_environment(project_id: str, request: CreateEnvironmentRequest)
         project.environments = ProjectEnvironments()
 
     env_id = str(uuid.uuid4())[:8]
-    new_env = EnvironmentConfig(
-        id=env_id,
-        name=request.name,
-        base_url=request.base_url,
-        variables=request.variables,
-        headers=request.headers
-    )
+    new_env = EnvironmentConfig(id=env_id, **request.model_dump(exclude={'copy_from'}))
+    source = next((e for e in project.environments.environments if e.id == request.copy_from), None)
+    if source is not None:
+        # A copy made from the page only saw ******; its secrets come from the environment it copies.
+        for field in ('variables', 'headers'):
+            stored = getattr(source, field)
+            setattr(new_env, field, {key: stored[key] if value == SECRET_MASK and key in stored else value
+                                     for key, value in getattr(new_env, field).items()})
+    new_env.secret_keys = _secret_keys(new_env)
     project.environments.environments.append(new_env)
     if not project.environments.active_id:
         project.environments.active_id = env_id
@@ -1021,17 +1059,32 @@ async def update_environment(project_id: str, env_id: str, request: UpdateEnviro
     if not env:
         raise HTTPException(status_code=404, detail="Environment not found")
 
-    if request.name is not None:
-        env.name = request.name
-    if request.base_url is not None:
-        env.base_url = request.base_url
-    if request.variables is not None:
-        env.variables = request.variables
-    if request.headers is not None:
-        env.headers = request.headers
+    if request.secret_keys is not None:
+        env.secret_keys = list(request.secret_keys)
+    for field in ('variables', 'headers'):
+        values = getattr(request, field)
+        if values is not None:
+            # The page only ever saw ****** for a secret: sending it back means "keep it".
+            stored = getattr(env, field)
+            setattr(env, field, {key: stored[key] if value == SECRET_MASK and key in stored else value
+                                 for key, value in values.items()})
+    for field in ('name', 'base_url', 'kind', 'max_threads'):
+        if getattr(request, field) is not None:
+            setattr(env, field, getattr(request, field))
+    if request.clear_max_threads:
+        env.max_threads = None
+    if 'prometheus_url' in request.model_fields_set:
+        env.prometheus_url = request.prometheus_url or None
+    env.secret_keys = _secret_keys(env)
     project.updated_at = datetime.now()
     await _persist_project(project)
     return env
+
+
+def _secret_keys(env: EnvironmentConfig) -> list[str]:
+    """Only names the environment has; a secret whose value is still ****** was never given one."""
+    names = set(env.variables) | set(env.headers)
+    return sorted(key for key in set(env.secret_keys) if key in names)
 
 
 @router.delete("/projects/{project_id}/environments/{env_id}")

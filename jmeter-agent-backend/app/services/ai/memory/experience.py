@@ -110,6 +110,14 @@ def set_status(doc_id: str, status: str, reason: str = '') -> Optional[RAGDocume
     return rag_store.update(doc_id, metadata=metadata)
 
 
+def forget_project(project_id: str) -> int:
+    """Lessons of a deleted project, retired ones included."""
+    docs = for_project(project_id, include_retired=True)
+    for doc in docs:
+        rag_store.delete(doc.id)
+    return len(docs)
+
+
 def format_for_prompt(docs: list[RAGDocument]) -> str:
     if not docs:
         return ''

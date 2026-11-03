@@ -312,3 +312,33 @@ def test_other_plans_are_spread_across_requests():
         item.per_label['GET /pay'] = {'count': 3, 'p95_response_time': 50}
     text, _ = analysis_context.same_requests(facts, {'GET /orders', 'GET /pay'}, {})
     assert text.count('GET /orders：') == 2 and text.count('GET /pay：') == 2
+
+
+@pytest.mark.asyncio
+async def test_deleting_a_project_removes_its_reports_and_memory(memory, monkeypatch, tmp_path):
+    from app.api import routes
+    from app.services.ai import memory as ledgers
+    monkeypatch.setattr(ledgers, 'fact_ledger', memory.facts)
+    monkeypatch.setattr(ledgers, 'hypothesis_ledger', memory.hypotheses)
+    reports = tmp_path / 'reports'
+    (reports / 'run-1').mkdir(parents=True)
+    outside = tmp_path / 'elsewhere'
+    outside.mkdir()
+    monkeypatch.setattr(type(routes.settings), 'REPORTS_DIR', property(lambda self: str(reports)))
+    assert await memory.facts.save(fact('run-1', 'plan-a', 5, 300))
+    # Recorded before facts carried their project: found by the run instead.
+    assert await memory.facts.save(FactSheet(execution_id='legacy', module='plan-a', total_requests=1))
+    assert await memory.facts.save(FactSheet(execution_id='keep', module='plan-z', project_id='other', total_requests=1))
+    await memory.hypotheses.add(Hypothesis(hypothesis_id='h', source_execution_id='legacy', module='plan-a', statement='s'))
+    await memory.hypotheses.add(Hypothesis(hypothesis_id='k', source_execution_id='keep', module='plan-z',
+                                           project_id='other', statement='s'))
+    experience.save('p', 'known_issue', '订单锁表', LESSON, [])
+    kept = experience.save('other', 'known_issue', '别的项目', LESSON, [])
+
+    await routes._forget_project('p', [SimpleNamespace(id='run-1', report_dir=str(reports / 'run-1')),
+                                       SimpleNamespace(id='legacy', report_dir=str(outside)),
+                                       SimpleNamespace(id='none', report_dir=None)])
+    assert not (reports / 'run-1').exists() and outside.exists() and reports.exists()
+    assert [await memory.facts.load(run_id) is None for run_id in ('run-1', 'legacy', 'keep')] == [True, True, False]
+    assert await memory.hypotheses.get('h') is None and await memory.hypotheses.get('k') is not None
+    assert experience.for_project('p', include_retired=True) == [] and experience.for_project('other')[0].id == kept.id

@@ -38,9 +38,10 @@ def test_improvement_is_reported_but_not_a_regression():
     assert rows and not any(r['is_regression'] for r in rows)
 
 
-def execution(eid, start, s, plan='plan-a', status=TestExecutionStatus.COMPLETED):
+def execution(eid, start, s, plan='plan-a', status=TestExecutionStatus.COMPLETED, environment='staging'):
     return TestExecutionInfo(id=eid, project_id='shop', test_plan_id=plan, status=status, jmx_path=f'{eid}.jmx',
-                             start_time=start, end_time=start + timedelta(minutes=5), summary=s)
+                             start_time=start, end_time=start + timedelta(minutes=5), summary=s,
+                             context_snapshot={'environment_id': environment})
 
 
 @pytest_asyncio.fixture
@@ -64,6 +65,7 @@ async def env(tmp_path, monkeypatch):
         'base': execution('base', T0 + timedelta(hours=1), summary(p95=500)),
         'other-plan': execution('other-plan', T0 + timedelta(hours=2), summary(p95=100), plan='plan-b'),
         'failed': execution('failed', T0 + timedelta(hours=3), summary(p95=50), status=TestExecutionStatus.FAILED),
+        'production': execution('production', T0 + timedelta(hours=3, minutes=30), summary(p95=90), environment='prod'),
         'now': execution('now', T0 + timedelta(hours=4), summary(p95=700, order_p95=1200)),
     }
     monkeypatch.setattr(store, '_executions', runs)
@@ -76,10 +78,10 @@ async def env(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_previous_run_skips_other_plans_failures_and_later_runs(env):
+async def test_previous_run_skips_other_plans_environments_failures_and_later_runs(env):
     result = await bc.evidence_for(env['now'], env['now'].summary)
     assert result['baseline'] is None
-    assert result['previous']['execution_id'] == 'base'  # not 'failed', not 'other-plan'
+    assert result['previous']['execution_id'] == 'base'  # not 'failed', 'other-plan' or the production run
     assert result['previous']['verdict'] == 'regression'
     assert any(t['label'] == 'POST /order' and t['is_regression'] for t in result['previous']['transactions'])
 

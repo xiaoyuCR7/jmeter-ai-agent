@@ -80,6 +80,10 @@ async def lifespan(app: FastAPI):
         cleanup.push_async_callback(execution_lifecycle.shutdown)
         cleanup.push_async_callback(post_run.stop_reanalyses)
         await post_run.recover_interrupted()
+        # A run cut off by a restart never masked the secrets its copy of the plan carried.
+        from app.services.jmeter import environment as run_environment
+        for execution in list(store.executions.values()):
+            await _asyncio.to_thread(run_environment.scrub, execution.jmx_path)
         # Older runs join project history in the background; reading their plans can take a while.
         backfill = _asyncio.create_task(post_run.backfill_memory())
         async def stop_backfill():

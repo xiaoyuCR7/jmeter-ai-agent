@@ -11,6 +11,13 @@
             <span>ID {{ report.execution_id }}</span>
             <router-link :to="`/projects/${report.project_id}`">{{ L('所属项目', 'Project') }}</router-link>
           </div>
+          <p v-if="report.environment" class="run-env">
+            <el-tag size="small" :type="report.environment.kind === 'production' ? 'danger' : 'info'">
+              {{ L('环境', 'Environment') }}：{{ report.environment.name }}
+            </el-tag>
+            <span v-if="report.environment.base_url">{{ report.environment.base_url }}</span>
+            <span v-if="report.environment.note" class="env-note">{{ report.environment.note }}</span>
+          </p>
         </div>
         <div class="head-actions button-row">
           <el-button v-if="report.raw_data_path" @click="downloadJTL">{{ t('report.downloadJtl') }}</el-button>
@@ -496,6 +503,11 @@ onUnmounted(() => {
   .meta {
     display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; color: var(--app-text-muted);
     a { color: var(--app-primary); text-decoration: none; }
+  }
+  .run-env {
+    display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 6px 0 0;
+    font-size: 13px; color: var(--app-text-muted); overflow-wrap: anywhere;
+    .env-note { color: var(--app-warning, #b26b00); }
   }
   .head-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 }

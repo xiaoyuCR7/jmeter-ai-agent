@@ -1,7 +1,8 @@
 """Server-side evidence: Prometheus metrics for a run's time window, aligned with JMeter.
 
 The Prometheus URL and queries come only from the project's monitoring
-configuration that the user saved; requests and AI tool arguments can never
+configuration that the user saved (the URL possibly from the environment the run used, also
+saved by the user); requests and AI tool arguments can never
 point the server at another URL. Raw query results are cached next to the JTL
 so later analyses see the same evidence even after Prometheus retention ends.
 """
@@ -185,6 +186,16 @@ async def probe(prometheus_url: str, *, transport=None) -> dict:
         return {'reachable': False, 'version': None, 'error': _describe(error)}
 
 
+def run_environment(report_dir: Optional[str]) -> dict:
+    """The environment a run used, as recorded when it started; {} for older runs."""
+    try:
+        with open(os.path.join(report_dir or '', 'environment.json'), encoding='utf-8') as source:
+            data = json.load(source)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def load_cached(report_dir: Optional[str]) -> Optional[dict]:
     if not report_dir:
         return None
@@ -296,6 +307,10 @@ async def evidence_for(execution, summary: DetailedTestSummary) -> dict:
     config = await get_config(get('project_id') or 'default')
     if config is None or not config.queries:
         return {'status': 'not_configured'}
+    environment_url = run_environment(get('report_dir')).get('prometheus_url')
+    if environment_url:
+        # The queries are the project's; the environment the run used says which Prometheus watches it.
+        config = config.model_copy(update={'prometheus_url': environment_url})
     start, end = get('start_time'), get('end_time')
     if isinstance(start, str):
         start = datetime.fromisoformat(start)
