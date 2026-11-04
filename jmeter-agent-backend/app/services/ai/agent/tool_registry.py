@@ -11,12 +11,10 @@ from dataclasses import dataclass, field
 from app.core.config import settings
 
 from app.services.ai.agent.types import (
-    ToolResult, ToolHandler, ErrorCategory, classify_error, classify_exception, reported_category,
+    ToolResult, ToolHandler, ErrorCategory, classify_exception, reported_category,
 )
 
 
-# Room for confirmations and report parsing around a run.
-LONG_RUN_MARGIN_SECONDS = 900
 DECLINED = {
     'denied': "The user denied this call; do not retry automatically",
     'unanswered': ("Nobody answered the confirmation in the JMeter Agent window. "
@@ -34,7 +32,6 @@ class Tool:
     # read: no lasting effect. draft: adds something new, overwrites nothing.
     # write and execute: change or run existing things, so the user is asked first.
     risk: Literal['read', 'draft', 'write', 'execute'] = 'read'
-    long_running: bool = False  # may wait for a whole test run
 
     def __post_init__(self):
         self.parameters = copy.deepcopy(self.parameters)
@@ -47,9 +44,8 @@ class Tool:
 
     @property
     def timeout_seconds(self) -> float:
-        if not self.long_running:
-            return settings.AGENT_TOOL_TIMEOUT_SECONDS
-        return settings.JMETER_TIMEOUT + settings.RESOURCE_MAX_WAIT_SECONDS + LONG_RUN_MARGIN_SECONDS
+        # No tool waits for a whole run: runs start in the background and are polled.
+        return settings.AGENT_TOOL_TIMEOUT_SECONDS
 
     def to_openai_schema(self) -> dict:
         """Convert to OpenAI function-calling format."""
@@ -60,14 +56,6 @@ class Tool:
                 "description": self.description,
                 "parameters": self.parameters,
             }
-        }
-
-    def to_anthropic_schema(self) -> dict:
-        """Convert to Anthropic tool-use format."""
-        return {
-            "name": self.name,
-            "description": self.description,
-            "input_schema": self.parameters,
         }
 
 
@@ -101,10 +89,6 @@ class ToolRegistry:
     def get_openai_schemas(self) -> list[dict]:
         """Get all tool schemas in OpenAI format."""
         return [t.to_openai_schema() for t in self._tools.values()]
-
-    def get_anthropic_schemas(self) -> list[dict]:
-        """Get all tool schemas in Anthropic format."""
-        return [t.to_anthropic_schema() for t in self._tools.values()]
 
     def validate_arguments(self, name: str, args: Any) -> Optional[str]:
         """Validate protocol input without running a handler or requesting approval."""
@@ -196,17 +180,9 @@ class ToolRegistry:
                 error_category=classify_exception(e),
             )
 
-    @staticmethod
-    def _classify_error(error_message: str) -> ErrorCategory:
-        """Delegate to shared classify_error in types.py."""
-        return classify_error(error_message)
-
     def __len__(self) -> int:
         return len(self._tools)
 
     def __contains__(self, name: str) -> bool:
         return name in self._tools
 
-
-# Singleton registry for built-in tools
-registry = ToolRegistry()

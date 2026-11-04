@@ -244,3 +244,20 @@ def _load_problem(text: str) -> Optional[str]:
             at = text.index(marker)
             return text[at:at + 300]
     return None
+
+
+def check(content: str, expected: tuple[str, ...] = ()) -> tuple[list[dict], list[dict]]:
+    """(errors, all issues) for a plan about to be saved: the rules above, then JMeter loading it.
+
+    Blocks while JMeter starts (several seconds); call it in a thread. JMeter is asked only when the
+    rules found nothing, and a machine without JMeter skips that step. Issues whose code is in
+    ``expected`` are the caller's known gaps (a token the user still has to supply): they stay in
+    the issues as warnings instead of refusing the plan.
+    """
+    issues = [dict(issue, severity='warning') if issue['code'] in expected else issue for issue in lint(content)]
+    failures = errors(issues)
+    if not failures:
+        loaded = load_check(content)
+        if loaded['checked'] and not loaded['ok']:
+            failures = [_issue('error', 'jmeter_load', f"JMeter 无法加载：{loaded['error']}")]
+    return failures, issues

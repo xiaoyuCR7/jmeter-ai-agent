@@ -59,7 +59,6 @@ class ImportResult:
     endpoints_found: int = 0
     auth_detected: str = ""
     jmx_paths: list[str] = field(default_factory=list)
-    execution_ids: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     error: Optional[str] = None
 
@@ -71,7 +70,6 @@ class ImportResult:
             "endpoints_found": self.endpoints_found,
             "auth_detected": self.auth_detected,
             "jmx_paths": self.jmx_paths,
-            "execution_ids": self.execution_ids,
             "warnings": self.warnings,
             "error": self.error,
         }
@@ -196,13 +194,8 @@ class OpenAPIImporter:
                     return decoded.decode(response.encoding or 'utf-8'), str(current)
         raise ValueError('Spec redirect limit reached')
 
-    async def import_from_url(self, url: str, execute_tests: bool = False) -> ImportResult:
-        """Fetch an OpenAPI spec from a URL and import it.
-
-        Args:
-            url: URL to the OpenAPI JSON/YAML spec.
-            execute_tests: Whether to immediately run tests after import.
-        """
+    async def import_from_url(self, url: str) -> ImportResult:
+        """Fetch an OpenAPI spec from a URL and import it."""
         try:
             body, final_url = await asyncio.wait_for(self._fetch_spec(url), timeout=SPEC_FETCH_TIMEOUT_SECONDS)
         except ValueError as e:
@@ -228,11 +221,13 @@ class OpenAPIImporter:
             except (ValueError, RecursionError):
                 return ImportResult(success=False, error="Invalid JSON in spec")
 
-        return await self.import_from_dict(spec, final_url, execute_tests)
+        return await self.import_from_dict(spec, final_url)
 
-    async def import_from_dict(self, spec: dict, source_url: str = "",
-                                execute_tests: bool = False) -> ImportResult:
-        """Parse an OpenAPI spec dict and create project + test plans."""
+    async def import_from_dict(self, spec: dict, source_url: str = "") -> ImportResult:
+        """Parse an OpenAPI spec dict and create a project with a checked baseline plan.
+
+        Nothing runs: the caller starts a run when it wants one, through the usual approvals.
+        """
         try:
             parsed = await asyncio.to_thread(self._parse_spec, spec, source_url)
         except (ValueError, TypeError, KeyError) as exc:
@@ -272,10 +267,15 @@ class OpenAPIImporter:
         # Generate baseline JMX
         try:
             eps = [self._api_endpoint(ep, parsed, warnings) for ep in parsed.endpoints]
-            if execute_tests and warnings:
-                raise ValueError("Resolve import warnings before executing: " + "; ".join(warnings))
             config = TestConfig(test_type="baseline", concurrent_users=10, duration_seconds=300)
             jmx = generator.generate_basic_jmx(eps, config, parsed.base_url, f"{parsed.title} Baseline")
+            # The same checks a plan written by the model passes, before anything is created.
+            from app.services.jmeter import jmx_lint
+            # An auth token is left for the user to supply (a warning says so); anything else must be right.
+            failures, issues = await asyncio.to_thread(jmx_lint.check, jmx, ('undefined_variable',))
+            if failures:
+                raise ValueError("the generated plan did not pass its checks: " + jmx_lint.describe(failures))
+            warnings.extend(issue['message'] for issue in issues if issue['severity'] == 'warning')
             from app.services.db_store import db_store
             from app.services.execution_lifecycle import execution_lifecycle
             await db_store.create_project({
@@ -317,19 +317,6 @@ class OpenAPIImporter:
                 endpoints_found=len(parsed.endpoints), auth_detected=parsed.auth_type,
                 warnings=warnings, error=f"Baseline import failed: {e}")
 
-        execution_ids = []
-        if execute_tests:
-            try:
-                execution = await execution_lifecycle.execute(jmx_path, test_plan_id=plan.id,
-                                                               project_id=project_id)
-                execution_ids.append(execution.id)
-                if execution.status.value != "completed":
-                    raise ValueError(execution.error_message or f"Execution {execution.status.value}")
-            except Exception as exc:
-                return ImportResult(success=False, project_id=project_id, project_name=parsed.title,
-                    endpoints_found=len(eps), auth_detected=parsed.auth_type, jmx_paths=jmx_paths,
-                    execution_ids=execution_ids, warnings=warnings, error=f"Execution failed: {exc}")
-
         return ImportResult(
             success=True,
             project_id=project_id,
@@ -337,7 +324,6 @@ class OpenAPIImporter:
             endpoints_found=len(parsed.endpoints),
             auth_detected=parsed.auth_type,
             jmx_paths=jmx_paths,
-            execution_ids=execution_ids,
             warnings=warnings,
         )
 

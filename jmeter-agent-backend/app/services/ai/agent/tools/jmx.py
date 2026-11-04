@@ -123,11 +123,7 @@ async def create_jmx(
         base_url=base_url,
         test_name=test_name,
     )
-    issues = jmx_lint.lint(jmx_content)
-    failures = jmx_lint.errors(issues)
-    loaded = await asyncio.to_thread(jmx_lint.load_check, jmx_content) if not failures else None
-    if loaded and loaded['checked'] and not loaded['ok']:
-        failures = [{'severity': 'error', 'code': 'jmeter_load', 'message': f"JMeter 无法加载：{loaded['error']}"}]
+    failures, issues = await asyncio.to_thread(jmx_lint.check, jmx_content)
     if failures:
         # Nothing is saved: an agent fixes its arguments and calls again.
         return {"error": "The plan was not created: " + jmx_lint.describe(failures), "issues": failures}
@@ -204,31 +200,13 @@ async def get_jmx_content(jmx_path: str) -> dict:
     }
 
 
-async def list_test_plans() -> dict:
-    """List all saved JMX test plans."""
-    if not os.path.exists(settings.TEST_PLANS_DIR):
-        return {"test_plans": []}
-
-    plans = []
-    for item in os.listdir(settings.TEST_PLANS_DIR):
-        item_path = os.path.join(settings.TEST_PLANS_DIR, item)
-        if os.path.isdir(item_path):
-            # New structure: test_plans/<project_id>/<file>.jmx
-            for f in os.listdir(item_path):
-                if f.endswith(".jmx"):
-                    plans.append({
-                        "name": f.replace(".jmx", ""),
-                        "project_id": item,
-                        "path": os.path.join(item_path, f),
-                    })
-        elif item.endswith(".jmx"):
-            plans.append({
-                "name": item.replace(".jmx", ""),
-                "project_id": None,
-                "path": item_path,
-            })
-
-    return {"test_plans": plans}
+async def list_test_plans(project_id: Optional[str] = None) -> dict:
+    """List the test plans in the app, optionally of one project, with the IDs other tools take."""
+    from app.services.storage import store
+    return {"test_plans": [
+        {"test_plan_id": plan.id, "name": plan.name, "project_id": plan.project_id, "jmx_path": plan.jmx_path,
+         "test_type": plan.test_config.test_type.value}
+        for plan in store.test_plans.values() if project_id is None or plan.project_id == project_id]}
 
 
 async def validate_jmx(jmx_path: str) -> dict:
@@ -351,11 +329,20 @@ async def update_jmx(
             else:
                 skipped.append("think_time_ms")
 
-        # Rebuild XML
         new_xml = build_jmx(tree)
-        os.makedirs(os.path.dirname(jmx_path), exist_ok=True)
-        with open(jmx_path, "w", encoding="utf-8") as f:
-            f.write(new_xml)
+        # The changed plan passes the same checks as a new one, or the file stays as it was.
+        failures, _issues = await asyncio.to_thread(jmx_lint.check, new_xml)
+        if failures:
+            return {"error": "The plan was not changed: " + jmx_lint.describe(failures), "issues": failures}
+        temp_path = f"{jmx_path}.{os.getpid()}.tmp"
+        try:
+            with open(temp_path, "w", encoding="utf-8") as f:
+                f.write(new_xml)
+            os.replace(temp_path, jmx_path)  # A failed write leaves the old plan whole.
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        await _record_load(jmx_path, applied)
 
         result = {
             "jmx_path": jmx_path,
@@ -373,6 +360,21 @@ async def update_jmx(
         return result
     except Exception as e:
         return {"error": str(e)}
+
+
+async def _record_load(jmx_path: str, applied: dict) -> None:
+    """Keep the plan's saved settings, which the app shows, in step with what its file now runs."""
+    from app.services.execution_lifecycle import execution_lifecycle
+    from app.services.storage import store
+    fields = {key: value for key, value in applied.items()
+              if key in ('concurrent_users', 'duration_seconds', 'ramp_up_seconds', 'think_time_ms')}
+    if not fields:
+        return
+    target = os.path.normcase(os.path.realpath(jmx_path))
+    for plan in list(store.test_plans.values()):
+        if plan.jmx_path and os.path.normcase(os.path.realpath(plan.jmx_path)) == target:
+            config = plan.test_config.model_copy(update=fields)
+            await execution_lifecycle.register_plan(plan.model_copy(update={'test_config': config}))
 
 
 async def import_jmx(source_path: str, project_id: str = "default",
@@ -556,10 +558,10 @@ jmx_tools = [
     ),
     Tool(
         name="list_test_plans",
-        description="List all saved JMX test plans on disk.",
+        description="List the test plans in the app with their test_plan_id and jmx_path, optionally of one project.",
         parameters={
             "type": "object",
-            "properties": {},
+            "properties": {"project_id": {"type": "string", "description": "Only this project's plans"}},
         },
         handler=list_test_plans,
     ),

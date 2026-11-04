@@ -226,7 +226,7 @@ class TestScheduler:
             )
 
         if not execution_id:
-            execution_id = str(uuid.uuid4())[:8]
+            execution_id = uuid.uuid4().hex  # The same form as every other run id.
 
         from app.models.schemas import TestExecutionStatus
         from app.services.execution_lifecycle import execution_lifecycle

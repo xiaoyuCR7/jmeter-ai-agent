@@ -93,12 +93,11 @@ class MCPServer:
 
     # ── Registration ────────────────────────────────────
 
-    def register_tool(self, name: str, description: str, schema: dict, handler: Callable, risk='read',
-                      long_running=False):
+    def register_tool(self, name: str, description: str, schema: dict, handler: Callable, risk='read'):
         from app.services.ai.agent.tool_registry import Tool
         if name in self._tools:
             return
-        definition = Tool(name, description, schema, handler, risk=risk, long_running=long_running)
+        definition = Tool(name, description, schema, handler, risk=risk)
         self._tool_registry.register(definition)
         self._tools[name] = MCPTool(
             name=name, description=description, inputSchema=definition.parameters, risk=risk,
@@ -117,17 +116,13 @@ class MCPServer:
     def register_all_agent_tools(self):
         """Register every built-in agent tool as an MCP tool."""
         from app.services.ai.agent.tools import get_all_builtin_tools
-        from app.services.ai.agent.tools.jmeter import background_tools
-        started_in_background = {tool.name: tool for tool in background_tools}
         for tool in get_all_builtin_tools():
-            tool = started_in_background.get(tool.name, tool)
             self.register_tool(
                 name=tool.name,
                 description=tool.description,
                 schema=tool.parameters if hasattr(tool, 'parameters') else {},
                 handler=tool.handler,
                 risk=tool.risk,
-                long_running=tool.long_running,
             )
 
     def register_all_resources(self):
@@ -311,7 +306,7 @@ class MCPServer:
         async def run():
             try:
                 try:
-                    result = await asyncio.wait_for(self._execute_request(body), self._request_timeout(body))
+                    result = await asyncio.wait_for(self._execute_request(body), self.REQUEST_TIMEOUT_SECONDS)
                 except asyncio.TimeoutError:
                     result = self._error_response(req_id, -32000, "Request timed out")
                 if not session.closed:
@@ -325,12 +320,6 @@ class MCPServer:
         session.pending[req_id] = task
         # A task cancelled before its coroutine starts never enters run's finally.
         task.add_done_callback(lambda finished: session.pending.pop(req_id, None))
-
-    def _request_timeout(self, body: dict) -> float:
-        """A request is bounded, but never shorter than the work its tool is known to do."""
-        name = body.get("params", {}).get("name") if body["method"] == "tools/call" else None
-        tool = self._tool_registry.get(name) if isinstance(name, str) else None
-        return tool.timeout_seconds if tool and tool.long_running else self.REQUEST_TIMEOUT_SECONDS
 
     async def _dispatch(self, method: str, params: dict, req_id: str) -> Any:
         """Route JSON-RPC method to handler."""

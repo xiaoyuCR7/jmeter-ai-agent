@@ -315,9 +315,9 @@ async def test_http_and_agent_use_same_lifecycle(env, monkeypatch):
     response = await execution_routes.execute_test_plan(plan.id, BackgroundTasks(), ai_model=None)
     assert response.id == 'shared'
     fake.submit.assert_awaited_once()
-    response = await jmeter.execute_test(str(env.path), skip_resource_check=True)
+    response = await jmeter.start_test(str(env.path), skip_resource_check=True)
     assert response['execution_id'] == 'shared'
-    fake.execute.assert_awaited_once()
+    assert fake.submit.await_count == 2
 
 
 @pytest.mark.asyncio

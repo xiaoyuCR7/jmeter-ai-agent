@@ -31,6 +31,8 @@ from app.services.ai.prompts.jmx_generator import SCENARIO_RULES
 logger = logging.getLogger(__name__)
 
 PLAN_ROUNDS = 4
+# JMeter checks of the plans in one save_plans call that run at once; each is a JVM.
+PARALLEL_PLAN_CHECKS = 3
 # The document may take at most this share of the model's context: every save_plans call repeats
 # the endpoints, and those calls and their results must fit beside it.
 DOCUMENT_CONTEXT_SHARE = 0.5
@@ -115,13 +117,20 @@ def save_plans_tool(draft: _Draft) -> Tool:
                       if project.get(key) is not None}
             created = await create_project(**fields)
             draft.project_id, draft.project_name, draft.base_url = created['project_id'], fields['name'], fields['base_url']
+        gate = asyncio.Semaphore(PARALLEL_PLAN_CHECKS)
+
+        async def save(plan: dict) -> dict:
+            async with gate:
+                try:
+                    return await create_jmx(**plan, base_url=draft.base_url, project_id=draft.project_id)
+                except Exception as error:  # One plan's failure must not leave the others unrecorded.
+                    return {'error': f'The plan was not created: {error}'}
+
+        # Each plan starts JMeter once to be checked (about 8 s), so they are checked side by side.
+        receipts = await asyncio.gather(*(save(plan) for plan in plans))
         results = []
-        for plan in plans:
+        for plan, receipt in zip(plans, receipts):
             name = plan.get('test_name') if isinstance(plan, dict) else None
-            try:
-                receipt = await create_jmx(**plan, base_url=draft.base_url, project_id=draft.project_id)
-            except (TypeError, ValueError) as error:
-                receipt = {'error': f'The plan was not created: {error}'}
             if receipt.get('error'):
                 results.append({'test_name': name, 'saved': False, 'error': receipt['error'],
                                 'issues': receipt.get('issues')})

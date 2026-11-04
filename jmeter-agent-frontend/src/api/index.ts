@@ -466,8 +466,7 @@ export const api = {
   downloadAnalysisReport: (executionId: string) => instance.get(`/analysis/reports/${executionId}/download`, { responseType: 'blob' }),
 
 
-  importOpenAPI: (url: string, execute?: boolean) =>
-    instance.post('/openapi/import', { url, execute }),
+  importOpenAPI: (url: string) => instance.post('/openapi/import', { url }),
 
 
   checkResources: () => instance.get('/system/resources'),

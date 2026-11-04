@@ -113,15 +113,15 @@ async def test_agent_runs_scripts_only_after_a_second_explicit_approval(monkeypa
     finding = [{'name': 'Run shell', 'kind': 'SystemSampler'}]
     done = SimpleNamespace(id='x')
     execute = AsyncMock(side_effect=[script_risk.ScriptApprovalRequired(finding, 'digest'), done])
-    monkeypatch.setattr(tools.execution_lifecycle, 'execute', execute)
+    monkeypatch.setattr(tools.execution_lifecycle, 'submit', execute)
     request = AsyncMock(return_value=approved)
     monkeypatch.setattr(confirmation_module.confirmations, 'request', request)
     if approved:
-        assert await tools.execute_with_script_approval('execute_test', 'plan.jmx', 'run') is done
+        assert await tools._with_script_approval(tools.execution_lifecycle.submit, 'execute_test', 'plan.jmx', 'run') is done
         assert execute.await_args.kwargs['approved_sha256'] == 'digest'
     else:
         with pytest.raises(ValueError, match='did not approve'):
-            await tools.execute_with_script_approval('execute_test', 'plan.jmx', 'run')
+            await tools._with_script_approval(tools.execution_lifecycle.submit, 'execute_test', 'plan.jmx', 'run')
         assert execute.await_count == 1
     request.assert_awaited_once_with('execute_test', {'jmx_path': 'plan.jmx', 'runs_scripts_on_this_machine': finding})
 

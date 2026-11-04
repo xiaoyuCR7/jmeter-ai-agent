@@ -73,65 +73,29 @@ async def create_project(name: str, description: str = "", base_url: str = "", h
 
 
 async def list_projects() -> dict:
-    """List all projects."""
-    projects = []
-    for pid, proj in store.projects.items():
-        plan_count = len([p for p in store.test_plans.values() if getattr(p, 'project_id', '') == pid])
-        projects.append({
-            "id": pid,
-            "name": proj.name if hasattr(proj, 'name') else str(proj),
-            "description": getattr(proj, 'description', ''),
-            "test_plan_count": plan_count,
-        })
-
-    # Also scan filesystem
-    if os.path.exists(settings.TEST_PLANS_DIR):
-        for item in os.listdir(settings.TEST_PLANS_DIR):
-            item_path = os.path.join(settings.TEST_PLANS_DIR, item)
-            if os.path.isdir(item_path):
-                existing_ids = {p["id"] for p in projects}
-                if item not in existing_ids:
-                    jmx_count = len([f for f in os.listdir(item_path)
-                                     if f.endswith(".jmx")])
-                    projects.append({
-                        "id": item,
-                        "name": item,
-                        "description": "Filesystem project",
-                        "test_plan_count": jmx_count,
-                    })
-
-    return {"projects": projects}
+    """List the projects in the app, with how many test plans each has."""
+    counts: dict[str, int] = {}
+    for plan in store.test_plans.values():
+        counts[plan.project_id] = counts.get(plan.project_id, 0) + 1
+    return {"projects": [{"id": pid, "name": project.name, "description": project.description,
+                          "test_plan_count": counts.get(pid, 0)} for pid, project in store.projects.items()]}
 
 
 async def get_project_info(project_id: str) -> dict:
-    """Get detailed info about a project.
+    """Get a project's environment and its test plans.
 
     Args:
         project_id: Project ID.
     """
-    if project_id in store.projects:
-        proj = store.projects[project_id]
-        return {
-            "id": project_id,
-            "name": proj.name if hasattr(proj, 'name') else str(proj),
-            "description": getattr(proj, 'description', ''),
-            "environment": getattr(proj, 'environment', None).model_dump() if hasattr(proj, 'environment') and proj.environment else {},
-        }
-
-    # Check filesystem
-    project_dir = os.path.join(settings.TEST_PLANS_DIR, project_id)
-    if os.path.isdir(project_dir):
-        jmx_files = [f for f in os.listdir(project_dir)
-                     if f.endswith(".jmx")]
-        return {
-            "id": project_id,
-            "name": project_id,
-            "description": "Filesystem project",
-            "jmx_count": len(jmx_files),
-            "jmx_files": jmx_files,
-        }
-
-    return {"error": f"Project not found: {project_id}"}
+    project = store.get_project(project_id)
+    if project is None:
+        return {"error": f"Project not found: {project_id}"}
+    return {
+        "id": project_id, "name": project.name, "description": project.description,
+        "environment": project.environment.model_dump() if project.environment else {},
+        "test_plans": [{"test_plan_id": plan.id, "name": plan.name, "jmx_path": plan.jmx_path}
+                       for plan in store.test_plans.values() if plan.project_id == project_id],
+    }
 
 
 async def update_project_env(

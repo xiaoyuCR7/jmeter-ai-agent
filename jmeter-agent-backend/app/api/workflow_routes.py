@@ -74,23 +74,22 @@ async def openapi_import(request: dict):
     Accepts:
     - {"url": "https://petstore.swagger.io/v2/swagger.json"} — fetches spec from URL
     - {"spec": {...}} — parses spec dict directly
-    - {"url": "...", "project_name": "...", "execute": true/false}
+    - {"url": "...", "project_name": "..."}
 
-    Returns ImportResult with project_id, endpoints_found, auth_detected, jmx_paths.
+    Returns ImportResult with project_id, endpoints_found, auth_detected, jmx_paths. Nothing runs.
     """
     url = request.get("url", "")
     spec_dict = request.get("spec")
     project_name = request.get("project_name", "")
-    execute = request.get("execute", False)
-    if not isinstance(execute, bool):
-        raise HTTPException(status_code=422, detail="execute must be a JSON boolean")
+    if "execute" in request:
+        raise HTTPException(status_code=422, detail="Import no longer runs tests; start a run from the plan")
 
     importer = OpenAPIImporter()
 
     if spec_dict:
-        result = await importer.import_from_dict(spec_dict, source_url=url, execute_tests=execute)
+        result = await importer.import_from_dict(spec_dict, source_url=url)
     elif url:
-        result = await importer.import_from_url(url, execute_tests=execute)
+        result = await importer.import_from_url(url)
     else:
         raise HTTPException(status_code=400, detail="Either 'url' or 'spec' is required")
 

@@ -371,18 +371,16 @@ async def test_incomplete_baseline_import_rolls_back_new_project_and_file(import
 
 
 @pytest.mark.asyncio
-async def test_execute_flag_uses_registered_plan_and_failed_execution_fails(imported):
-    document = spec()
-    document['security'] = []
-    result = await OpenAPIImporter().import_from_dict(document, execute_tests=True)
-    assert result.success, result.error
-    assert result.execution_ids == ['fake-run']
-    imported.execute.assert_awaited_once()
-    assert imported.execute.call_args.kwargs['test_plan_id'] in imported.store.test_plans
-    imported.execute.return_value.status.value = 'failed'
-    imported.execute.return_value.error_message = 'fixture failure'
-    result = await OpenAPIImporter().import_from_dict(document, execute_tests=True)
-    assert not result.success and 'fixture failure' in result.error
+async def test_a_generated_plan_that_fails_its_checks_creates_nothing(imported, monkeypatch):
+    from app.services.db_store import db_store
+    from app.services.jmeter import jmx_lint
+    refusal = [{'severity': 'error', 'code': 'jmeter_load', 'message': 'JMeter 无法加载：fixture'}]
+    monkeypatch.setattr(jmx_lint, 'check', lambda content, expected=(): (refusal, refusal))
+    result = await OpenAPIImporter().import_from_dict(spec())
+    assert not result.success and 'fixture' in result.error
+    assert await db_store.get_project(result.project_id) is None
+    assert not imported.store.test_plans
+    imported.execute.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -395,23 +393,13 @@ async def test_external_or_cyclic_refs_are_actionable_failure(imported):
 
 
 @pytest.mark.asyncio
-async def test_inline_api_forwards_execute_flag(monkeypatch):
-    from app.api import workflow_routes
-    from app.services.openapi_importer import ImportResult
-    fake = AsyncMock(return_value=ImportResult(success=False, error='fixture'))
-    monkeypatch.setattr(OpenAPIImporter, 'import_from_dict', fake)
-    await workflow_routes.openapi_import({'spec': spec(), 'execute': True})
-    assert fake.call_args.kwargs['execute_tests'] is True
-
-
-@pytest.mark.asyncio
 async def test_inline_api_project_rename_keeps_cache_version_in_sync(imported):
     from app.api import workflow_routes
     from app.services.db_store import db_store
     from app.services.execution_lifecycle import persist_project
 
     result = await workflow_routes.openapi_import({
-        'spec': spec(), 'execute': False, 'project_name': 'Renamed fixture',
+        'spec': spec(), 'project_name': 'Renamed fixture',
     })
     project_id = result['project_id']
     persisted = await db_store.get_project(project_id)
@@ -424,8 +412,8 @@ async def test_inline_api_project_rename_keeps_cache_version_in_sync(imported):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('value', ['false', 'true', 0, 1, None])
-async def test_openapi_execute_requires_a_json_boolean(monkeypatch, value):
+@pytest.mark.parametrize('value', [True, False, 'true', None])
+async def test_the_import_api_no_longer_runs_tests(monkeypatch, value):
     from fastapi import HTTPException
     from app.api import workflow_routes
     fake = AsyncMock()
@@ -434,13 +422,6 @@ async def test_openapi_execute_requires_a_json_boolean(monkeypatch, value):
         await workflow_routes.openapi_import({'spec': spec(), 'execute': value})
     assert error.value.status_code == 422
     fake.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_bearer_without_credentials_does_not_auto_execute(imported):
-    result = await OpenAPIImporter().import_from_dict(spec(), execute_tests=True)
-    assert not result.success and 'auth_token' in result.error
-    imported.execute.assert_not_awaited()
 
 
 @pytest.mark.asyncio

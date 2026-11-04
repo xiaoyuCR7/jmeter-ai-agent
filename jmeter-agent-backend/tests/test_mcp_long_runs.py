@@ -43,7 +43,7 @@ async def until(condition):
 
 
 @pytest.mark.asyncio
-async def test_mcp_starts_runs_in_the_background_but_agents_wait_for_them(server, monkeypatch):
+async def test_runs_start_in_the_background_for_every_caller(server, monkeypatch):
     from app.services.ai.agent.tools import get_all_builtin_tools
     server.register_all_agent_tools()
     started = SimpleNamespace(id='run-1', test_plan_id='plan', status=SimpleNamespace(value='pending'))
@@ -58,19 +58,16 @@ async def test_mcp_starts_runs_in_the_background_but_agents_wait_for_them(server
     submit.assert_awaited_once()
 
     descriptions = {tool.name: tool for tool in get_all_builtin_tools()}
-    assert descriptions['execute_test'].handler is jmeter.execute_test
-    assert descriptions['execute_test'].long_running
+    assert descriptions['execute_test'].handler is jmeter.start_test
+    assert descriptions['execute_distributed'].handler is jmeter.start_distributed
     assert 'get_execution_status' in server._tools['execute_test'].description
     assert 'get_execution_status' in server._tools['execute_distributed'].description
 
 
-def test_long_tools_are_not_cut_off_by_the_default_tool_limit():
+def test_no_tool_waits_for_a_whole_run():
     from app.core.config import settings
     from app.services.ai.agent.tools import get_all_builtin_tools
-    tools = {tool.name: tool for tool in get_all_builtin_tools()}
-    for name in ('execute_test', 'execute_distributed', 'import_openapi_spec'):
-        assert tools[name].timeout_seconds > settings.JMETER_TIMEOUT
-    assert tools['get_execution_evidence'].timeout_seconds == settings.AGENT_TOOL_TIMEOUT_SECONDS
+    assert {tool.timeout_seconds for tool in get_all_builtin_tools()} == {settings.AGENT_TOOL_TIMEOUT_SECONDS}
 
 
 @pytest.mark.asyncio

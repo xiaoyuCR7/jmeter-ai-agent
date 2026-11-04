@@ -1,4 +1,4 @@
-﻿"""Agent tools for the test machine's resources, run comparison, OpenAPI import and anomaly detection."""
+"""Agent tools for the test machine's resources, run comparison, OpenAPI import and anomaly detection."""
 
 import asyncio
 from app.core.config import settings, safe_path
@@ -70,16 +70,10 @@ async def compare_runs(
 
 
 
-async def import_openapi_spec(url: str, execute: bool = False) -> dict:
-    """Import an OpenAPI/Swagger specification and auto-generate project + test plans.
-
-    Args:
-        url: URL to the OpenAPI JSON/YAML spec.
-        execute: Whether to immediately run tests after import.
-    """
+async def import_openapi_spec(url: str) -> dict:
+    """Import an OpenAPI/Swagger specification as a new project with a checked baseline plan."""
     from app.services.openapi_importer import OpenAPIImporter
-    importer = OpenAPIImporter()
-    result = await importer.import_from_url(url, execute_tests=execute)
+    result = await OpenAPIImporter().import_from_url(url)
     return result.model_dump()
 
 
@@ -143,18 +137,18 @@ resource_tools = [
 
     Tool(
         name="import_openapi_spec",
-        description="Import supported OpenAPI/Swagger HTTP operations from a URL and create plans. Supply real authentication tokens separately; unsupported correlation is not inferred. Optional execution requires confirmation.",
+        description="Import supported OpenAPI/Swagger HTTP operations from a URL as a new project with a baseline "
+                    "plan, checked and loaded by JMeter before it is saved. Supply real authentication tokens "
+                    "separately; unsupported correlation is not inferred. Nothing runs; start a run afterwards.",
         parameters={
             "type": "object",
             "properties": {
                 "url": {"type": "string", "description": "URL to the OpenAPI JSON/YAML spec"},
-                "execute": {"type": "boolean", "description": "Whether to immediately run tests after import"},
             },
             "required": ["url"],
         },
         handler=import_openapi_spec,
-        risk='execute',
-        long_running=True,
+        risk='draft',
     ),
     Tool(
         name="detect_anomalies",

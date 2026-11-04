@@ -242,7 +242,6 @@ async def test_registered_analysis_never_models_changed_scope_or_empty_evidence(
 ])
 def test_unrecoverable_errors_take_precedence_over_retry_and_input_patterns(message, expected):
     assert classify_error(message) == expected
-    assert ToolRegistry._classify_error(message) == expected
 
 
 @pytest.mark.asyncio

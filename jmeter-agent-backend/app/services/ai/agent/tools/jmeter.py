@@ -4,7 +4,6 @@ import os
 import json
 import asyncio
 import logging
-from dataclasses import replace
 
 from app.core.config import settings
 from app.services.execution_lifecycle import execution_lifecycle
@@ -47,10 +46,6 @@ async def _with_script_approval(run, tool_name: str, jmx_path: str, *args, **kwa
     return await run(jmx_path, *args, **kwargs)
 
 
-async def execute_with_script_approval(tool_name: str, jmx_path: str, *args, **kwargs):
-    return await _with_script_approval(execution_lifecycle.execute, tool_name, jmx_path, *args, **kwargs)
-
-
 def resource_hooks(skip_resource_check: bool, resource_info: dict, *, wait: bool = True):
     """before_execute and postprocess callbacks: record the machine's load and, with ``wait``,
     hold or stop the run until it is quiet."""
@@ -89,41 +84,6 @@ def resource_hooks(skip_resource_check: bool, resource_info: dict, *, wait: bool
     return before_execute, postprocess
 
 
-async def execute_test(jmx_path: str, execution_id: str = "",
-                       skip_resource_check: bool = False) -> dict:
-    """Execute a JMeter test plan with resource-aware scheduling.
-
-    Before execution, checks CPU/memory usage. If the host machine is
-    under high load, waits for resources to free up (up to configurable
-    timeout). This ensures performance test results are not skewed by
-    the test machine's own resource contention.
-
-    Args:
-        jmx_path: Absolute path to the .jmx file.
-        execution_id: Optional execution ID (auto-generated if empty).
-        skip_resource_check: If True, skip the resource check and run immediately.
-    """
-    from app.models.schemas import TestExecutionStatus
-    resource_info = {}
-    before_execute, postprocess = resource_hooks(skip_resource_check, resource_info)
-    try:
-        result = await execute_with_script_approval(
-            'execute_test', jmx_path, execution_id, before_execute=before_execute, postprocess=postprocess)
-    except (ValueError, FileNotFoundError, FileExistsError) as error:
-        return {"error": str(error), "execution_id": execution_id}
-    return {
-        "execution_id": result.id, "test_plan_id": result.test_plan_id,
-        "success": result.status == TestExecutionStatus.COMPLETED,
-        "status": result.status.value,
-        "start_time": result.start_time.isoformat() if result.start_time else None,
-        "end_time": result.end_time.isoformat() if result.end_time else None,
-        "report_dir": result.report_dir, "log_path": result.log_path,
-        "error_message": result.error_message,
-        "report_status": result.report_status, "report_error": result.report_error,
-        "resource_info": resource_info,
-    }
-
-
 async def _start(tool_name: str, jmx_path: str, execution_id: str, **kwargs) -> dict:
     """Hand a run to the lifecycle and return; it outlives the request that started it."""
     try:
@@ -135,7 +95,7 @@ async def _start(tool_name: str, jmx_path: str, execution_id: str, **kwargs) -> 
 
 
 async def start_test(jmx_path: str, execution_id: str = "", skip_resource_check: bool = False) -> dict:
-    """Start a JMeter test plan in the background (see ``execute_test``)."""
+    """Start a JMeter test plan in the background, after a check of the machine's load."""
     before_execute, postprocess = resource_hooks(skip_resource_check, {})
     return await _start('execute_test', jmx_path, execution_id, before_execute=before_execute, postprocess=postprocess)
 
@@ -248,43 +208,9 @@ def _distributed_engines(remote_engines: str):
 
 
 async def start_distributed(jmx_path: str, execution_id: str = "", remote_engines: str = "") -> dict:
-    """Start a distributed run in the background (see ``execute_distributed``)."""
+    """Start a run across the remote engines in the background."""
     engines, error = _distributed_engines(remote_engines)
     return error or await _start('execute_distributed', jmx_path, execution_id, remote_engines=engines)
-
-
-async def execute_distributed(jmx_path: str, execution_id: str = "",
-                              remote_engines: str = "") -> dict:
-    """Execute a JMeter test across multiple remote engines (distributed testing).
-
-    Args:
-        jmx_path: Path to the .jmx file.
-        execution_id: Optional execution ID.
-        remote_engines: Comma-separated "host:port" list. Uses config if empty.
-    """
-    import uuid
-    if not execution_id:
-        execution_id = str(uuid.uuid4())[:8]
-
-    engines, error = _distributed_engines(remote_engines)
-    if error:
-        return error
-    try:
-        result = await execute_with_script_approval('execute_distributed', jmx_path, execution_id,
-                                                     remote_engines=engines)
-        return {
-            "execution_id": execution_id,
-            "status": result.status.value,
-            "start_time": result.start_time.isoformat() if result.start_time else None,
-            "end_time": result.end_time.isoformat() if result.end_time else None,
-            "report_dir": result.report_dir,
-            "log_path": result.log_path,
-            "error_message": result.error_message,
-            "engines_used": engines,
-            "total_engines": len(engines),
-        }
-    except Exception as e:
-        return {"error": str(e), "execution_id": execution_id}
 
 
 async def get_remote_engines() -> dict:
@@ -292,11 +218,14 @@ async def get_remote_engines() -> dict:
     from app.services.jmeter.distributed_executor import dist_executor
     return dist_executor.get_engine_status()
 
-# Tool definitions
+# A tool call is bounded far below a load test's length, so a run is started and then polled.
+_BACKGROUND_NOTE = (" Returns as soon as the run has started; it continues in the background. "
+                    "Poll get_execution_status with the returned execution_id.")
+
 jmeter_tools = [
     Tool(
         name="execute_test",
-        description="Execute a JMeter test plan (.jmx file) and return execution status.",
+        description="Start a JMeter test plan (.jmx file)." + _BACKGROUND_NOTE,
         parameters={
             "type": "object",
             "properties": {
@@ -305,9 +234,8 @@ jmeter_tools = [
             },
             "required": ["jmx_path"],
         },
-        handler=execute_test,
+        handler=start_test,
         risk='execute',
-        long_running=True,
     ),
     Tool(
         name="get_execution_status",
@@ -361,7 +289,8 @@ jmeter_tools = [
     ),
     Tool(
         name="execute_distributed",
-        description="Execute a JMeter test across multiple remote engines for high-scale distributed load testing. Uses the -R flag to coordinate master-slave execution.",
+        description="Start a JMeter test across multiple remote engines for high-scale distributed load testing "
+                    "(JMeter's -R master and workers)." + _BACKGROUND_NOTE,
         parameters={
             "type": "object",
             "properties": {
@@ -371,9 +300,8 @@ jmeter_tools = [
             },
             "required": ["jmx_path"],
         },
-        handler=execute_distributed,
+        handler=start_distributed,
         risk='execute',
-        long_running=True,
     ),
     Tool(
         name="get_remote_engines",
@@ -384,15 +312,4 @@ jmeter_tools = [
         },
         handler=get_remote_engines,
     ),
-]
-
-# MCP callers cannot hold a request open for a whole run: client timeouts are far shorter
-# than a load test. They start it and ask for its status instead.
-_BACKGROUND_NOTE = (" Returns as soon as the run has started; it continues in the background. "
-                    "Poll get_execution_status with the returned execution_id.")
-background_tools = [
-    replace(tool, description=tool.description + _BACKGROUND_NOTE, handler=handler, long_running=False)
-    for tool in jmeter_tools
-    for handler in [{'execute_test': start_test, 'execute_distributed': start_distributed}.get(tool.name)]
-    if handler
 ]

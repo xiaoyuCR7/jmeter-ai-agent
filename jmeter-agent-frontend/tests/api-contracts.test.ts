@@ -17,8 +17,9 @@ it('OpenAPI import sends the actual route/body contract', async () => {
   const source = readFileSync(new URL('../src/api/index.ts', import.meta.url), 'utf8')
   const instance = { post: vi.fn() }
   const { api } = selected(source, ['api'], { instance })
-  api.importOpenAPI('https://fixture.invalid/spec.json', true)
-  expect(instance.post).toHaveBeenLastCalledWith('/openapi/import', { url: 'https://fixture.invalid/spec.json', execute: true })
+  api.importOpenAPI('https://fixture.invalid/spec.json')
+  // The import only creates the project and plan; a run is started from the plan.
+  expect(instance.post).toHaveBeenLastCalledWith('/openapi/import', { url: 'https://fixture.invalid/spec.json' })
 })
 
 it('re-analysis goes to its own route', () => {

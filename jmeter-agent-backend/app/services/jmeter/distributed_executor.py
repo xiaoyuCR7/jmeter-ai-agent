@@ -62,7 +62,7 @@ class DistributedExecutor:
         """
         import uuid
         if not execution_id:
-            execution_id = str(uuid.uuid4())[:8]
+            execution_id = uuid.uuid4().hex  # The same form as every other run id.
 
         engines = remote_engines or self.get_engines()
         if not engines:
