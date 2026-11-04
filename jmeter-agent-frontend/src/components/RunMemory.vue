@@ -59,8 +59,7 @@ import { useRouter } from 'vue-router'
 const props = defineProps<{ executionId: string; refreshKey?: number }>()
 const emit = defineEmits<{ 'save-lesson': [] }>()
 
-const { currentLang } = useI18n()
-const L = (zh: string, en: string) => currentLang.value === 'en' ? en : zh
+const { L } = useI18n()
 
 const loading = ref(false)
 const busy = ref('')

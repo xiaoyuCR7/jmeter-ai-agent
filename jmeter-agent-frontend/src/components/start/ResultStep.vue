@@ -36,8 +36,7 @@ const props = defineProps<{ projectId: string; title: string; detail: string; di
 const emit = defineEmits<{ review: []; reset: [] }>()
 const md = new MarkdownIt()
 const router = useRouter()
-const { currentLang } = useI18n()
-const L = (zh: string, en: string) => currentLang.value === 'en' ? en : zh
+const { L, currentLang } = useI18n()
 
 // The plans this document produced, so the trial picks among them only.
 const plans = ref<{ id: string; name: string }[]>([])

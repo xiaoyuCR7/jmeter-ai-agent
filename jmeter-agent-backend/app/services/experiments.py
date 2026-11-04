@@ -78,6 +78,7 @@ class CapacitySearch(BaseModel):
     capacity_threads: Optional[int] = None  # The highest load that passed every check.
     capacity_throughput: Optional[float] = None
     stop_reason: str = ''
+    report_execution_id: Optional[str] = None  # The one step whose AI report covers the whole search.
     created_at: datetime = Field(default_factory=datetime.now)
     finished_at: Optional[datetime] = None
 
@@ -218,6 +219,7 @@ async def _search(search: CapacitySearch, plan, first, approved_sha256, confirm_
         else:
             search.stop_reason = f'最大负载 {search.steps[-1].threads} 线程仍然通过'
         search.status = 'finished'
+        await _report(search)
     except asyncio.CancelledError:
         search.status, search.stop_reason = 'cancelled', '已取消'
         for step in search.steps:
@@ -233,6 +235,26 @@ async def _search(search: CapacitySearch, plan, first, approved_sha256, confirm_
         search.finished_at = datetime.now()
         _save(search)
         _running.pop(search.id, None)
+
+
+def report_step(search: CapacitySearch) -> Optional[CapacityStep]:
+    """The step that decided the search: where it stopped, or the last one when every step passed."""
+    decided = [step for step in search.steps if step.status in ('stopped', 'passed') and step.execution_id]
+    stopped = [step for step in decided if step.status == 'stopped']
+    return (stopped or decided or [None])[-1]
+
+
+async def _report(search: CapacitySearch) -> None:
+    """One AI report per search instead of one per step; it recalls the earlier steps as runs at other loads."""
+    step = report_step(search)
+    if step is None or not settings.AUTO_ANALYSIS_ENABLED:
+        return
+    from app.services import post_run
+    try:
+        await post_run.start_reanalysis(step.execution_id)
+        search.report_execution_id = step.execution_id
+    except Exception as error:
+        logger.warning('No report for capacity search %s: %s', search.id, error)
 
 
 async def cancel_search(search_id: str) -> bool:

@@ -63,8 +63,7 @@ import { ElMessage } from 'element-plus'
 import { api } from '@/api'
 import { useI18n } from '@/composables/useI18n'
 
-const { currentLang } = useI18n()
-const L = (zh: string, en: string) => currentLang.value === 'en' ? en : zh
+const { L } = useI18n()
 
 const projects = ref<any[]>([])
 const projectId = ref('')

@@ -5,13 +5,15 @@ import { resolve } from 'node:path'
 import ts from 'typescript'
 import { describe, expect, it, vi } from 'vitest'
 import * as Vue from 'vue'
-import { compile } from '@vue/compiler-dom'
 import { flushPromises, mount } from '@vue/test-utils'
-import ElementPlus, { ElInput, ElInputNumber, ElSwitch } from 'element-plus'
+import ElementPlus, { ElInputNumber, ElSwitch } from 'element-plus'
 import HeadersEditor from '../src/components/editor/HeadersEditor.vue'
+import ThreadGroupForm from '../src/components/editor/ThreadGroupForm.vue'
+import EndpointSettingsForm from '../src/components/editor/EndpointSettingsForm.vue'
+import ParamsEditor from '../src/components/editor/ParamsEditor.vue'
 import { usePlanTree } from '../src/composables/usePlanTree'
 
-vi.mock('@/composables/useI18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }))
+vi.mock('@/composables/useI18n', () => ({ useI18n: () => ({ t: (key: string) => key, L: (zh: string) => zh }) }))
 
 // Exercise the real setup functions, without importing unrelated UI components.
 function editor(path = 'src/views/TestCaseEditor.vue') {
@@ -20,7 +22,7 @@ function editor(path = 'src/views/TestCaseEditor.vue') {
   const ast = ts.createSourceFile('setup.ts', script, ts.ScriptTarget.Latest, true)
   const declarations = ast.statements.filter(node => ts.isFunctionDeclaration(node) ||
     (ts.isVariableStatement(node) && node.declarationList.declarations.some(d =>
-      ts.isIdentifier(d.name) && ['paramRows', 'headerProps'].includes(d.name.text))))
+      ts.isIdentifier(d.name) && ['headerProps'].includes(d.name.text))))
   const source = declarations.map(node => node.getText(ast)).join('\n')
   const js = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
   const ref = (value: any) => Vue.ref(value)
@@ -43,26 +45,34 @@ function editor(path = 'src/views/TestCaseEditor.vue') {
   return { ...context, ...functions, load(tree: any) { context.treeData.value = tree; functions.parseTreeToEndpoints(tree) } }
 }
 
-function controlTemplate(fragment: string, context: Record<string, any>) {
-  const render = runInNewContext(`(function () { ${compile(`<div>${fragment}</div>`, { mode: 'function' }).code} })()`, { Vue })
-  return mount({ setup: () => context, render }, { global: { components: { ElInput, ElInputNumber, ElSwitch } } })
+function mountReal(component: any, props: Record<string, any>) {
+  return mount(component, { props, global: { plugins: [ElementPlus], stubs: { User: true, Delete: true, Plus: true } } })
 }
 
-const editorSource = () => readFileSync(resolve('src/views/TestCaseEditor.vue'), 'utf8')
+// The form item with this label, or undefined when it is not rendered.
+function item(wrapper: any, label: string) {
+  return wrapper.findAll('.el-form-item').find((w: any) => {
+    const text = w.find('.el-form-item__label')
+    return text.exists() && text.text() === label
+  })
+}
 
 describe('real editor control bindings', () => {
+  // The form controls live in their own components; each test mounts the real one on the editor's own state.
+  const threadGroupForm = (e: any) => mountReal(ThreadGroupForm, { config: e.threadGroupConfig, node: e.threadGroupNode.value,
+    numberValue: e.threadGroupNumberValue, canEdit: e.canEditNumber })
+
   it.each([undefined, 0, '0'])('allows editing duration after explicitly enabling a scheduler with duration %s', async raw => {
     const e = editor(); const original = plan(); const props = find(original, 'group1').properties
     props['ThreadGroup.scheduler'] = false
     if (raw === undefined) delete props['ThreadGroup.duration']
     else props['ThreadGroup.duration'] = raw
     e.load(original)
-    const toggle = editorSource().match(/<el-switch v-model="threadGroupConfig.scheduler"[^>]*\/>/)![0]
-    const duration = editorSource().match(/<el-form-item :label="t\('editor.tg.duration'\)">([\s\S]*?)<\/el-form-item>/)![1]
-    const wrapper = controlTemplate(`${toggle}<div v-if="threadGroupConfig.scheduler">${duration}</div>`, e)
+    const wrapper = threadGroupForm(e)
     expect(e.buildTreeFromEndpoints()).toEqual(original)
+    expect(item(wrapper, 'editor.tg.duration')).toBeUndefined()
     await wrapper.findComponent(ElSwitch).trigger('click')
-    const input = wrapper.findComponent(ElInputNumber)
+    const input = item(wrapper, 'editor.tg.duration')!.findComponent(ElInputNumber)
     expect(input.exists()).toBe(true)
     await input.find('input').setValue('300')
     await input.find('input').trigger('change')
@@ -79,23 +89,23 @@ describe('real editor control bindings', () => {
     ['delay', 'ThreadGroup.delay', '90000'],
   ])('shows and preserves unsupported original %s=%s (%s)', async (field, property, raw) => {
     const e = editor(); const original = plan(); find(original, 'group1').properties[property] = raw; e.load(original)
-    const fragment = editorSource().match(new RegExp(`<el-form-item :label="t\\('editor.tg.${field}'\\)">([\\s\\S]*?)<\\/el-form-item>`))![1]
-    const wrapper = controlTemplate(fragment, e)
+    const wrapper = threadGroupForm(e)
     await Vue.nextTick()
-    expect((wrapper.find('input').element as HTMLInputElement).value).toBe(raw)
-    expect(wrapper.find('input').attributes('readonly')).toBeDefined()
-    expect(wrapper.text()).toContain('JMX')
+    const control = item(wrapper, `editor.tg.${field}`)!
+    expect((control.find('input').element as HTMLInputElement).value).toBe(raw)
+    expect(control.find('input').attributes('readonly')).toBeDefined()
+    expect(control.text()).toContain('JMX')
     expect(e.buildTreeFromEndpoints()).toEqual(original)
     wrapper.unmount()
   })
 
   it('retains normal number editing and original business bounds', async () => {
     const e = editor(); e.load(plan())
-    const fragment = editorSource().match(/<el-form-item :label="t\('editor.tg.numThreads'\)">([\s\S]*?)<\/el-form-item>/)![1]
-    const wrapper = controlTemplate(fragment, e)
-    expect(wrapper.findComponent(ElInputNumber).props()).toMatchObject({ min: 1, max: 10000 })
-    await wrapper.find('input').setValue('125')
-    await wrapper.find('input').trigger('change')
+    const wrapper = threadGroupForm(e)
+    const control = item(wrapper, 'editor.tg.numThreads')!
+    expect(control.findComponent(ElInputNumber).props()).toMatchObject({ min: 1, max: 10000 })
+    await control.find('input').setValue('125')
+    await control.find('input').trigger('change')
     expect(find(e.buildTreeFromEndpoints(), 'group1').properties['ThreadGroup.num_threads']).toBe(125)
     wrapper.unmount()
   })
@@ -103,23 +113,34 @@ describe('real editor control bindings', () => {
   it.each(['${timeout}', '-1', '1.5'])('preserves and shows unsupported sampler timeout %s on mount', async raw => {
     const e = editor(); const original = plan(); find(original, 'request').properties['HTTPSampler.connect_timeout'] = raw
     e.load(original); e.selectedEndpoint.value = e.endpoints.value.get('request')
-    const fragment = editorSource().match(/<el-form-item :label="t\('editor.connectionTimeout'\)">([\s\S]*?)<\/el-form-item>/)![1]
-    const wrapper = controlTemplate(fragment, e)
+    const wrapper = mountReal(EndpointSettingsForm, { endpoint: e.selectedEndpoint.value, canEdit: e.canEditNumber })
     await Vue.nextTick()
-    expect((wrapper.find('input').element as HTMLInputElement).value).toBe(raw)
-    expect(wrapper.find('input').attributes('readonly')).toBeDefined()
+    const control = item(wrapper, 'editor.connectionTimeout')!
+    expect((control.find('input').element as HTMLInputElement).value).toBe(raw)
+    expect(control.find('input').attributes('readonly')).toBeDefined()
     expect(e.buildTreeFromEndpoints()).toEqual(original)
     wrapper.unmount()
   })
 
   it('writes a parameter cell edit back before the unsupported-edit save guard', async () => {
     const e = editor(); e.load(plan()); e.selectedEndpoint.value = e.endpoints.value.get('request')
-    const fragment = editorSource().match(/<el-input[^>]*:placeholder="t\('editor.paramValue'\)"[^>]*\/>/)![0]
-    const wrapper = controlTemplate(fragment.replaceAll('$index', '0'), e)
-    await wrapper.find('input').setValue('changed-page')
+    const wrapper = mountReal(ParamsEditor, { params: e.selectedEndpoint.value.queryParams })
+    await flushPromises()
+    await wrapper.find('input[placeholder="editor.paramValue"]').setValue('changed-page')
     expect(e.selectedEndpoint.value.queryParams[0].value).toBe('changed-page')
     expect(await e.handleSave()).toBe(false)
     expect(e.api.saveTestPlanTree).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('adds and removes parameter rows on the endpoint itself', async () => {
+    const e = editor(); e.load(plan()); e.selectedEndpoint.value = e.endpoints.value.get('request')
+    const wrapper = mountReal(ParamsEditor, { params: e.selectedEndpoint.value.queryParams })
+    await wrapper.findAll('button').find((button: any) => button.text().includes('editor.addParam'))!.trigger('click')
+    expect(e.selectedEndpoint.value.queryParams).toHaveLength(2)
+    await flushPromises()
+    await wrapper.findAll('.el-table__body tr')[1].find('button').trigger('click')
+    expect(e.selectedEndpoint.value.queryParams.map((p: any) => p.name)).toEqual(['page'])
     wrapper.unmount()
   })
 

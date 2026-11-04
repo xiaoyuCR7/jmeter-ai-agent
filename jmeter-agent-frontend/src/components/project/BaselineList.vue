@@ -60,8 +60,7 @@ import { useI18n } from '@/composables/useI18n'
 import { formatMs, formatPct, formatTime, formatTps } from '@/utils/format'
 
 const props = defineProps<{ projectId: string }>()
-const { currentLang } = useI18n()
-const L = (zh: string, en: string) => currentLang.value === 'en' ? en : zh
+const { L } = useI18n()
 
 const baselines = ref<any[]>([])
 const planNames = ref<Record<string, string>>({})

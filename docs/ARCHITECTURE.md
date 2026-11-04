@@ -25,6 +25,7 @@ jmeter-agent-backend/app/
 │   ├── jmeter/
 │   │   ├── executor.py          启动 JMeter 子进程或容器
 │   │   ├── run_guard.py         运行中读 JTL，请求几乎全部失败时停止运行
+│   │   ├── live_stats.py        把运行中读到的结果按 5 秒汇总，供实时面板（GET /executions/{id}/live）
 │   │   ├── load_variants.py     按比例缩放线程组，不改动计划文件
 │   │   └── report_parser.py     流式解析 JTL，分位数是精确值
 │   └── ai/
@@ -44,7 +45,7 @@ jmeter-agent-frontend/src/       Vue 3 + Element Plus
    - 先检查计划里的脚本，没被批准就拒绝运行。
    - 再套用当前激活的环境；如果是生产环境，要用户确认。
    - 按需缩放线程数，然后把实际要跑的计划存一份快照到 `reports/<id>/snapshot.jmx`。
-2. `run` 启动 JMeter，同时启动 `run_guard`。如果运行被守护停止，`error_message` 里会写明原因。
+2. `run` 启动 JMeter，同时启动 `run_guard`。如果运行被守护停止，`error_message` 里会写明原因。守护读到的每一行结果也交给 `live_stats` 汇总，只存在内存里，运行结束即丢弃；进度按计划时长和已运行时间计算（计划按循环次数结束时无法预估）。
 3. 运行结束后解析 JTL，发出 `finished` 事件（Webhook 由这个事件触发），然后调用 `post_run.finish_run`。
 4. `post_run` 汇总证据，调用 `TestAnalyzer` 写报告。报告使用的语言由 `REPORT_LANGUAGE` 或页面语言决定。
 5. 报告写完后，它的数字会被核对；事实写入事实账本；新的假设写入假设账本；之前的假设如果能用这次运行判定，也一并判定。

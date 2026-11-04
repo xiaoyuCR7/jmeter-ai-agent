@@ -95,8 +95,7 @@ import { usageText } from '@/utils/format'
 
 const props = defineProps<{ modelValue: boolean; plans: { id: string; name: string }[]; initialPlanId?: string }>()
 const emit = defineEmits<{ 'update:modelValue': [value: boolean]; changed: [] }>()
-const { currentLang } = useI18n()
-const L = (zh: string, en: string) => currentLang.value === 'en' ? en : zh
+const { L, currentLang } = useI18n()
 const md = new MarkdownIt()
 
 const planId = ref('')

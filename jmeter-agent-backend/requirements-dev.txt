@@ -12,13 +12,14 @@ annotated-types==0.8.0
     # via
     #   -r requirements.txt
     #   pydantic
-anthropic==0.39.0
+anthropic==2.4.0
     # via -r requirements.txt
 anyio==4.14.2
     # via
     #   -r requirements.txt
     #   anthropic
     #   httpx
+    #   httpx2
     #   openai
     #   starlette
     #   watchfiles
@@ -57,18 +58,16 @@ colorama==0.4.6 ; os_name == 'nt' or sys_platform == 'win32'
     #   -r requirements.txt
     #   build
     #   pytest
-    #   tqdm
 cryptography==50.0.1
     # via -r requirements.txt
 cyclonedx-python-lib==11.12.0
     # via pip-audit
 defusedxml==0.7.1
     # via py-serializable
-distro==1.9.0
+docstring-parser==0.18.0
     # via
     #   -r requirements.txt
     #   anthropic
-    #   openai
 fastapi==0.136.3
     # via -r requirements.txt
 filelock==3.32.4
@@ -81,23 +80,35 @@ h11==0.16.0
     # via
     #   -r requirements.txt
     #   httpcore
+    #   httpcore2
     #   uvicorn
 httpcore==1.0.9
     # via
     #   -r requirements.txt
     #   httpx
+httpcore2==2.16.0 ; sys_platform != 'emscripten'
+    # via
+    #   -r requirements.txt
+    #   httpx2
 httptools==0.8.0
     # via -r requirements.txt
 httpx==0.27.2
+    # via -r requirements.txt
+httpx2==2.16.0
     # via
     #   -r requirements.txt
     #   anthropic
     #   openai
+httpx2-jsfetch==1.0 ; python_full_version >= '3.12' and sys_platform == 'emscripten'
+    # via
+    #   -r requirements.txt
+    #   httpx2
 idna==3.19
     # via
     #   -r requirements.txt
     #   anyio
     #   httpx
+    #   httpx2
     #   requests
 iniconfig==2.3.0
     # via pytest
@@ -128,8 +139,12 @@ mdurl==0.1.2
     # via markdown-it-py
 msgpack==1.2.2
     # via cachecontrol
-openai==1.54.0
+openai==3.45.0
     # via -r requirements.txt
+opentelemetry-api==1.45.2
+    # via
+    #   -r requirements.txt
+    #   anthropic
 packageurl-python==0.17.6
     # via cyclonedx-python-lib
 packaging==26.3
@@ -246,10 +261,11 @@ tomli==2.4.1
     # via pip-audit
 tomli-w==1.2.0
     # via pip-audit
-tqdm==4.70.0
+truststore==0.10.5 ; sys_platform != 'emscripten'
     # via
     #   -r requirements.txt
-    #   openai
+    #   httpcore2
+    #   httpx2
 typing-extensions==4.16.0
     # via
     #   -r requirements.txt
@@ -258,7 +274,9 @@ typing-extensions==4.16.0
     #   anyio
     #   cyclonedx-python-lib
     #   fastapi
+    #   httpx2
     #   openai
+    #   opentelemetry-api
     #   pydantic
     #   pydantic-core
     #   pytest-asyncio

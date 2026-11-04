@@ -28,6 +28,29 @@ def total_threads(content: bytes) -> int:
     return total
 
 
+def _prop(group, name: str) -> str:
+    prop = next((child for child in group if child.get('name') == name), None)
+    return (prop.text or '').strip() if prop is not None else ''
+
+
+def planned_seconds(content: bytes):
+    """How long the run should take, when every load group runs for a fixed time; None when it ends by loop count.
+
+    A scheduled group runs for its startup delay plus its duration (the ramp-up is part of the duration).
+    """
+    try:
+        groups = load_groups(ET.fromstring(content))
+    except ET.ParseError:
+        return None
+    longest = 0
+    for group in groups:
+        duration, delay = _prop(group, 'ThreadGroup.duration'), _prop(group, 'ThreadGroup.delay') or '0'
+        if _prop(group, 'ThreadGroup.scheduler').lower() != 'true' or not duration.isdigit() or not delay.isdigit():
+            return None
+        longest = max(longest, int(delay) + int(duration))
+    return longest or None
+
+
 def scale_threads(content: bytes, total: int) -> bytes:
     """``content`` with its load groups' thread counts scaled to add up to ``total``.
 

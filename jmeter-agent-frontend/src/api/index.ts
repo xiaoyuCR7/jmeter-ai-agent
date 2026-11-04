@@ -29,11 +29,43 @@ export interface CapacitySearch {
   capacity_threads: number | null
   capacity_throughput: number | null
   stop_reason: string
+  report_execution_id: string | null
   created_at: string
   finished_at: string | null
 }
 
-export type LessonKind = 'known_issue' | 'defect_retrospective' | 'module_standard'
+export interface LivePoint {
+  t: number  // Seconds since the first result.
+  requests: number
+  throughput: number
+  error_rate: number
+  avg: number
+  p95: number
+  threads: number
+  partial: boolean  // Still filling: requests that started then may not have ended yet.
+}
+
+export interface LiveRun {
+  execution_id: string
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+  progress: number
+  plan_name: string
+  project_id: string
+  start_time: string | null
+  purpose: { kind: 'capacity' | 'verification'; step?: number; search_id?: string; prediction?: string } | null
+  guard: { enabled: boolean; error_rate: number }
+  available: boolean
+  elapsed_seconds?: number
+  planned_seconds?: number | null
+  remaining_seconds?: number | null
+  planned_threads?: number
+  totals?: { requests: number; errors: number; error_rate: number; avg: number; throughput: number; threads: number }
+  window?: { seconds: number; requests: number; throughput: number; error_rate: number; avg: number; p95: number }
+  series?: LivePoint[]
+  labels?: { label: string; requests: number; errors: number; error_rate: number; avg: number }[]
+}
+
+export type LessonKind ='known_issue' | 'defect_retrospective' | 'module_standard'
 
 export interface LessonInput {
   kind: LessonKind
@@ -381,6 +413,8 @@ export const api = {
   getExecutionGate: (executionId: string) => instance.get(`/executions/${encodeURIComponent(executionId)}/gate`),
   getExecutions: (projectId?: string) => instance.get('/executions', { params: projectId ? { project_id: projectId } : {} }),
   cancelExecution: (id: string) => instance.post(`/executions/${id}/cancel`),
+  getExecution: (id: string) => instance.get(`/executions/${encodeURIComponent(id)}`),
+  getExecutionLive: (id: string) => instance.get<LiveRun>(`/executions/${encodeURIComponent(id)}/live`),
 
   // Progress arrives as {step: 'progress'} events, then {step: 'answer'} or {step: 'error'}.
   askAboutRunStream: (executionId: string, question: string, signal?: AbortSignal) => {

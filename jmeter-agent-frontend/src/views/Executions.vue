@@ -11,10 +11,12 @@
       <el-button text @click="load"><el-icon><Refresh /></el-icon> {{ L('刷新', 'Refresh') }}</el-button>
     </div>
 
+    <RunningRuns :executions="executions" />
+
     <section class="panel table-panel">
       <el-table :data="rows" v-loading="loading && !executions.length" class="clickable"
         :empty-text="L('还没有执行记录，在项目的测试计划里点「运行」', 'No runs yet. Use Run on a test plan.')"
-        @row-click="(row: any) => row.status === 'completed' && openReport(row.id)">
+        @row-click="(row: any) => OPENABLE.includes(row.status) && openReport(row.id)">
         <el-table-column :label="L('开始时间', 'Started')" width="172">
           <template #default="{ row }"><span class="num">{{ formatTime(row.start_time) }}</span></template>
         </el-table-column>
@@ -99,14 +101,16 @@ import { useI18n } from '@/composables/useI18n'
 import { formatDuration, formatMs, formatPct, formatTime, formatTps } from '@/utils/format'
 import StatusTag from '@/components/StatusTag.vue'
 import VerdictTag from '@/components/VerdictTag.vue'
+import RunningRuns from '@/components/RunningRuns.vue'
 
 const STATUSES = ['running', 'pending', 'completed', 'failed', 'cancelled']
+// A running run opens its live view; a finished one its report.
+const OPENABLE = ['running', 'pending', 'completed']
 const POLL_MS = 5000
 
 const route = useRoute()
 const router = useRouter()
-const { t, currentLang } = useI18n()
-const L = (zh: string, en: string) => currentLang.value === 'en' ? en : zh
+const { t, L } = useI18n()
 
 const projects = ref<any[]>([])
 const executions = ref<any[]>([])

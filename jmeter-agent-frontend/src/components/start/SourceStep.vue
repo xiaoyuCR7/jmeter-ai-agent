@@ -70,8 +70,7 @@ const goal = defineModel<string>('goal', { required: true })
 const model = defineModel<string>('model', { required: true })
 const openApiUrl = defineModel<string>('openApiUrl', { required: true })
 
-const { t, currentLang } = useI18n()
-const L = (zh: string, en: string) => currentLang.value === 'en' ? en : zh
+const { t, L } = useI18n()
 
 const source = ref<'document' | 'openapi'>('document')
 const sourceOptions = computed(() => [

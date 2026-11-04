@@ -20,6 +20,7 @@
 /jmeter-agent-backend/test_plans/
 /jmeter-agent-backend/reports/
 /jmeter-agent-backend/capacity_searches/
+/jmeter-agent-backend/eval_results/
 rag_lancedb/
 rag_lancedb.migrated/
 *.db.migrated

@@ -21,8 +21,7 @@ import { useI18n } from '@/composables/useI18n'
 
 defineProps<{ steps: { message: string; done: boolean; active: boolean; error: boolean }[]; running: boolean }>()
 const emit = defineEmits<{ back: [] }>()
-const { currentLang } = useI18n()
-const L = (zh: string, en: string) => currentLang.value === 'en' ? en : zh
+const { L } = useI18n()
 </script>
 
 <style scoped lang="scss">

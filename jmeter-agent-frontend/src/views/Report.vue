@@ -1,6 +1,7 @@
 <template>
   <div class="report-page" v-loading="loading">
-    <template v-if="report">
+    <LiveRunPanel v-if="liveRun" :execution-id="String(route.params.id)" @ended="liveEnded" />
+    <template v-else-if="report">
       <header class="report-head">
         <div class="title-block">
           <router-link :to="`/executions?projectId=${report.project_id}`" class="back">← {{ L('执行记录', 'Runs') }}</router-link>
@@ -211,6 +212,7 @@ import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/compon
 import VChart from 'vue-echarts'
 import { api } from '@/api'
 import EvidencePanel from '@/components/EvidencePanel.vue'
+import LiveRunPanel from '@/components/LiveRunPanel.vue'
 import RunQuestions from '@/components/RunQuestions.vue'
 import RunMemory from '@/components/RunMemory.vue'
 import SaveLessonDialog from '@/components/SaveLessonDialog.vue'
@@ -219,9 +221,9 @@ import { formatDuration, formatMs, formatPct, formatTime, formatTps, usageText }
 
 use([CanvasRenderer, BarChart, LineChart, GridComponent, TooltipComponent, LegendComponent])
 
-const { t, currentLang } = useI18n()
-const L = (zh: string, en: string) => currentLang.value === 'en' ? en : zh
+const { t, L, currentLang } = useI18n()
 const route = useRoute()
+const liveRun = ref(false)
 
 const loading = ref(true)
 const report = ref<any>(null)
@@ -437,8 +439,16 @@ async function loadReport(quiet = false) {
   if (!quiet) loading.value = true
   try {
     report.value = (await api.getReport(id)).data
+    liveRun.value = false
   } catch {
     if (!quiet) report.value = null
+    // A run still going has no report yet: show what it is doing instead.
+    try {
+      const status = (await api.getExecution(id)).data?.status
+      liveRun.value = status === 'running' || status === 'pending'
+    } catch {
+      liveRun.value = false
+    }
   } finally {
     loading.value = false
   }
@@ -482,6 +492,12 @@ async function downloadAnalysis() {
   } catch {
     ElMessage.error(L('AI 分析的 Markdown 文件不存在', 'The AI analysis Markdown file is not available'))
   }
+}
+
+// The run ended: its report is written from here on (and the AI analysis after it).
+function liveEnded() {
+  liveRun.value = false
+  loadReport()
 }
 
 onMounted(() => loadReport())

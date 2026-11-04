@@ -79,8 +79,7 @@ import { api, type MetricQuery, type MonitoringConfig, type MonitoringTestResult
 import { useI18n } from '@/composables/useI18n'
 
 const props = defineProps<{ projectId: string }>()
-const { currentLang } = useI18n()
-const L = (zh: string, en: string) => currentLang.value === 'en' ? en : zh
+const { L } = useI18n()
 
 const presetLabels = { node: L('主机 (node_exporter)', 'Host (node_exporter)'), jvm: 'JVM / HikariCP', mysql: 'MySQL' }
 const presets = ref<Record<string, MetricQuery[]>>({})

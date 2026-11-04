@@ -58,6 +58,7 @@ flowchart LR
 | **Honest AI analysis** | Fact sheet and number validation: each number is checked against the request it names, or the whole run, in Chinese and English reports alike. Reports compare with earlier runs of the plan, other loads and the same requests in other plans, check earlier predictions automatically, and cite lessons your team saved. Reports follow the UI language, or `REPORT_LANGUAGE`. |
 | **Most model providers** | 25 presets: OpenAI, Claude, Gemini, Azure OpenAI, xAI Grok, Mistral, Cohere, Groq, OpenRouter, Together, DeepSeek, Qwen, Kimi, Zhipu GLM, Doubao, ERNIE, Hunyuan, MiniMax, StepFun, SiliconFlow, plus local Ollama, LM Studio, vLLM and any OpenAI- or Anthropic-compatible API. Parameters reasoning models refuse are adapted automatically. |
 | **Verification and capacity** | A hypothesis a program can check gets a **Run a check** button: the plan reruns at the load its prediction names and the run settles it. **Capacity search** raises the load step by step and stops at the first step that fails a requirement, errors too much or stops gaining throughput. |
+| **Live run view** | Running tests get a card on the Runs page; opening one shows throughput, response time, errors and threads every 5 seconds, the requests with the most errors, real progress and time left from the planned duration, and a Stop button. |
 | **Run guard and CI gate** | A run whose recent requests nearly all fail is stopped, with the reason recorded. `scripts/ci_gate.py` runs a plan and exits non-zero when it fails a requirement or regresses against the baseline. |
 | **MCP built in** | Streamable HTTP endpoint with evidence tools (`get_execution_evidence`, `extract_performance_requirements`, `promote_execution_to_baseline`, …). Writes need your confirmation in the UI. |
 | **Solid JMeter plumbing** | Streaming JTL parser with exact percentiles and flat memory use, queued runs when the load generator is busy, live progress over WebSocket, and a one-user trial run that shows each response and offers extractor fixes proven by it. |
@@ -105,6 +106,9 @@ start.bat         # Windows
 The script opens the app through a link carrying your local access token. Only that first visit needs it: the browser
 then keeps a cookie. There is no login; see [Local access](#local-access).
 
+On Windows, `stop.bat` closes the backend and frontend `start.bat` opened (a port held by another program is left
+alone), and `create-shortcut.bat` puts a "JMeter Agent" shortcut with the app icon on the desktop.
+
 Or by hand:
 
 ```bash
@@ -147,6 +151,22 @@ It starts the plan, polls `GET /api/v1/executions/{id}/gate` and exits `0` when 
 `1` when a requirement fails or the run regressed against the baseline, and `2` when the run did not complete or timed out.
 The token comes from `--token`, `JMETER_AGENT_TOKEN` or `.local_access_token`. A plan with scripts is refused once with the
 `sha256` to approve; pass it with `--approved-sha256` once you trust the plan.
+
+## Evaluating AI reports
+
+`tests/golden/report_claims.json` holds report sentences labelled by hand: does each state a number the run did not
+measure? The test suite requires the number checker to catch every wrong one and flag none of the right ones. To score
+the reports a model writes:
+
+```bash
+cd jmeter-agent-backend
+python scripts/eval_reports.py --list-models
+python scripts/eval_reports.py --model <model-id> [--lang en] [--repeat 3]
+```
+
+The model writes a report for each labelled run; the script counts the numbers checked, the wrong ones before and after
+the rewrite, empty sections and the language. Results go to `eval_results/` and are compared with that model's previous
+result, so a prompt or model change shows up as numbers. This calls the model and costs tokens.
 
 ## Configuration
 
@@ -265,7 +285,7 @@ jmeter-ai-agent/
 │       │   └── jmeter/       executor, JMX builder/parser, streaming JTL parser
 │       └── middleware/       loopback Host / Origin guard
 ├── jmeter-agent-frontend/    Vue 3 + TypeScript + Element Plus
-└── start.sh / start.bat
+└── start.sh / start.bat / stop.bat / create-shortcut.bat
 ```
 
 `bin/`, `lib/` (the JMeter runtime), test plans, reports and local databases are git-ignored.

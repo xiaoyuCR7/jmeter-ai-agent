@@ -26,7 +26,7 @@ from app.services.jmeter.executor import get_executor
 from app.services.jmeter import environment as environment_for_run, jmx_lint
 from app.services.jmeter.environment import ProductionRunNeedsConfirmation
 from app.services.jmeter.script_risk import ScriptApprovalRequired, content_hash, scan as scan_scripts
-from app.services.jmeter import run_guard
+from app.services.jmeter import live_stats, load_variants, run_guard
 
 logger = logging.getLogger(__name__)
 ENVIRONMENT_FILE = 'environment.json'  # Which environment a run used, next to its results.
@@ -68,6 +68,16 @@ TERMINAL = {TestExecutionStatus.COMPLETED, TestExecutionStatus.FAILED, TestExecu
 # failed or cancelled), with its summary when the report parsed; sent once per run.
 # analysis_completed: emitted by whoever ran the post-run AI analysis.
 EVENTS = ('started', 'finished', 'analysis_completed')
+
+
+def _planned_load(jmx_path: str) -> tuple:
+    """Planned duration (None when the run ends by loop count) and threads, for the live view; never fails a run."""
+    try:
+        content = Path(jmx_path).read_bytes()
+        return load_variants.planned_seconds(content), load_variants.total_threads(content)
+    except Exception as error:
+        logger.warning('Planned load unknown for %s: %s', jmx_path, error)
+        return None, 0
 
 
 def validate_id(value: str) -> str:
@@ -374,7 +384,10 @@ class ExecutionLifecycle:
             execution.start_time = datetime.now()
             await persist_execution(execution)
             await self.emit('started', execution)
+            live = live_stats.start(execution_id, *_planned_load(execution.jmx_path))
+
             def progress(pct):
+                pct = pct if pct >= 100 else live.progress(pct)  # Real elapsed time when the plan has a duration.
                 execution.progress = pct
                 cached = store.get_execution(execution_id)
                 if cached:
@@ -385,7 +398,8 @@ class ExecutionLifecycle:
             executor = executor or get_executor()
             self._executors[execution_id] = executor
             guard = asyncio.create_task(run_guard.watch(
-                str(Path(execution.report_dir) / 'result.jtl'), lambda reason: self._guard_stop(execution_id, reason)))
+                str(Path(execution.report_dir) / 'result.jtl'), lambda reason: self._guard_stop(execution_id, reason),
+                live=live))
             try:
                 result = await executor.execute(
                     execution.jmx_path, execution_id, progress_callback=progress,
@@ -395,6 +409,7 @@ class ExecutionLifecycle:
             finally:
                 guard.cancel()
                 await asyncio.gather(guard, return_exceptions=True)
+                live_stats.finish(execution_id)
             # JMeter has read the plan; its copy need not hold the environment's secrets any longer.
             await asyncio.to_thread(environment_for_run.scrub, execution.jmx_path)
             for field in ('status', 'end_time', 'error_message', 'resource_snapshot_pre', 'resource_snapshot_post'):

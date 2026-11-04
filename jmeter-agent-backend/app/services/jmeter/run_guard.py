@@ -81,9 +81,14 @@ def judge(window: Window, now_ms: int) -> Optional[str]:
     return None
 
 
-async def watch(jtl_path: str, stop: Callable[[str], Awaitable[None]], *, check_seconds: float = CHECK_SECONDS) -> None:
-    """Read ``jtl_path`` until cancelled; call ``stop(reason)`` once if the run should end."""
-    if not settings.RUN_GUARD_ENABLED:
+async def watch(jtl_path: str, stop: Callable[[str], Awaitable[None]], *, live=None,
+                check_seconds: float = CHECK_SECONDS) -> None:
+    """Read ``jtl_path`` until cancelled; call ``stop(reason)`` once if the run should end.
+
+    ``live`` (a LiveStats) gets every row too, for the live view; it is fed even with the guard switched off.
+    """
+    guarding = settings.RUN_GUARD_ENABLED
+    if not guarding and live is None:
         return
     tail, window, trips = JtlTail(jtl_path), Window(settings.RUN_GUARD_WINDOW_SECONDS), 0
     while True:
@@ -92,6 +97,10 @@ async def watch(jtl_path: str, stop: Callable[[str], Awaitable[None]], *, check_
             continue
         rows = await asyncio.to_thread(tail.read)
         for row in rows:
+            if live is not None:
+                live.add_row(row)
+            if not guarding:
+                continue
             try:
                 window.add(int(row['timeStamp']), str(row.get('success', '')).lower() == 'true')
             except (KeyError, TypeError, ValueError):

@@ -1,0 +1,60 @@
+{
+  "about": "Sentences a report could contain, each labelled by hand: does it state a number the run did not measure? The number checker must flag every wrong one and none of the right ones. Add a case whenever a report gets a number wrong that the checker let through.",
+  "runs": {
+    "checkout": {
+      "summary": {
+        "total_requests": 51200, "avg_response_time": 245.6, "min_response_time": 12, "max_response_time": 4870,
+        "error_rate": 1.25, "throughput": 85.3, "received_bytes_per_sec": 0, "sent_bytes_per_sec": 0,
+        "percentiles": {"p50": 198, "p90": 520, "p95": 612, "p99": 980},
+        "per_label": {
+          "登录": {"count": 18000, "avg_response_time": 180.2, "p95_response_time": 420, "p99_response_time": 690, "error_rate": 0.5, "throughput": 30.1},
+          "下单": {"count": 7400, "avg_response_time": 512.7, "p95_response_time": 1430, "p99_response_time": 2210, "error_rate": 3.8, "throughput": 12.4}
+        },
+        "success": {"avg_response_time": 238.0}
+      },
+      "compared_with": [540, 1.1]
+    },
+    "search": {
+      "summary": {
+        "total_requests": 9000, "avg_response_time": 1180, "min_response_time": 40, "max_response_time": 9800,
+        "error_rate": 0.0, "throughput": 150.0, "received_bytes_per_sec": 0, "sent_bytes_per_sec": 0,
+        "percentiles": {"p50": 900, "p90": 2100, "p95": 2600, "p99": 4100},
+        "per_label": {
+          "Search products": {"count": 6000, "avg_response_time": 1420, "p95_response_time": 3050, "error_rate": 0.0, "throughput": 100.0},
+          "Product detail": {"count": 3000, "avg_response_time": 700, "p95_response_time": 1500, "error_rate": 0.0, "throughput": 50.0}
+        }
+      },
+      "compared_with": []
+    }
+  },
+  "cases": [
+    {"run": "checkout", "wrong": false, "text": "整体平均响应时间为 245.6ms。", "why": "exact"},
+    {"run": "checkout", "wrong": false, "text": "整体 P95 为 612ms，P99 为 980ms。", "why": "two exact numbers"},
+    {"run": "checkout", "wrong": false, "text": "整体错误率为 1.25%。", "why": "exact"},
+    {"run": "checkout", "wrong": false, "text": "整体吞吐量约 85 req/s。", "why": "rounded within 5%"},
+    {"run": "checkout", "wrong": false, "text": "整体 P99 约 1s。", "why": "980 ms rounded to a second"},
+    {"run": "checkout", "wrong": false, "text": "下单接口的 P95 为 1430ms，错误率 3.8%。", "why": "named request, its own numbers"},
+    {"run": "checkout", "wrong": false, "text": "登录的平均响应时间 180ms，明显快于下单。", "why": "named request, rounded"},
+    {"run": "checkout", "wrong": false, "text": "P95 比基线的 540ms 变慢了。", "why": "a comparison may quote the earlier run"},
+    {"run": "checkout", "wrong": true, "text": "整体平均响应时间为 300ms。", "why": "made-up average"},
+    {"run": "checkout", "wrong": true, "text": "整体 P95 为 1430ms。", "why": "the 下单 number written as the whole run's"},
+    {"run": "checkout", "wrong": true, "text": "登录接口的 P95 为 612ms。", "why": "the whole run's number written as one request's"},
+    {"run": "checkout", "wrong": true, "text": "下单的错误率为 1.25%。", "why": "overall error rate given to one request"},
+    {"run": "checkout", "wrong": true, "text": "整体错误率为 2.5%。", "why": "doubled"},
+    {"run": "checkout", "wrong": true, "text": "整体 P99 为 540ms。", "why": "the baseline number, with no comparison in the sentence"},
+    {"run": "checkout", "wrong": true, "text": "整体吞吐量为 120 req/s。", "why": "made-up throughput"},
+    {"run": "checkout", "wrong": false, "text": "登录 P95 为 420ms，下单 P95 为 1430ms。", "why": "two requests in one sentence, each its own number"},
+    {"run": "checkout", "wrong": true, "text": "登录 P95 为 1430ms，下单 P95 为 420ms。", "why": "two requests' numbers swapped"},
+    {"run": "checkout", "wrong": false, "text": "下单接口的 P95 约 1.4s。", "why": "one request, rounded to seconds"},
+    {"run": "checkout", "wrong": true, "text": "下单接口的平均响应时间约 1.2s。", "why": "512 ms written as 1.2 s"},
+    {"run": "search", "wrong": false, "text": "Overall the average response time was 1.18 s.", "why": "seconds for milliseconds"},
+    {"run": "search", "wrong": false, "text": "Search products had a P95 of 3050 ms.", "why": "named request, exact"},
+    {"run": "search", "wrong": false, "text": "Product detail averaged 700 ms.", "why": "named request, exact"},
+    {"run": "search", "wrong": false, "text": "Overall the error rate was 0%.", "why": "zero"},
+    {"run": "search", "wrong": false, "text": "Overall P95 was about 2.6 s.", "why": "rounded seconds"},
+    {"run": "search", "wrong": true, "text": "Overall P95 was 3050 ms.", "why": "one request's number as the whole run's"},
+    {"run": "search", "wrong": true, "text": "Product detail had a P95 of 2600 ms.", "why": "the whole run's number given to one request"},
+    {"run": "search", "wrong": true, "text": "Overall the average response time was 2.4 s.", "why": "doubled, in seconds"},
+    {"run": "search", "wrong": true, "text": "Overall the error rate was 3%.", "why": "an error rate the run did not have"}
+  ]
+}

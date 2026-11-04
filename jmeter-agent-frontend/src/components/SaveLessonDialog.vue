@@ -38,8 +38,7 @@ import { useI18n } from '@/composables/useI18n'
 const props = defineProps<{ executionId: string; labels: string[] }>()
 const emit = defineEmits<{ saved: [lesson: any] }>()
 
-const { currentLang } = useI18n()
-const L = (zh: string, en: string) => currentLang.value === 'en' ? en : zh
+const { L } = useI18n()
 
 const kinds = computed(() => [
   { value: 'known_issue' as LessonKind, label: L('已知问题', 'Known issue') },

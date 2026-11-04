@@ -54,23 +54,31 @@ class AnthropicAdapter(BaseAIAdapter):
         host = urlparse(api_base or 'https://api.anthropic.com').hostname or ''
         self.prompt_caching = host == 'anthropic.com' or host.endswith('.anthropic.com')
 
-    def _request(self, messages: List[AIChatMessage]) -> dict:
-        """System prompt and messages, with cache breakpoints where the reusable prefix ends."""
+    def _request(self, messages: List[AIChatMessage], **kwargs) -> dict:
+        """Model, token limit, system prompt and messages, with cache breakpoints where the reusable prefix ends.
+
+        The Messages API no longer takes ``temperature`` and the SDK refuses it, so only a compatible endpoint of
+        another vendor, which may still use it, gets it, through the request body.
+        """
         system_msg, chat_messages = self._convert_messages(messages)
+        request = {'model': self.model, 'max_tokens': kwargs.get('max_tokens', 8000), 'messages': chat_messages}
         if not self.prompt_caching:
-            return {'system': system_msg or None, 'messages': chat_messages}
-        system = [{'type': 'text', 'text': system_msg, 'cache_control': {'type': 'ephemeral'}}] if system_msg else None
+            request['extra_body'] = {'temperature': kwargs.get('temperature', 0.2)}
+            if system_msg:
+                request['system'] = system_msg
+            return request
+        if system_msg:
+            request['system'] = [{'type': 'text', 'text': system_msg, 'cache_control': {'type': 'ephemeral'}}]
         if chat_messages and chat_messages[0]['role'] == 'user' and len(chat_messages) > 1:
             first = chat_messages[0]['content'] = [dict(block) for block in chat_messages[0]['content']]
             if first and first[-1].get('type') == 'text':
                 first[-1]['cache_control'] = {'type': 'ephemeral'}
-        return {'system': system, 'messages': chat_messages}
+        return request
 
     @managed_request
     async def chat(self, messages: List[AIChatMessage], **kwargs) -> str:
         client = self.client.with_options(max_retries=kwargs['max_retries']) if 'max_retries' in kwargs else self.client
-        request = dict(model=self.model, max_tokens=kwargs.get("max_tokens", 8000),
-                       temperature=kwargs.get("temperature", 0.2), **self._request(messages))
+        request = self._request(messages, **kwargs)
         schema = kwargs.get('json_schema') if kwargs.get('json_mode') else None
         if schema:
             request.update(tools=[{'name': REPORT_TOOL, 'description': 'Record the answer as structured data.',
@@ -86,12 +94,7 @@ class AnthropicAdapter(BaseAIAdapter):
 
     @managed_stream
     async def chat_stream(self, messages: List[AIChatMessage], **kwargs) -> AsyncIterator[str]:
-        async with self.client.messages.stream(
-            model=self.model,
-            **self._request(messages),
-            max_tokens=kwargs.get("max_tokens", 8000),
-            temperature=kwargs.get("temperature", 0.2),
-        ) as stream:
+        async with self.client.messages.stream(**self._request(messages, **kwargs)) as stream:
             async for text in stream.text_stream:
                 yield text
 
@@ -116,13 +119,7 @@ class AnthropicAdapter(BaseAIAdapter):
                 "input_schema": func.get("parameters", func.get("input_schema", {})),
             })
 
-        response = await self.client.messages.create(
-            model=self.model,
-            **self._request(messages),
-            tools=anthropic_tools,
-            max_tokens=kwargs.get("max_tokens", 8000),
-            temperature=kwargs.get("temperature", 0.2),
-        )
+        response = await self.client.messages.create(**self._request(messages, **kwargs), tools=anthropic_tools)
 
         usage.record_anthropic(response)
         # Parse response content blocks

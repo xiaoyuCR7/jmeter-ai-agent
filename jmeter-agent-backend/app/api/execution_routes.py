@@ -17,6 +17,7 @@ from app.models.schemas import (
 from app.services.ai import usage as ai_usage
 from app.services.ai.adapters.factory import AIAdapterFactory
 from app.services.jmeter.script_risk import ScriptApprovalRequired
+from app.services.jmeter import live_stats
 from app.services.jmeter.environment import ProductionRunNeedsConfirmation
 from app.services.jmeter.sla_engine import SLAEngine, SLAConfig
 from app.services.ai.agent.tools.jmeter import resource_hooks
@@ -133,6 +134,26 @@ async def get_execution(execution_id: str):
     if execution_id not in store.executions:
         raise HTTPException(status_code=404, detail="Execution not found")
     return store.executions[execution_id]
+
+
+@router.get("/executions/{execution_id}/live")
+async def get_execution_live(execution_id: str):
+    """A running execution's numbers so far, in 5-second steps; ``available`` is false before and after the run."""
+    execution = store.executions.get(execution_id)
+    if execution is None:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    live = live_stats.get(execution_id)
+    plan = store.get_test_plan(execution.test_plan_id)
+    base = {
+        'execution_id': execution_id, 'status': execution.status.value, 'progress': execution.progress or 0,
+        'plan_name': plan.name if plan else '', 'project_id': execution.project_id,
+        'start_time': execution.start_time.isoformat() if execution.start_time else None,
+        'purpose': (execution.context_snapshot or {}).get('purpose'),
+        'guard': {'enabled': settings.RUN_GUARD_ENABLED, 'error_rate': settings.RUN_GUARD_ERROR_RATE},
+    }
+    if live is None:
+        return base | {'available': False}
+    return base | {'available': True} | live.snapshot()
 
 
 @router.post("/executions/{execution_id}/cancel")

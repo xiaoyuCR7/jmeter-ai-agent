@@ -324,11 +324,19 @@ async def recover_interrupted():
                 logger.warning("Could not mark %s as interrupted: %s", execution.id, error)
 
 
+def is_capacity_step(execution) -> bool:
+    purpose = (getattr(execution, 'context_snapshot', None) or {}).get('purpose') or {}
+    return purpose.get('kind') == 'capacity'
+
+
 async def finish_run(execution: TestExecutionInfo, ai_model=None):
-    """AUTO_ANALYSIS_ENABLED saves the model calls; the measured history is kept either way."""
+    """AUTO_ANALYSIS_ENABLED saves the model calls; the measured history is kept either way.
+
+    A capacity step gets no report of its own: the search writes one when it ends, on the step that decided it.
+    """
     if execution.status != TestExecutionStatus.COMPLETED or not execution.summary:
         return
-    if settings.AUTO_ANALYSIS_ENABLED:
+    if settings.AUTO_ANALYSIS_ENABLED and not is_capacity_step(execution):
         await _write_analysis(execution, ai_model)
     try:
         await record_facts(execution)

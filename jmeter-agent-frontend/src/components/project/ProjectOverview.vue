@@ -64,8 +64,7 @@ import VerdictTag from '@/components/VerdictTag.vue'
 
 const props = defineProps<{ projectId: string }>()
 const router = useRouter()
-const { currentLang } = useI18n()
-const L = (zh: string, en: string) => currentLang.value === 'en' ? en : zh
+const { L } = useI18n()
 
 const loading = ref(false)
 const requirements = ref<PerformanceRequirements | null>(null)

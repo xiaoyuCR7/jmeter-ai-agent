@@ -99,6 +99,33 @@ async def test_a_capacity_search_that_passes_every_step_says_so(plan, monkeypatc
     assert done.capacity_threads == 30 and '仍然通过' in done.stop_reason
 
 
+@pytest.fixture
+def reports(monkeypatch):
+    from app.core.config import settings
+    from app.services import post_run
+    monkeypatch.setattr(settings, 'AUTO_ANALYSIS_ENABLED', True)
+    written = []
+
+    async def start_reanalysis(execution_id, ai_model=None, lang=None):
+        written.append(execution_id)
+    monkeypatch.setattr(post_run, 'start_reanalysis', start_reanalysis)
+    return written
+
+
+@pytest.mark.asyncio
+async def test_a_search_writes_one_report_on_the_step_that_stopped_it(plan, monkeypatch, reports):
+    monkeypatch.setattr(experiments, 'execution_lifecycle', FakeLifecycle(lambda threads: min(threads, 40) * 10.0))
+    done = await finish(await experiments.start_capacity_search('plan-1', start_threads=10, max_threads=100, factor=2))
+    assert reports == ['run-3'] and done.report_execution_id == 'run-3'  # 80 threads, where throughput stopped.
+
+
+@pytest.mark.asyncio
+async def test_a_search_that_passes_everything_reports_on_its_last_step(plan, monkeypatch, reports):
+    monkeypatch.setattr(experiments, 'execution_lifecycle', FakeLifecycle(lambda threads: threads * 10.0))
+    done = await finish(await experiments.start_capacity_search('plan-1', start_threads=10, max_threads=30, factor=2))
+    assert reports == ['run-2'] and done.report_execution_id == 'run-2'
+
+
 @pytest.mark.asyncio
 async def test_a_failed_run_ends_the_search(plan, monkeypatch):
     fake = FakeLifecycle(lambda threads: threads * 10.0)

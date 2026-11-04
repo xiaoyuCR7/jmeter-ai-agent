@@ -10,8 +10,8 @@ xmltodict==0.14.2
 lxml==6.1.0
 python-dateutil==2.9.0
 websockets==13.1
-openai==1.54.0
-anthropic==0.39.0
+openai==3.45.0
+anthropic==2.4.0
 psutil==6.1.0
 sqlalchemy[asyncio]==2.0.36
 aiosqlite==0.20.0

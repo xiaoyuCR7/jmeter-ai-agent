@@ -36,8 +36,7 @@ import { usageText } from '@/utils/format'
 
 const props = defineProps<{ executionId: string; followUps?: any[] }>()
 
-const { currentLang } = useI18n()
-const L = (zh: string, en: string) => currentLang.value === 'en' ? en : zh
+const { L, currentLang } = useI18n()
 
 const md = new MarkdownIt()  // Raw HTML stays escaped: the answer is model text.
 const items = ref<any[]>([...(props.followUps || [])])

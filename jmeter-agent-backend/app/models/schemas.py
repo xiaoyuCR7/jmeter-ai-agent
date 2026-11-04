@@ -291,6 +291,7 @@ class CsvDataFile(BaseModel):
 
 
 class TestConfig(BaseModel):
+    __test__ = False  # A domain model, not a pytest test class.
     test_type: TestType = Field(..., description="测试类型")
     # No default rate: a throughput timer the user never asked for silently caps the load.
     target_rps: Optional[int] = Field(None, description="目标RPS（不填则不限速）")
@@ -319,6 +320,7 @@ class GenerateTestPlanRequest(BaseModel):
 
 
 class TestPlanInfo(BaseModel):
+    __test__ = False  # A domain model, not a pytest test class.
     id: str
     project_id: str = Field(default="default", description="所属项目ID")
     name: str
@@ -352,6 +354,7 @@ class ExecuteTestRequest(BaseModel):
 
 
 class TestExecutionStatus(str, Enum):
+    __test__ = False  # A domain model, not a pytest test class.
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -453,6 +456,7 @@ class RunQuestion(BaseModel):
 
 
 class TestExecutionInfo(BaseModel):
+    __test__ = False  # A domain model, not a pytest test class.
     id: str
     project_id: str = Field(default="default", description="所属项目ID")
     test_plan_id: str

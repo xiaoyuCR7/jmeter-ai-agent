@@ -56,6 +56,7 @@ flowchart LR
 | **可信的 AI 分析** | 事实表和数字校验：每个数字按它说的是哪个接口、还是整体去核对，中英文报告都会核对。报告会对比同一计划的历史运行、不同负载和其它计划里的相同接口，自动验证之前的预测，并引用团队保存的经验。报告语言跟随界面，也可以用 `REPORT_LANGUAGE` 固定。 |
 | **主流模型都能用** | 内置 25 家服务商预设：OpenAI、Claude、Gemini、Azure OpenAI、xAI Grok、Mistral、Cohere、Groq、OpenRouter、Together，DeepSeek、通义千问、Kimi、智谱 GLM、豆包、文心、混元、MiniMax、阶跃星辰、硅基流动，以及本地的 Ollama、LM Studio、vLLM 和任意 OpenAI / Anthropic 兼容接口。推理模型要求的参数差异由程序自动适配。 |
 | **验证与容量探索** | 报告里能被程序验证的假设可以一键「运行验证」，程序会按预测里写的负载重跑，跑完自动判定。「容量探索」从起始线程数开始逐级加压，在第一个需求不达标、错误率超限或吞吐量不再增长的负载处停下，给出这个计划能承受的负载。 |
+| **实时运行面板** | 运行中的测试在执行记录页顶部显示卡片，点开能看到每 5 秒更新的吞吐量、响应时间、错误率和线程曲线，错误最多的接口，按计划时长算出的真实进度和剩余时间，也能直接停止。 |
 | **运行守护与 CI 门禁** | 运行中最近 30 秒的请求几乎全部失败时，程序自动停止这次运行并写明原因。`scripts/ci_gate.py` 运行计划并按门禁结果返回退出码：需求不达标或相对基线退化时失败。 |
 | **内置 MCP** | Streamable HTTP 端点，提供 `get_execution_evidence`、`extract_performance_requirements`、`promote_execution_to_baseline` 等证据工具；写操作需要在界面上确认。 |
 | **扎实的 JMeter 底座** | 流式 JTL 解析（精确分位数、内存不随样本数增长）、压测机繁忙时自动排队、WebSocket 实时进度；单用户试跑会列出每个请求的响应，并给出经响应核对过的提取规则修改。 |
@@ -102,6 +103,8 @@ start.bat         # Windows
 
 启动脚本会通过带有本地访问令牌的链接打开应用。只有第一次访问需要它，之后浏览器会保存 Cookie。这不是登录，详见[本地访问](#本地访问)。
 
+Windows 上还有两个脚本：`stop.bat` 关闭 `start.bat` 打开的后端和前端（端口被别的程序占用时不会动它）；`create-shortcut.bat` 在桌面建一个带图标的「JMeter Agent」快捷方式，双击就能启动。
+
 或手动启动：
 
 ```bash
@@ -135,6 +138,18 @@ python jmeter-agent-backend/scripts/ci_gate.py --plan <测试计划ID>
 ```
 
 脚本会启动这个计划，轮询 `GET /api/v1/executions/{id}/gate`，然后按结果退出：需求和基线都通过时退出码为 `0`；需求不达标或相对基线退化时为 `1`；运行没有完成或等待超时为 `2`。令牌按 `--token`、环境变量 `JMETER_AGENT_TOKEN`、`.local_access_token` 文件的顺序读取。如果计划里含脚本，第一次会被拒绝，并打印出需要批准的 `sha256`，确认可信后用 `--approved-sha256` 传入。
+
+## 评估 AI 报告
+
+`tests/golden/report_claims.json` 是一组人工标注的报告句子，每句都注明其中的数字对不对。测试会检查数字核对器能否抓出每个错数字，同时不误报正确的数字。要看某个模型写的报告质量，运行：
+
+```bash
+cd jmeter-agent-backend
+python scripts/eval_reports.py --list-models
+python scripts/eval_reports.py --model <模型ID> [--lang en] [--repeat 3]
+```
+
+模型会为每个标注运行写一份报告，然后统计核对了多少个数字、改写前后各错了几个、有没有空着的章节、语言是否正确。结果保存在 `eval_results/`，并和这个模型上一次的结果对比，改完提示词或换了模型后，就能用数字判断是变好还是变差。这一步会调用模型，消耗 token。
 
 ## 配置
 
@@ -245,7 +260,7 @@ jmeter-ai-agent/
 │       │   └── jmeter/       执行器、JMX 生成与解析、流式 JTL 解析
 │       └── middleware/       本机 Host / Origin 校验
 ├── jmeter-agent-frontend/    Vue 3 + TypeScript + Element Plus
-└── start.sh / start.bat
+└── start.sh / start.bat / stop.bat / create-shortcut.bat
 ```
 
 `bin/`、`lib/`（JMeter 运行时）、测试计划、报告和本地数据库都不入库。

@@ -68,8 +68,7 @@ import { formatTime, testTypeText } from '@/utils/format'
 const props = defineProps<{ projectId: string }>()
 const emit = defineEmits<{ changed: [] }>()
 const router = useRouter()
-const { currentLang } = useI18n()
-const L = (zh: string, en: string) => currentLang.value === 'en' ? en : zh
+const { L, currentLang } = useI18n()
 const typeText = (type?: string) => testTypeText(type, currentLang.value)
 
 const plans = ref<any[]>([])

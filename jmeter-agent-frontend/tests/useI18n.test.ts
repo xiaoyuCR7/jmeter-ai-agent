@@ -41,6 +41,19 @@ describe('useI18n', () => {
     expect(t('testPlans.confirmDeleteProject', { name: 'demo' })).toContain('"demo"')
   })
 
+  it('picks the text for the current language with L, and follows a language switch', () => {
+    const { L } = useI18n()
+    expect(L('取消', 'Cancel')).toBe('取消')
+    mockAppStore.currentLang = 'en'
+    expect(L('取消', 'Cancel')).toBe('Cancel')
+  })
+
+  it('leaves no component defining its own copy of L', () => {
+    const sources = import.meta.glob('../src/**/*.vue', { query: '?raw', import: 'default', eager: true }) as Record<string, string>
+    const copies = Object.entries(sources).filter(([, source]) => /const L = \(/.test(source)).map(([file]) => file)
+    expect(copies).toEqual([])
+  })
+
   it('should return fallback for missing keys', () => {
     const { t } = useI18n()
     expect(t('non.existent.key')).toBe('non.existent.key')

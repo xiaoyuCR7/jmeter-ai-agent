@@ -57,6 +57,13 @@ async def test_turning_analysis_off_keeps_the_measured_history(steps, tmp_path, 
 
 
 @pytest.mark.asyncio
+async def test_a_capacity_step_waits_for_the_search_report(steps, tmp_path):
+    snapshot = {'test_config': {}, 'purpose': {'kind': 'capacity', 'search_id': 's', 'step': 2}}
+    await post_run.finish_run(completed(tmp_path, context_snapshot=snapshot))
+    assert steps == ['facts']
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('overrides', [{'status': Status.FAILED}, {'status': Status.CANCELLED}, {'summary': None}])
 async def test_a_run_without_results_gets_no_post_run_work(steps, tmp_path, overrides):
     await post_run.finish_run(completed(tmp_path, **overrides))

@@ -8,6 +8,10 @@
  *   const { t, currentLang, setLang } = useI18n()
  *   t('settings.language')                         // '界面语言' / 'Language'
  *   t('env.variableCount', { count: varCount })    // '{{ count }} 个变量'
+ *   L('取消', 'Cancel')                             // text one component uses
+ *
+ * Use t() with a key for text several components share (navigation, routes, settings),
+ * and L() for text that belongs to one component.
  */
 
 import { computed } from 'vue'
@@ -726,5 +730,10 @@ export function useI18n() {
     appStore.setLang(lang)
   }
 
-  return { t, currentLang, setLang }
+  /** Text used in one component only: both languages side by side, so neither can be forgotten. */
+  function L(zh: string, en: string): string {
+    return appStore.currentLang === 'en' ? en : zh
+  }
+
+  return { t, L, currentLang, setLang }
 }

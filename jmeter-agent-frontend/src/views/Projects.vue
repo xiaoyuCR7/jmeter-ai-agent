@@ -110,8 +110,7 @@ const NEW_PROJECT = '__new_project__'
 
 const route = useRoute()
 const router = useRouter()
-const { currentLang } = useI18n()
-const L = (zh: string, en: string) => currentLang.value === 'en' ? en : zh
+const { L } = useI18n()
 
 const projects = ref<any[]>([])
 const loading = ref(true)

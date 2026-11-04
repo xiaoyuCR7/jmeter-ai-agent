@@ -33,8 +33,7 @@ import ResultStep from '@/components/start/ResultStep.vue'
 import { useI18n } from '@/composables/useI18n'
 
 const router = useRouter()
-const { t, currentLang } = useI18n()
-const L = (zh: string, en: string) => currentLang.value === 'en' ? en : zh
+const { t, L } = useI18n()
 
 const selectedModel = ref('')
 const stepLabels = computed(() => [L('选择来源', 'Source'), L('生成', 'Generate'), L('核对', 'Review')])

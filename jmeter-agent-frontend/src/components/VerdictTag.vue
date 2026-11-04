@@ -17,8 +17,7 @@ export interface VerdictSummary {
 }
 
 const props = defineProps<{ verdict?: VerdictSummary | null }>()
-const { currentLang } = useI18n()
-const L = (zh: string, en: string) => currentLang.value === 'en' ? en : zh
+const { L } = useI18n()
 
 const label = computed(() => {
   const v = props.verdict!

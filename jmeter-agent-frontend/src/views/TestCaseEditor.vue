@@ -41,83 +41,8 @@
     <div v-if="viewMode === 'form'" class="editor-body">
       <!-- Left: Thread Group Config + Endpoint List -->
       <div class="left-panel">
-        <div class="thread-group-config">
-          <div class="config-header">
-            <el-icon><User /></el-icon> {{ t('editor.threadGroup') }}
-          </div>
-          <p v-if="threadGroupNode" class="csv-hint">仅配置首个线程组：{{ threadGroupNode.testname }}。复杂配置请切换到 JMX 树视图。</p>
-          <el-form label-position="top" size="small" class="tg-form">
-            <el-row :gutter="8">
-              <el-col :span="12">
-                <el-form-item :label="t('editor.tg.numThreads')">
-                  <el-input-number v-if="canEditNumber(threadGroupNumberValue('ThreadGroup.num_threads', 1), 1, 10000)" v-model="threadGroupConfig.numThreads" :min="1" :max="10000" style="width: 100%" />
-                  <template v-else>
-                    <el-input :model-value="String(threadGroupNumberValue('ThreadGroup.num_threads', 1))" readonly />
-                    <span class="csv-hint">保留原始值；请切换到 JMX 树视图修改。</span>
-                  </template>
-                </el-form-item>
-              </el-col>
-              <el-col :span="12">
-                <el-form-item :label="t('editor.tg.rampTime')">
-                  <el-input-number v-if="canEditNumber(threadGroupNumberValue('ThreadGroup.ramp_time', 1), 0, 3600)" v-model="threadGroupConfig.rampTime" :min="0" :max="3600" style="width: 100%" />
-                  <template v-else>
-                    <el-input :model-value="String(threadGroupNumberValue('ThreadGroup.ramp_time', 1))" readonly />
-                    <span class="csv-hint">保留原始值；请切换到 JMX 树视图修改。</span>
-                  </template>
-                  <span class="unit">秒</span>
-                </el-form-item>
-              </el-col>
-            </el-row>
-            <el-row :gutter="8">
-              <el-col :span="12">
-                <el-form-item :label="t('editor.tg.loops')">
-                  <el-input-number v-if="canEditNumber(threadGroupNumberValue('loops', 1), -1, 99999)" v-model="threadGroupConfig.loops" :min="-1" :max="99999" style="width: 100%" />
-                  <template v-else>
-                    <el-input :model-value="String(threadGroupNumberValue('loops', 1))" readonly />
-                    <span class="csv-hint">保留原始值；请切换到 JMX 树视图修改。</span>
-                  </template>
-                  <span class="unit">{{ t('editor.tg.infinite') }}</span>
-                </el-form-item>
-              </el-col>
-              <el-col :span="12">
-                <el-form-item :label="t('editor.tg.onSampleError')">
-                  <el-select v-model="threadGroupConfig.onSampleError" size="small" style="width: 100%">
-                    <el-option :label="t('editor.tg.errorContinue')" value="continue" />
-                    <el-option :label="t('editor.tg.errorStartNextLoop')" value="startnextloop" />
-                    <el-option :label="t('editor.tg.errorStopThread')" value="stopthread" />
-                    <el-option :label="t('editor.tg.errorStopTest')" value="stoptest" />
-                    <el-option :label="t('editor.tg.errorStopTestNow')" value="stoptestnow" />
-                  </el-select>
-                </el-form-item>
-              </el-col>
-            </el-row>
-            <el-form-item>
-              <el-switch v-model="threadGroupConfig.scheduler" @change="handleSchedulerChange" :label="t('editor.tg.scheduler')" />
-            </el-form-item>
-            <el-row v-if="threadGroupConfig.scheduler" :gutter="8">
-              <el-col :span="12">
-                <el-form-item :label="t('editor.tg.duration')">
-                  <el-input-number v-if="canEditNumber(threadGroupNumberValue('ThreadGroup.duration', 0), 1, 86400)" v-model="threadGroupConfig.duration" :min="1" :max="86400" style="width: 100%" />
-                  <template v-else>
-                    <el-input :model-value="String(threadGroupNumberValue('ThreadGroup.duration', 0))" readonly />
-                    <span class="csv-hint">保留原始值；请切换到 JMX 树视图修改。</span>
-                  </template>
-                  <span class="unit">秒</span>
-                </el-form-item>
-              </el-col>
-              <el-col :span="12">
-                <el-form-item :label="t('editor.tg.delay')">
-                  <el-input-number v-if="canEditNumber(threadGroupNumberValue('ThreadGroup.delay', 0), 0, 86400)" v-model="threadGroupConfig.delay" :min="0" :max="86400" style="width: 100%" />
-                  <template v-else>
-                    <el-input :model-value="String(threadGroupNumberValue('ThreadGroup.delay', 0))" readonly />
-                    <span class="csv-hint">保留原始值；请切换到 JMX 树视图修改。</span>
-                  </template>
-                  <span class="unit">秒</span>
-                </el-form-item>
-              </el-col>
-            </el-row>
-          </el-form>
-        </div>
+        <ThreadGroupForm :config="threadGroupConfig" :node="threadGroupNode"
+          :number-value="threadGroupNumberValue" :can-edit="canEditNumber" />
 
         <CsvDatasetPanel :config="csvDatasetConfig" />
 
@@ -229,33 +154,7 @@
                   <el-tab-pane name="params">
                     <template #label>Params <span v-if="paramCount" class="tab-badge">{{ paramCount }}</span></template>
                     <div class="tab-content">
-                      <el-table :data="paramRows" border size="small">
-                        <el-table-column :label="t('editor.paramName')" min-width="160">
-                          <template #default="{ $index }">
-                            <el-input :model-value="paramRows[$index].name" @update:model-value="updateParamRow($index, 'name', $event)" :placeholder="t('editor.paramName')" size="small" />
-                          </template>
-                        </el-table-column>
-                        <el-table-column :label="t('editor.paramValue')" min-width="200">
-                          <template #default="{ $index }">
-                            <el-input :model-value="paramRows[$index].value" @update:model-value="updateParamRow($index, 'value', $event)" :placeholder="t('editor.paramValue')" size="small" />
-                          </template>
-                        </el-table-column>
-                        <el-table-column :label="t('editor.paramDescription')" min-width="120">
-                          <template #default="{ $index }">
-                            <el-input :model-value="paramRows[$index].description" @update:model-value="updateParamRow($index, 'description', $event)" :placeholder="t('editor.paramDescription')" size="small" />
-                          </template>
-                        </el-table-column>
-                        <el-table-column width="60">
-                          <template #default="{ $index }">
-                            <el-button text size="small" type="danger" @click="removeParamRow($index)">
-                              <el-icon><Delete /></el-icon>
-                            </el-button>
-                          </template>
-                        </el-table-column>
-                      </el-table>
-                      <el-button text type="primary" size="small" @click="addParamRow" style="margin-top: 6px">
-                        <el-icon><Plus /></el-icon> {{ t('editor.addParam') }}
-                      </el-button>
+                      <ParamsEditor :params="selectedEndpoint.queryParams" />
                     </div>
                   </el-tab-pane>
 
@@ -335,64 +234,7 @@
 
           <!-- Settings -->
           <div v-show="mainView === 'settings'" class="view-panel settings-view">
-            <div class="tab-content">
-              <el-form label-position="top" size="small">
-                <el-row :gutter="16">
-                  <el-col :span="8">
-                    <el-form-item :label="t('editor.protocol')">
-                      <el-select v-model="selectedEndpoint.protocol" style="width: 100%">
-                        <el-option label="" value="" />
-                        <el-option label="http" value="http" />
-                        <el-option label="https" value="https" />
-                      </el-select>
-                    </el-form-item>
-                  </el-col>
-                  <el-col :span="8">
-                    <el-form-item :label="t('editor.server')">
-                      <el-input v-model="selectedEndpoint.domain" placeholder="api.example.com" />
-                    </el-form-item>
-                  </el-col>
-                  <el-col :span="8">
-                    <el-form-item :label="t('editor.port')">
-                      <el-input v-model="selectedEndpoint.port" placeholder="443" />
-                    </el-form-item>
-                  </el-col>
-                </el-row>
-                <el-row :gutter="16">
-                  <el-col :span="8">
-                    <el-form-item :label="t('editor.connectionTimeout')">
-                      <el-input-number v-if="canEditNumber(selectedEndpoint._rawTimeout ?? selectedEndpoint.settings.timeout, 0, Number.MAX_SAFE_INTEGER)" v-model="selectedEndpoint.settings.timeout" :min="0" style="width: 100%" />
-                      <template v-else>
-                        <el-input :model-value="String(selectedEndpoint._rawTimeout)" readonly />
-                        <span class="csv-hint">保留原始值；请切换到 JMX 树视图修改。</span>
-                      </template>
-                    </el-form-item>
-                  </el-col>
-                  <el-col :span="8">
-                    <el-form-item :label="t('editor.contentEncoding')">
-                      <el-input v-model="selectedEndpoint.settings.encoding" placeholder="UTF-8" />
-                    </el-form-item>
-                  </el-col>
-                </el-row>
-                <el-row :gutter="16">
-                  <el-col :span="8">
-                    <el-form-item :label="t('editor.followRedirects')">
-                      <el-switch v-model="selectedEndpoint.settings.followRedirects" />
-                    </el-form-item>
-                  </el-col>
-                  <el-col :span="8">
-                    <el-form-item :label="t('editor.autoRedirect')">
-                      <el-switch v-model="selectedEndpoint.settings.autoRedirects" />
-                    </el-form-item>
-                  </el-col>
-                  <el-col :span="8">
-                    <el-form-item label="KeepAlive">
-                      <el-switch v-model="selectedEndpoint.settings.keepAlive" />
-                    </el-form-item>
-                  </el-col>
-                </el-row>
-              </el-form>
-            </div>
+            <EndpointSettingsForm :endpoint="selectedEndpoint" :can-edit="canEditNumber" />
           </div>
         </template>
       </div>
@@ -414,7 +256,7 @@ import { ref, computed, reactive, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
-  ArrowLeft, DocumentChecked, VideoPlay, Document, Plus, Delete, User
+  ArrowLeft, DocumentChecked, VideoPlay, Document
 } from '@element-plus/icons-vue'
 import { api } from '@/api'
 import { useEditorStore, type EnvironmentInfo } from '@/store'
@@ -431,6 +273,9 @@ import FunctionHelper from '@/components/editor/FunctionHelper.vue'
 import JmxTreeEditor from '@/components/editor/JmxTreeEditor.vue'
 import CsvDatasetPanel from '@/components/editor/CsvDatasetPanel.vue'
 import AuthSettings from '@/components/editor/AuthSettings.vue'
+import ThreadGroupForm from '@/components/editor/ThreadGroupForm.vue'
+import EndpointSettingsForm from '@/components/editor/EndpointSettingsForm.vue'
+import ParamsEditor from '@/components/editor/ParamsEditor.vue'
 import type { DebugResponse } from '@/components/editor/ResponsePanel.vue'
 import type { EndpointItem } from '@/components/editor/EndpointList.vue'
 import { usePlanTree, type EndpointData } from '@/composables/usePlanTree'
@@ -551,18 +396,6 @@ const headerProps = computed({
       name: h['Header.name'] || '',
       value: h['Header.value'] || '',
     }))
-  },
-})
-
-// Param rows for the params table
-const paramRows = computed({
-  get: () => {
-    if (!selectedEndpoint.value) return []
-    return selectedEndpoint.value.queryParams.map((p: any) => ({ ...p }))
-  },
-  set: (val) => {
-    if (!selectedEndpoint.value) return
-    selectedEndpoint.value.queryParams = val
   },
 })
 
@@ -733,13 +566,6 @@ function parseTreeToEndpoints(tree: any) {
   }
 }
 
-function handleSchedulerChange(enabled: string | number | boolean) {
-  // Only a user's switch action initializes an unset duration; mount remains lossless.
-  if (enabled === true && canEditNumber(threadGroupNumberValue('ThreadGroup.duration', 0), 0, 0)) {
-    threadGroupConfig.duration = 1
-  }
-}
-
 // === Endpoint Actions ===
 function selectEndpoint(id: string) {
   selectedEndpointId.value = id
@@ -816,22 +642,6 @@ function handleReorder(fromIndex: number, toIndex: number) {
       selectEndpoint(selectedEndpointId.value)
     }
   }
-}
-
-// === Param rows ===
-function updateParamRow(index: number, field: 'name' | 'value' | 'description', value: string) {
-  const row = selectedEndpoint.value?.queryParams[index]
-  if (row) row[field] = value
-}
-
-function addParamRow() {
-  if (!selectedEndpoint.value) return
-  selectedEndpoint.value.queryParams.push({ name: '', value: '', description: '' })
-}
-
-function removeParamRow(index: number) {
-  if (!selectedEndpoint.value) return
-  selectedEndpoint.value.queryParams.splice(index, 1)
 }
 
 // === Handlers ===
@@ -1324,36 +1134,5 @@ function goToProjectSettings() {
   }
 }
 
-.thread-group-config {
-  padding: 12px;
-  border-bottom: 1px solid var(--app-border);
-
-  .config-header {
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--app-text);
-    margin-bottom: 10px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .tg-form {
-    .el-form-item {
-      margin-bottom: 8px;
-    }
-
-    .el-form-item__label {
-      font-size: 12px;
-      padding-bottom: 4px;
-    }
-  }
-
-  .csv-hint {
-    font-size: 11px;
-    color: var(--app-text-secondary);
-    margin-top: 4px;
-  }
-}
 
 </style>

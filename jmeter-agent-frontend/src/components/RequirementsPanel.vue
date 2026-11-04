@@ -118,8 +118,7 @@ import { api, type PerformanceRequirements, type RequirementItem } from '@/api'
 import { useI18n } from '@/composables/useI18n'
 
 const props = defineProps<{ projectId: string; initialDoc?: string; initialDraft?: PerformanceRequirements | null }>()
-const { currentLang } = useI18n()
-const L = (zh: string, en: string) => currentLang.value === 'en' ? en : zh
+const { L } = useI18n()
 
 const metricLabels = computed<Record<string, string>>(() => ({
   avg_response_time: L('平均响应时间 ms', 'Avg response ms'), p90: 'P90 ms', p95: 'P95 ms', p99: 'P99 ms',

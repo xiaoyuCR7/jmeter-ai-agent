@@ -182,8 +182,7 @@ const props = defineProps<{
   timeline?: { time_range: string; avg_response_time: number }[]
 }>()
 const emit = defineEmits<{ updated: [evidence: ExecutionEvidence] }>()
-const { currentLang } = useI18n()
-const L = (zh: string, en: string) => currentLang.value === 'en' ? en : zh
+const { L } = useI18n()
 
 const req = computed(() => props.evidence?.requirements ?? null)
 

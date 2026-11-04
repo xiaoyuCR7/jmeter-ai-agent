@@ -2,8 +2,8 @@
   <el-dialog :model-value="modelValue" :title="L('容量探索', 'Capacity search')" width="860px" top="6vh" destroy-on-close
     @update:model-value="emit('update:modelValue', $event)">
     <p class="hint">
-      {{ L('从起始线程数开始逐级加压，每一级是一次完整运行。遇到性能需求不达标、错误率超限或吞吐量不再随负载增长时停下，上一级就是这个计划能承受的负载。计划文件本身不会被修改。',
-           'Raises the load step by step, each step a full run. It stops at the first step that fails a requirement, errors too much or stops gaining throughput; the step before is the load the plan takes. The plan file is not changed.') }}
+      {{ L('从起始线程数开始逐级加压，每一级是一次完整运行。遇到性能需求不达标、错误率超限或吞吐量不再随负载增长时停下，上一级就是这个计划能承受的负载。计划文件本身不会被修改。为节省模型调用，只在探索结束时为停下的那一级写一份 AI 报告。',
+           'Raises the load step by step, each step a full run. It stops at the first step that fails a requirement, errors too much or stops gaining throughput; the step before is the load the plan takes. The plan file is not changed. To save model calls, one AI report is written when the search ends, on the step that stopped it.') }}
     </p>
     <el-form :inline="true" :model="form" size="default" class="form" :disabled="running">
       <el-form-item :label="L('起始线程', 'Start threads')">
@@ -32,6 +32,9 @@
           {{ L('起始负载就没有通过', 'The first step did not pass') }}
         </span>
         <span class="muted">{{ current.stop_reason }}</span>
+        <router-link v-if="current.report_execution_id" :to="`/executions/${current.report_execution_id}`">
+          {{ L('AI 分析报告', 'AI report') }}
+        </router-link>
         <el-button v-if="current.status === 'running'" size="small" :loading="cancelling" @click="cancel">{{ L('取消', 'Cancel') }}</el-button>
       </div>
       <el-table :data="current.steps" size="small">
@@ -81,8 +84,7 @@ import { formatTime } from '@/utils/format'
 
 const props = defineProps<{ modelValue: boolean; plan: any | null }>()
 const emit = defineEmits<{ 'update:modelValue': [value: boolean] }>()
-const { currentLang } = useI18n()
-const L = (zh: string, en: string) => currentLang.value === 'en' ? en : zh
+const { L } = useI18n()
 
 const form = reactive({ start_threads: 10, max_threads: 100, factor: 1.5, max_error_rate: 1 })
 const history = ref<CapacitySearch[]>([])
