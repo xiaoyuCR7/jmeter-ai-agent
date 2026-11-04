@@ -5,7 +5,7 @@
 
     <aside class="sidebar" :class="{ 'mobile-open': mobileSidebarVisible }">
       <div class="brand">
-        <span class="brand-mark"><el-icon><Connection /></el-icon></span>
+        <img class="brand-mark" src="/logo.svg" alt="" />
         <span class="brand-name">JMeter Agent</span>
       </div>
 
@@ -60,7 +60,7 @@ import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from '@/api'
 import ToolConfirmations from '@/components/ToolConfirmations.vue'
-import { ArrowLeft, Menu, Connection, Folder, VideoPlay, Setting, Plus } from '@element-plus/icons-vue'
+import { ArrowLeft, Menu, Folder, VideoPlay, Setting, Plus } from '@element-plus/icons-vue'
 import { useI18n } from '@/composables/useI18n'
 
 const route = useRoute()
@@ -168,11 +168,7 @@ onUnmounted(() => {
     width: 28px;
     height: 28px;
     flex-shrink: 0;
-    border-radius: var(--app-radius);
-    background: var(--app-primary);
-    color: var(--app-on-primary);
-    display: grid;
-    place-items: center;
+    display: block;
   }
   .brand-name { font-weight: 600; font-size: 15px; color: var(--app-sidebar-text-strong); white-space: nowrap; }
 }
