@@ -4,6 +4,7 @@ import os
 import json
 import asyncio
 import logging
+from typing import Optional
 
 from app.core.config import settings
 from app.services.execution_lifecycle import execution_lifecycle
@@ -29,21 +30,51 @@ async def _with_script_approval(run, tool_name: str, jmx_path: str, *args, **kwa
     again with the list. The approval covers exactly the bytes that were listed; the model
     can never grant it itself.
     """
-    from app.services.confirmations import confirmations
+    from app.services.confirmations import approved_details, confirmations
     for _ in range(3):  # Scripts, then a production environment: each asked once.
         try:
             return await run(jmx_path, *args, **kwargs)
         except ScriptApprovalRequired as error:
-            if not await confirmations.request(tool_name, {'jmx_path': jmx_path,
-                                                           'runs_scripts_on_this_machine': error.findings}):
-                raise ValueError(f'{error} The user did not approve it; do not retry automatically.') from error
+            shown = approved_details.get() or {}
+            # The call's own confirmation listed these scripts for these exact bytes: that was the approval.
+            if shown.get('plan_sha256') != error.sha256:
+                decision = await confirmations.ask(tool_name, {'jmx_path': jmx_path},
+                                                   {'runs_scripts_on_this_machine': error.findings})
+                if decision != 'approved':
+                    raise ValueError(f'{error} {_UNAPPROVED[decision]}') from error
             kwargs['approved_sha256'] = error.sha256
         except ProductionRunNeedsConfirmation as error:
-            if not await confirmations.request(tool_name, {'jmx_path': jmx_path, 'production_environment': error.environment,
-                                                           'base_url': error.base_url, 'threads': error.threads}):
-                raise ValueError(f'{error} The user did not confirm it; do not retry automatically.') from error
+            decision = await confirmations.ask(tool_name, {'jmx_path': jmx_path}, {
+                'production_environment': error.environment, 'base_url': error.base_url, 'threads': error.threads})
+            if decision != 'approved':
+                raise ValueError(f'{error} {_UNAPPROVED[decision]}') from error
             kwargs['confirm_production'] = True
     return await run(jmx_path, *args, **kwargs)
+
+
+_UNAPPROVED = {
+    'denied': 'The user denied it; do not retry automatically.',
+    'unanswered': 'Nobody answered in the JMeter Agent window in time; ask the user to open it, then try again.',
+}
+
+
+async def run_preview(args: dict) -> Optional[dict]:
+    """The scripts a plan would run on this machine, listed in the run's own confirmation.
+
+    Approving the call then approves those exact bytes, instead of a second dialog the user did not expect.
+    """
+    from app.core.config import safe_path, settings
+    from app.services.jmeter.script_risk import content_hash, scan
+    if settings.JMETER_EXECUTION_MODE != 'local':
+        return None
+    try:
+        path = safe_path(str(args.get('jmx_path') or ''), allowed_dirs=[settings.TEST_PLANS_DIR])
+        with open(path, 'rb') as stream:
+            content = stream.read()
+    except (OSError, ValueError):
+        return None
+    findings = scan(content, os.path.dirname(path))
+    return {'runs_scripts_on_this_machine': findings, 'plan_sha256': content_hash(content)} if findings else None
 
 
 def resource_hooks(skip_resource_check: bool, resource_info: dict, *, wait: bool = True):
@@ -236,6 +267,7 @@ jmeter_tools = [
         },
         handler=start_test,
         risk='execute',
+        preview=run_preview,
     ),
     Tool(
         name="get_execution_status",
@@ -302,6 +334,7 @@ jmeter_tools = [
         },
         handler=start_distributed,
         risk='execute',
+        preview=run_preview,
     ),
     Tool(
         name="get_remote_engines",

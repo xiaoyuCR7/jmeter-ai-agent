@@ -2,6 +2,7 @@
 
 import copy
 import inspect
+import logging
 import time
 import json
 from jsonschema import Draft202012Validator
@@ -9,6 +10,8 @@ from typing import Any, Literal, Optional, Callable, Awaitable
 from dataclasses import dataclass, field
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 from app.services.ai.agent.types import (
     ToolResult, ToolHandler, ErrorCategory, classify_exception, reported_category,
@@ -32,6 +35,9 @@ class Tool:
     # read: no lasting effect. draft: adds something new, overwrites nothing.
     # write and execute: change or run existing things, so the user is asked first.
     risk: Literal['read', 'draft', 'write', 'execute'] = 'read'
+    # What the user should see before approving, beyond the arguments: the values a change replaces,
+    # the scripts a plan would run. Shown with the confirmation and handed to the handler once approved.
+    preview: Optional[Callable[[dict], Awaitable[Optional[dict]]]] = None
 
     def __post_init__(self):
         self.parameters = copy.deepcopy(self.parameters)
@@ -133,13 +139,20 @@ class ToolRegistry:
                 return ToolResult(success=False, tool_name=name, error=f"Tool '{name}' argument error: {e}",
                                   duration_ms=(time.time() - start) * 1000,
                                   error_category=ErrorCategory.INPUT_ERROR)
-            from app.services.confirmations import confirmation_source, confirmations
+            from app.services.confirmations import approved_details, confirmation_source, confirmations
             confirmation_source.set(self.source)  # also covers approvals a handler asks for itself
             if tool.require_confirmation:
-                decision = await confirmations.ask(name, args)
+                details = None
+                if tool.preview is not None:
+                    try:
+                        details = await tool.preview(args)
+                    except Exception as error:  # A preview only informs; the handler still checks everything.
+                        logger.warning("Preview of %s failed: %s", name, error)
+                decision = await confirmations.ask(name, args, details)
                 if decision != 'approved':
                     return ToolResult(success=False, tool_name=name, error=DECLINED[decision],
                                       error_category=ErrorCategory.CANCELLED)
+                approved_details.set(details)
             result = await tool.handler(**args)
             duration = (time.time() - start) * 1000
 

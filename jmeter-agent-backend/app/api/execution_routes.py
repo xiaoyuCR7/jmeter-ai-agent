@@ -93,8 +93,7 @@ async def list_executions(
         summary = e.summary
         verdict = None
         if summary and summary.total_requests:
-            evaluation = requirements_service.evaluate(project_requirements.get(e.project_id), summary,
-                                                       requirements_service.sampler_routes(e.jmx_path))
+            evaluation = requirements_service.evaluate_run(project_requirements.get(e.project_id), summary, e.jmx_path)
             verdict = {"verdict": evaluation.verdict, "passed": evaluation.passed,
                        "failed": evaluation.failed, "missing": evaluation.missing}
         rows.append({

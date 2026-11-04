@@ -575,7 +575,7 @@ def test_fact_prompt_serializes_datetime_without_losing_metrics():
     fact = FactSheet(execution_id='unit-test', total_requests=17)
     prompt = AnalysisAgent._build_base_task(None, 'unit-test', fact, '')
     assert '"total_requests":17' in prompt.replace(' ', '')
-    assert fact.computed_at.isoformat() in prompt
+    assert fact.computed_at.isoformat() not in prompt  # Bookkeeping; it kept follow-ups from reusing the cache.
 
 
 @pytest.fixture

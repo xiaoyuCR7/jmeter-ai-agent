@@ -12,6 +12,9 @@ from pathlib import Path
 
 # Set by the ToolRegistry running the call: 'agent' (this app's agents) or 'mcp' (an outside client).
 confirmation_source = contextvars.ContextVar('confirmation_source', default='agent')
+# What the user saw and approved with the current call (its preview), for the handler: a plan's
+# scripts listed there are approved by that one decision, not asked about a second time.
+approved_details = contextvars.ContextVar('approved_details', default=None)
 
 
 def _project_of(arguments: dict) -> str | None:
@@ -36,14 +39,18 @@ class ConfirmationManager:
     async def request(self, tool_name: str, arguments: dict) -> bool:
         return await self.ask(tool_name, arguments) == 'approved'
 
-    async def ask(self, tool_name: str, arguments: dict) -> str:
-        """'approved', 'denied', or 'unanswered' when no decision came in time."""
+    async def ask(self, tool_name: str, arguments: dict, details: dict | None = None) -> str:
+        """'approved', 'denied', or 'unanswered' when no decision came in time.
+
+        ``details`` is shown with the arguments: the values a change replaces, the scripts a plan runs.
+        """
         if len(self._pending) >= self.max_pending:
             return 'unanswered'
         request_id = uuid.uuid4().hex
         future = asyncio.get_running_loop().create_future()
         self._pending[request_id] = {
             'id': request_id, 'tool': tool_name, 'arguments': copy.deepcopy(arguments),
+            'details': copy.deepcopy(details) if details else None,
             'source': confirmation_source.get(), 'project': _project_of(arguments),
             'expires_at': time.time() + self.timeout_seconds, 'future': future,
         }

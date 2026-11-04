@@ -3,9 +3,9 @@ import logging
 import json
 import math
 from abc import ABC, abstractmethod
-from typing import AsyncIterator, List, Dict, Any, Optional, Callable
+from typing import List, Dict, Any, Optional, Callable
 from dataclasses import dataclass, field
-from contextlib import asynccontextmanager, aclosing
+from contextlib import asynccontextmanager
 from functools import wraps
 
 from app.models.schemas import AIChatMessage
@@ -25,16 +25,6 @@ def managed_request(method):
         async with self._operation():
             return await method(self, *args, **kwargs)
     return call
-
-
-def managed_stream(method):
-    @wraps(method)
-    async def stream(self, *args, **kwargs):
-        async with self._operation():
-            async with aclosing(method(self, *args, **kwargs)) as source:
-                async for chunk in source:
-                    yield chunk
-    return stream
 
 
 def message_groups(messages: List[AIChatMessage]) -> list[list[AIChatMessage]]:
@@ -177,11 +167,6 @@ class BaseAIAdapter(ABC):
     @abstractmethod
     async def chat(self, messages: List[AIChatMessage], **kwargs) -> str:
         """非流式对话"""
-        pass
-
-    @abstractmethod
-    async def chat_stream(self, messages: List[AIChatMessage], **kwargs) -> AsyncIterator[str]:
-        """流式对话"""
         pass
 
     @abstractmethod

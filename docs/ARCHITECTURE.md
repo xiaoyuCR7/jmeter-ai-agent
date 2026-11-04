@@ -48,6 +48,9 @@ jmeter-agent-frontend/src/       Vue 3 + Element Plus
 2. `run` 启动 JMeter，同时启动 `run_guard`。如果运行被守护停止，`error_message` 里会写明原因。守护读到的每一行结果也交给 `live_stats` 汇总，只存在内存里，运行结束即丢弃；进度按计划时长和已运行时间计算（计划按循环次数结束时无法预估）。
 3. 运行结束后解析 JTL，发出 `finished` 事件（Webhook 由这个事件触发），然后调用 `post_run.finish_run`。
 4. `post_run` 汇总证据，调用 `TestAnalyzer` 写报告。报告使用的语言由 `REPORT_LANGUAGE` 或页面语言决定。
+   - 需求的范围有三种：`global`（整体）、`each`（每个接口各自都要满足，按最差的接口判定）、`transaction`（某一个接口，写成 `METHOD /path`，文档里的路径模板如 `/items/{id}` 也能对上采样器）。
+   - 吞吐按并发达到计划峰值后的稳态窗口判定，不含爬坡。计划里的吞吐定时器上限不高于要求的 TPS 时，这条需求记为无法评估（`note: plan_caps_throughput`），报告不能把它说成服务端到顶。
+   - 证据里还有计划里有、这次却没有任何结果的请求（`unrun_requests`）和计划的吞吐上限（`throughput_cap`）。
 5. 报告写完后，它的数字会被核对；事实写入事实账本；新的假设写入假设账本；之前的假设如果能用这次运行判定，也一并判定。
 
 ## AI 调用
@@ -59,6 +62,10 @@ jmeter-agent-frontend/src/       Vue 3 + Element Plus
 | 从文档生成计划 | `WorkflowAgent` | 先提取需求，再用 `tool_loop` 调 `save_plans` | 只有 `save_plans` |
 | 需求提取 | `requirements.extract_requirements` | 一次调用，每条需求附上原文引用 | 无 |
 | 外部助手 | MCP（`mcp_server.py`） | 客户端驱动 | 全部内置工具。`write` 和 `execute` 两类工具要用户在界面上确认 |
+
+确认框显示工具的 `preview`：改动前的值（如思考时间 1000 → 0），以及计划会在本机运行的脚本。脚本列在运行自己的确认里，批准这一次就批准了这份计划当时的字节，不再弹第二次；计划在确认之后改过，就要重新确认。
+
+从文档生成计划时，接口列表带上文档写明的响应结构，计划按它用 JSON 路径提取变量；需求里写了目标 TPS 时，不加默认思考时间，限速上限至少高出 20%，思考时间让计划达不到目标的计划会被退回让模型改。
 
 并发：同时最多运行 `AGENT_MAX_CONCURRENT` 个模型任务。运行后自动写报告属于后台任务，后台任务最多占用 N-1 个名额，所以批量运行结束时，用户的追问不会一直排队。
 

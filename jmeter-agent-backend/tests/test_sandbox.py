@@ -114,16 +114,58 @@ async def test_agent_runs_scripts_only_after_a_second_explicit_approval(monkeypa
     done = SimpleNamespace(id='x')
     execute = AsyncMock(side_effect=[script_risk.ScriptApprovalRequired(finding, 'digest'), done])
     monkeypatch.setattr(tools.execution_lifecycle, 'submit', execute)
-    request = AsyncMock(return_value=approved)
-    monkeypatch.setattr(confirmation_module.confirmations, 'request', request)
+    request = AsyncMock(return_value='approved' if approved else 'denied')
+    monkeypatch.setattr(confirmation_module.confirmations, 'ask', request)
     if approved:
         assert await tools._with_script_approval(tools.execution_lifecycle.submit, 'execute_test', 'plan.jmx', 'run') is done
         assert execute.await_args.kwargs['approved_sha256'] == 'digest'
     else:
-        with pytest.raises(ValueError, match='did not approve'):
+        with pytest.raises(ValueError, match='denied'):
             await tools._with_script_approval(tools.execution_lifecycle.submit, 'execute_test', 'plan.jmx', 'run')
         assert execute.await_count == 1
-    request.assert_awaited_once_with('execute_test', {'jmx_path': 'plan.jmx', 'runs_scripts_on_this_machine': finding})
+    request.assert_awaited_once_with('execute_test', {'jmx_path': 'plan.jmx'}, {'runs_scripts_on_this_machine': finding})
+
+
+@pytest.mark.asyncio
+async def test_scripts_listed_in_the_runs_own_confirmation_are_not_asked_about_again(monkeypatch):
+    """One dialog: the call's confirmation showed the scripts for these bytes, so approving it approved them."""
+    from app.services.ai.agent.tools import jmeter as tools
+    from app.services import confirmations as confirmation_module
+    finding = [{'name': 'Groovy', 'kind': 'JSR223PreProcessor'}]
+    execute = AsyncMock(side_effect=[script_risk.ScriptApprovalRequired(finding, 'digest'), 'started'])
+    monkeypatch.setattr(tools.execution_lifecycle, 'submit', execute)
+    ask = AsyncMock(return_value='approved')
+    monkeypatch.setattr(confirmation_module.confirmations, 'ask', ask)
+    token = confirmation_module.approved_details.set({'runs_scripts_on_this_machine': finding, 'plan_sha256': 'digest'})
+    try:
+        assert await tools._with_script_approval(tools.execution_lifecycle.submit, 'execute_test', 'plan.jmx', 'run') == 'started'
+    finally:
+        confirmation_module.approved_details.reset(token)
+    assert ask.await_count == 0 and execute.await_args.kwargs['approved_sha256'] == 'digest'
+    # Bytes changed since they were shown: the approval does not carry over.
+    execute.side_effect = [script_risk.ScriptApprovalRequired(finding, 'other'), 'started']
+    token = confirmation_module.approved_details.set({'runs_scripts_on_this_machine': finding, 'plan_sha256': 'digest'})
+    try:
+        await tools._with_script_approval(tools.execution_lifecycle.submit, 'execute_test', 'plan.jmx', 'run')
+    finally:
+        confirmation_module.approved_details.reset(token)
+    assert ask.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_runs_confirmation_lists_the_scripts_of_the_plan(tmp_path, monkeypatch):
+    from app.core.config import settings
+    from app.services.ai.agent.tools import jmeter as tools
+    monkeypatch.setattr(settings, 'TEST_PLANS_DIR_DEFAULT', str(tmp_path))
+    monkeypatch.setattr('app.core.config.load_paths_config', lambda: {})
+    monkeypatch.setattr(settings, 'JMETER_EXECUTION_MODE', 'local')
+    plan = tmp_path / 'p.jmx'
+    plan.write_text('<jmeterTestPlan><hashTree><JSR223PreProcessor testclass="JSR223PreProcessor" testname="Groovy" '
+                    'enabled="true"><stringProp name="script">x</stringProp></JSR223PreProcessor></hashTree></jmeterTestPlan>',
+                    encoding='utf-8')
+    preview = await tools.run_preview({'jmx_path': str(plan)})
+    assert preview['runs_scripts_on_this_machine'] and preview['plan_sha256'] == script_risk.content_hash(plan.read_bytes())
+    assert await tools.run_preview({'jmx_path': str(tmp_path / 'missing.jmx')}) is None
 
 
 @pytest.mark.asyncio

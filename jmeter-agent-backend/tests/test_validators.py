@@ -147,3 +147,26 @@ def test_english_claims_are_checked():
 
 def test_claims_without_a_scope_are_counted():
     assert FactValidator().validate('P95 为 1200ms', scoped_fact()).unbound_claims == 1
+
+
+@pytest.mark.parametrize('text, claims', [
+    # The unit of 49.06, then a thread count: once read as a second throughput of 30 and "corrected".
+    ('稳态吞吐 49.06 TPS（30 线程）略低于 50 目标', [('throughput', 49.06)]),
+    ('throughput 47.3 TPS (30 threads)', [('throughput', 47.3)]),
+    # A setting quoted from the plan is not a measured value.
+    ('定时器 `throughput=3000`（每分钟样本数）', []),
+    ('TPS 49.06', [('throughput', 49.06)]),
+])
+def test_units_loads_and_quoted_settings_are_not_read_as_claims(text, claims):
+    assert [(c.metric_name, c.claimed_value) for c in MetricClaimExtractor().extract(text)] == claims
+
+
+def test_numbers_listed_after_one_request_are_not_all_held_to_it():
+    """'search P95 1200ms，下单 P95 300ms，吞吐 100 TPS' once had both later numbers 'corrected' to search's."""
+    fact = scoped_fact()
+    text = 'R1 达标（最差 GET /items，P95 1200ms），下单接口 P95 300ms（<800ms），稳态吞吐 100 TPS（≥50）。'
+    assert FactValidator().validate(text, fact).mismatches == []
+    # A number in the same part of the sentence as its request is still held to that request.
+    assert FactValidator().validate('最差的是 GET /items，GET /items P95 300ms', fact).mismatches
+    # A number that matches nothing measured is still wrong, wherever it stands.
+    assert FactValidator().validate('GET /items 最慢，下单接口 P95 777ms', fact).mismatches

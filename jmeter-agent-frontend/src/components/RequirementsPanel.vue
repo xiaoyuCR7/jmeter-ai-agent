@@ -44,8 +44,9 @@
         <el-table-column :label="L('对象', 'Applies to')" min-width="300">
           <template #default="{ row }">
             <div class="target">
-              <el-select v-model="row.scope" size="small" class="scope" @change="row.transaction = row.scope === 'global' ? null : (row.transaction || '')">
+              <el-select v-model="row.scope" size="small" class="scope" @change="row.transaction = row.scope === 'transaction' ? (row.transaction || '') : null">
                 <el-option :label="L('整体', 'Overall')" value="global" />
+                <el-option :label="L('每个接口', 'Each request')" value="each" />
                 <el-option :label="L('接口', 'Transaction')" value="transaction" />
               </el-select>
               <el-input v-if="row.scope === 'transaction'" v-model="row.transaction" size="small"
@@ -279,7 +280,7 @@ async function remove() {
 .model-select { width: 200px; margin-left: auto; }
 .req-table :deep(.el-input-number) { width: 100%; }
 .target, .condition, .source { display: flex; gap: 6px; align-items: center; }
-.scope { width: 88px; flex-shrink: 0; }
+.scope { width: 112px; flex-shrink: 0; }
 .op { width: 64px; flex-shrink: 0; }
 .num { flex: 1; min-width: 70px; }
 .add { margin-top: 8px; }

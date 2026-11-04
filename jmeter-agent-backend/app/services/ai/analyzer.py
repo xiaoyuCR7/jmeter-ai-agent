@@ -50,6 +50,50 @@ FIELD_LIMITS = {'key_findings': 5, 'performance_bottlenecks': 3, 'recommendation
                 'limitations': 3, 'hypotheses': 3}
 
 
+JSON_REPAIRS = 4
+
+
+def repair_json(text: str):
+    """Parse a model's JSON, mending the two slips seen in long reports before giving up.
+
+    One stray character after a string ('…结论。"),"next"') cost a whole second report: about
+    10k tokens to rewrite text that was fine. Mended output is still validated as a report and
+    its numbers are still checked.
+    """
+    def failure(candidate: str) -> Optional[int]:
+        try:
+            json.loads(candidate)
+            return None
+        except json.JSONDecodeError as error:
+            return error.pos
+
+    for _ in range(JSON_REPAIRS):
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as error:
+            if not error.msg.startswith(("Expecting ',' delimiter", "Expecting ':' delimiter")):
+                raise
+            position = error.pos
+            before = text[:position].rstrip()
+            if not before.endswith('"') or position >= len(text):
+                raise
+            quote = len(before) - 1
+            candidates = [
+                text[:quote] + '\\"' + text[quote + 1:],  # The quote was meant inside the string.
+            ]
+            if text[position] in ')）]】}':
+                # A wrong closing bracket ('")' for '"]'), or a stray one.
+                candidates += [text[:position] + closer + text[position + 1:] for closer in (']', '}')]
+                candidates.append(text[:position] + text[position + 1:])
+            # Keep the mend that lets the parser read furthest; one that parses wins outright.
+            best = max(candidates, key=lambda candidate: float('inf') if failure(candidate) is None
+                       else failure(candidate))
+            if (failure(best) or float('inf')) <= position:
+                raise
+            text = best
+    return json.loads(text)
+
+
 def check_numbers(analysis: ReportAnalysis, summary: DetailedTestSummary, execution_id: str,
                   extra_values=()) -> ReportAnalysis:
     """Compare the numbers the model wrote with what the run measured. Only numbers: explanations stay hypotheses."""
@@ -182,7 +226,7 @@ class TestAnalyzer:
         # Keep a top-level array invalid; do not silently extract one of its objects.
         if text.startswith('['):
             raise ValueError('Expected one analysis object')
-        data = json.loads(self._extract_balanced_json(text) or text)
+        data = repair_json(self._extract_balanced_json(text) or text)
         if not isinstance(data, dict):
             raise ValueError('Expected one analysis object')
         # Validation status belongs to the application, never the model.

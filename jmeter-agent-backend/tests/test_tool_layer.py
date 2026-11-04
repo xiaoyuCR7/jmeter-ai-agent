@@ -136,3 +136,51 @@ async def test_one_plan_crashing_does_not_lose_the_plans_saved_beside_it(monkeyp
         project={'name': 'Shop', 'base_url': 'http://127.0.0.1:9'})
     assert [plan['test_plan_id'] for plan in draft.plans] == ['id-ok']
     assert 'disk went away' in reply['results'][0]['error']
+
+
+@pytest.mark.asyncio
+async def test_think_time_set_to_zero_leaves_no_random_pause():
+    """A plan's 750-1250 ms timer kept a 500 ms range when think time was set to 0: 0-500 ms, not 0."""
+    import re as regex
+    created = await _plan()
+    before = open(created['jmx_path'], encoding='utf-8').read()
+    assert 'RandomTimer.range">500.0' in before
+    assert (await jmx_tools.update_jmx(created['jmx_path'], think_time_ms=0))['applied'] == {'think_time_ms': 0}
+    after = open(created['jmx_path'], encoding='utf-8').read()
+    assert set(regex.findall(r'RandomTimer.range">([^<]*)<', after)) == {'0.0'}
+    assert set(regex.findall(r'ConstantTimer.delay">([^<]*)<', after)) == {'0'}
+    await jmx_tools.update_jmx(created['jmx_path'], think_time_ms=2000)
+    again = open(created['jmx_path'], encoding='utf-8').read()
+    assert 'ConstantTimer.delay">1500<' in again and 'RandomTimer.range">1000.0<' in again
+    assert 'Think Time: 1500-2500ms' in again
+
+
+LOGIN = {'name': 'Log in', 'method': 'POST', 'path': '/login', 'body': {'u': 'demo'}, 'phase': 'once_per_user',
+         'extractions': [{'ref_name': 'token', 'extract_type': 'boundary', 'expression': 'left=token":"|right="'}]}
+
+
+@pytest.mark.asyncio
+async def test_an_assistant_can_point_a_variable_at_a_json_path():
+    """A boundary extractor missed '{"token": "..."}'; over MCP nothing could change it."""
+    from app.services import trial_run
+    users = {**ENDPOINT, 'bindings': [{'variable_name': 'token', 'target_location': 'header',
+                                       'target_key': 'Authorization', 'template': 'Bearer ${token}'}]}
+    created = await jmx_tools.create_jmx('Auth', [LOGIN, users], 'http://127.0.0.1:9', concurrent_users=2,
+                                         duration_seconds=60)
+    assert 'error' not in created, created
+    # Requests are named the way reports name them.
+    preview = await jmx_tools.extractor_preview({'jmx_path': created['jmx_path'], 'sampler': 'POST /login', 'variable': 'token'})
+    assert preview['current']['extractor'].startswith('BoundaryExtractor')
+    result = await jmx_tools.set_json_extractor(created['jmx_path'], 'POST /login', 'token', '$.token')
+    assert result['updated'] and result['replaced']['kind'] == 'BoundaryExtractor'
+    login = trial_run.outline(open(created['jmx_path'], 'rb').read())['samplers'][0]
+    assert [(e['kind'], e['variable'], e['expression']) for e in login['extractors']] == [('json', 'token', '$.token')]
+    assert 'error' in await jmx_tools.set_json_extractor(created['jmx_path'], 'Nope', 'token', '$.token')
+    assert 'error' in await jmx_tools.set_json_extractor(created['jmx_path'], 'POST /login', 'token', '$..token')
+
+
+@pytest.mark.asyncio
+async def test_a_load_change_is_confirmed_next_to_the_current_values():
+    created = await _plan()
+    preview = await jmx_tools.update_preview({'jmx_path': created['jmx_path'], 'think_time_ms': 0, 'concurrent_users': 40})
+    assert preview == {'current': {'concurrent_users': 5, 'think_time_ms': 1000}}

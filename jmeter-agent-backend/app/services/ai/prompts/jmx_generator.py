@@ -12,6 +12,8 @@ SCENARIO_RULES = """## 编写压测用例的规则
 - 登录和取 token 用 phase="once_per_user"：每个用户登录一次，否则登录压力会混进结果。
 - 只需执行一次的准备动作用 phase="setup"，比如创建共享数据。setup 里提取的变量后续请求拿不到；要给后续请求用的数据放到 once_per_user。
 - 用 extractions 提取响应里的值，再用 bindings 注入后续请求。需要登录的接口绑定 Authorization，公开接口不要带。
+- 响应是 JSON 时一律用 extract_type="json_path"，路径照接口的 response 写（如 $.token、$.data.id）。不要对 JSON 用 boundary 或 regex：空格、换行、字段顺序一变就取不到值。
+- think_time_ms 只在需求写明思考时间或用户节奏时设置，没写就设 0；思考时间会压低吞吐，设了它可能永远达不到需求里的 TPS。
 - 路径变量写成 /orders/{id}，再用 bindings 把 id 绑定到提取的变量，target_location 为 path，target_key 为 id。路径里不要写 ${id}。
 - 写操作的数据要唯一时用 JMeter 函数，例如 "user_${__UUID()}"。可以多个用户共用的数据写固定值。
 - 只给文档写明了比例的请求设 weight，比如下单只占 20%，没写比例的请求不要设。文档写明一段流程的多个步骤同属这个比例时（如 40% 的用户走完下单和确认），给这些相邻步骤设相同的 weight，它们会一起执行或一起跳过。其它请求不要依赖设了 weight 的请求。

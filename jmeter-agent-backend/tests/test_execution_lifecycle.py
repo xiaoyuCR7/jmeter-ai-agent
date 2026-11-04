@@ -339,7 +339,7 @@ async def test_imported_plans_register_without_overwriting(env):
     imported = await import_jmx(str(env.path), target_name='Imported')
     assert imported.get('test_plan_id')
     assert await env.db.get_test_plan(imported['test_plan_id'])
-    target = Path(imported['imported_path'])
+    target = Path(imported['jmx_path'])
     original = target.read_bytes()
     again = await import_jmx(str(env.path), target_name='Imported')
     assert again.get('error')

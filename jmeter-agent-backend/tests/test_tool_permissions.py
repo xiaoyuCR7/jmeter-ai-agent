@@ -53,11 +53,11 @@ def test_general_tool_paths_cannot_read_backend_configuration(tmp_path, monkeypa
         safe_path(str(tmp_path / 'ai_models_config.json'))
 
 
-def test_openapi_import_only_drafts_and_cannot_start_a_run():
+def test_openapi_import_is_confirmed_and_cannot_start_a_run():
     from app.services.ai.agent.tools.resource import resource_tools
     tools = {tool.name: tool for tool in resource_tools}
-    # It adds a new project and plan, like create_project; a run is a separate, confirmed call.
-    assert tools['import_openapi_spec'].risk == 'draft'
+    # It fetches whatever URL the caller names, from this machine; a run is a separate, confirmed call.
+    assert tools['import_openapi_spec'].risk == 'write'
     assert set(tools['import_openapi_spec'].parameters['properties']) == {'url'}
 
 
@@ -108,9 +108,9 @@ def test_every_built_in_tool_has_a_deliberate_risk():
     assert 'get_execution_status' in levels['read']
     assert levels['execute'] == {'execute_test', 'execute_distributed', 'start_capacity_search',
                                  'start_verification_run'}
-    assert levels['write'] == {'update_jmx', 'update_project_env', 'cancel_execution',
+    assert levels['write'] == {'update_jmx', 'set_json_extractor', 'import_openapi_spec', 'update_project_env', 'cancel_execution',
                                'save_performance_requirements', 'promote_execution_to_baseline'}
-    assert levels['draft'] == {'create_jmx', 'import_jmx', 'create_project', 'import_openapi_spec'}
+    assert levels['draft'] == {'create_jmx', 'import_jmx', 'create_project'}
     assert all(tool.require_confirmation == (tool.risk in ('write', 'execute')) for tool in get_all_builtin_tools())
 
 
@@ -168,6 +168,6 @@ async def test_a_plan_with_scripts_asks_for_approval_instead_of_failing(monkeypa
     execute = AsyncMock(side_effect=[ScriptApprovalRequired(finding, 'digest'), 'finished'])
     monkeypatch.setattr(jmeter.execution_lifecycle, 'submit', execute)
     from app.services.confirmations import confirmations
-    monkeypatch.setattr(confirmations, 'request', AsyncMock(return_value=True))
+    monkeypatch.setattr(confirmations, 'ask', AsyncMock(return_value='approved'))
     assert await jmeter._with_script_approval(jmeter.execution_lifecycle.submit, 'execute_test', 'a.jmx', 'run') == 'finished'
     assert execute.await_args.kwargs['approved_sha256'] == 'digest'

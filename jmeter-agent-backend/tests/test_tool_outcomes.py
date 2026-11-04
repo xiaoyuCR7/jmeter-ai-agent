@@ -68,7 +68,7 @@ async def test_a_bug_inside_a_tool_is_not_reported_as_the_models_wrong_arguments
 async def test_arguments_the_handler_cannot_take_are_refused_before_anyone_is_asked(monkeypatch):
     from app.services import confirmations as module
     asked = []
-    async def ask(name, args):
+    async def ask(name, args, details=None):
         asked.append(name)
         return 'approved'
     monkeypatch.setattr(module.confirmations, 'ask', ask)

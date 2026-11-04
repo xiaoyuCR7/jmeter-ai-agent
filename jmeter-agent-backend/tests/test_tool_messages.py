@@ -177,34 +177,6 @@ def test_text_tool_fallback_preserves_nested_json(payload):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('ending', ['complete', 'close', 'error'])
-async def test_model_stream_always_closes_response(ending):
-    from app.services.ai.adapters.openai_adapter import OpenAIAdapter as cls
-    class Stream:
-        def __init__(self):
-            self.close = AsyncMock()
-        async def __aiter__(self):
-            yield SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content='one'))])
-            if ending == 'error':
-                raise RuntimeError('stream error')
-    stream = Stream()
-    adapter = object.__new__(cls)
-    adapter.model = 'fixture'
-    adapter.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=AsyncMock(return_value=stream))))
-    iterator = adapter.chat_stream(tool_exchange())
-    assert await anext(iterator) == 'one'
-    if ending == 'close':
-        await iterator.aclose()
-    elif ending == 'error':
-        with pytest.raises(RuntimeError, match='stream error'):
-            await anext(iterator)
-    else:
-        with pytest.raises(StopAsyncIteration):
-            await anext(iterator)
-    stream.close.assert_awaited_once()
-
-
-@pytest.mark.asyncio
 async def test_factory_invalidation_waits_for_active_call_before_closing(monkeypatch):
     import asyncio
     from app.services.ai.adapters.openai_adapter import OpenAIAdapter

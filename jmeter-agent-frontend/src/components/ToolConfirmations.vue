@@ -19,6 +19,16 @@
     <template v-else-if="pending[0]">
       <p>Agent 正在等待确认。请核对工具和参数；拒绝或超时将停止这项操作。</p>
       <p><strong>{{ pending[0].tool }}</strong></p>
+      <el-alert v-if="production" type="warning" :closable="false" show-icon class="production"
+                :title="`将在生产环境「${production.production_environment}」运行 / Runs against production: ${production.base_url || ''}`" />
+      <table v-if="changes.length" class="changes">
+        <thead><tr><th>项 / Field</th><th>当前 / Now</th><th>改为 / New</th></tr></thead>
+        <tbody>
+          <tr v-for="row in changes" :key="row.key">
+            <td><code>{{ row.key }}</code></td><td>{{ row.now ?? '—' }}</td><td><strong>{{ row.next }}</strong></td>
+          </tr>
+        </tbody>
+      </table>
       <pre>{{ JSON.stringify(pending[0].arguments, null, 2) }}</pre>
     </template>
     <el-alert v-if="error" :title="error" type="error" :closable="false" />
@@ -36,10 +46,21 @@ import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { api } from '@/api'
 import { findingLabel, type ScriptFinding } from '@/api/scriptApproval'
 const pending = ref<any[]>([])
-// The agent's second, script-specific approval (see _execute_with_script_approval) reads better as a list.
+// Scripts a run would execute, listed by the run's own confirmation (details) or a later one.
 const scripts = computed<ScriptFinding[] | null>(() => {
-  const findings = pending.value[0]?.arguments?.runs_scripts_on_this_machine
+  const item = pending.value[0]
+  const findings = item?.details?.runs_scripts_on_this_machine ?? item?.arguments?.runs_scripts_on_this_machine
   return Array.isArray(findings) ? findings : null
+})
+const production = computed(() => pending.value[0]?.details?.production_environment ? pending.value[0].details : null)
+// What a change replaces, next to what it asks for, so "think_time_ms: 0" reads as "1000 → 0".
+const changes = computed(() => {
+  const item = pending.value[0]
+  const current = item?.details?.current
+  if (!current) return []
+  return Object.keys(current).map(key => ({
+    key, now: current[key], next: key === 'extractor' ? item.arguments?.json_path : item.arguments?.[key],
+  }))
 })
 const sourceLabel = computed(() => pending.value[0]?.source === 'mcp'
   ? '外部 MCP 客户端 / External MCP client' : '本应用的 Agent / This app\'s agent')
@@ -78,4 +99,8 @@ p { margin-bottom: 12px; }
 .label { font-weight: 600; margin-right: 8px; }
 .label.project { margin-left: 20px; }
 .findings { max-height: 35vh; overflow: auto; margin: 0 0 12px; padding-left: 20px; line-height: 1.8; }
+.production { margin-bottom: 12px; }
+.changes { width: 100%; border-collapse: collapse; margin-bottom: 12px; font-size: 13px; }
+.changes th, .changes td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--app-border, #e5e7eb); }
+.changes th { color: var(--app-text-secondary); font-weight: 500; }
 </style>

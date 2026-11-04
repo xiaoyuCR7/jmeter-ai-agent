@@ -325,10 +325,13 @@ def check_fix(fix: dict, trial: dict) -> dict:
     text = str(value)
     checked['verified'] = True
     checked['preview'] = text if len(text) <= 12 else text[:6] + '…'
-    existing = next((item for item in matches[0]['extractors'] if item['kind'] == 'json' and item['variable'] == variable), None)
+    # Any extractor that sets the variable: a boundary or regex one that missed is replaced by the
+    # proven JSON path, not only a JSON extractor with the wrong path.
+    existing = next((item for item in matches[0]['extractors'] if item['variable'] == variable), None)
     if checked['action'] == 'change':
-        checked['applicable'] = existing is not None and existing['expression'] != expression
+        checked['applicable'] = existing is not None and (existing['kind'] != 'json' or existing['expression'] != expression)
         checked['current'] = existing['expression'] if existing else None
+        checked['current_kind'] = existing['kind'] if existing else None
     else:
         checked['applicable'] = existing is None
     return checked
@@ -369,10 +372,27 @@ def apply_fix(plan, fix_id: int) -> dict:
     if not 0 <= fix_id < len(trial['fixes']) or not trial['fixes'][fix_id]['applicable']:
         raise ValueError('这条建议没有被试跑结果证实，不能自动应用')
     fix = trial['fixes'][fix_id]
-    root = ET.fromstring(Path(plan.jmx_path).read_bytes())
+    content = with_json_extractor(Path(plan.jmx_path).read_bytes(), fix['sampler'], fix['variable'], fix['expression'],
+                                  replace=fix['action'] == 'change')
+    temp = plan.jmx_path + '.tmp'
+    with open(temp, 'wb') as target:
+        target.write(content)
+    os.replace(temp, plan.jmx_path)
+    _last.pop(plan.id, None)
+    return {'applied': True, 'sampler': fix['sampler'], 'variable': fix['variable'], 'expression': fix['expression']}
+
+
+def with_json_extractor(content: bytes, sampler: str, variable: str, expression: str, replace: bool = True) -> bytes:
+    """The plan with ``variable`` taken from ``sampler``'s JSON response at ``expression``.
+
+    With ``replace``, the extractor already setting the variable (JSON, regex or boundary) gives way
+    to the JSON one in its place; without it, or when there is none, one is added. ValueError when
+    the plan has no such request (or, replacing, no such extractor).
+    """
+    root = ET.fromstring(content)
     done = False
     for element in root.iter():
-        if done or not element.tag.endswith(('Sampler', 'SamplerProxy')) or element.get('testname') != fix['sampler']:
+        if done or not element.tag.endswith(('Sampler', 'SamplerProxy')) or element.get('testname') != sampler:
             continue
         parent = next(tree for tree in root.iter('hashTree') if element in list(tree))
         children = list(parent)
@@ -381,20 +401,20 @@ def apply_fix(plan, fix_id: int) -> dict:
         if holder is None:
             holder = ET.Element('hashTree')
             parent.insert(index + 1, holder)
-        if fix['action'] == 'change':
-            for child, _ in _pairs(holder):
-                if child.tag == 'JSONPostProcessor' and _prop_text(child, 'JSONPostProcessor.referenceNames') == fix['variable']:
-                    _set(child, 'stringProp', 'JSONPostProcessor.jsonPathExprs', fix['expression'])
+        if replace:
+            for child, _ in list(_pairs(holder)):
+                kind = child.tag
+                if kind == 'JSONPostProcessor' and _prop_text(child, 'JSONPostProcessor.referenceNames') == variable:
+                    _set(child, 'stringProp', 'JSONPostProcessor.jsonPathExprs', expression)
+                    done = True
+                elif kind in ('RegexExtractor', 'BoundaryExtractor') and _prop_text(child, f'{kind}.refname') == variable:
+                    # Same place, so extractors after it and the requests using the variable still follow it.
+                    holder[list(holder).index(child)] = _extractor(variable, expression)
                     done = True
         else:
-            holder.append(_extractor(fix['variable'], fix['expression']))
+            holder.append(_extractor(variable, expression))
             holder.append(ET.Element('hashTree'))
             done = True
     if not done:
         raise ValueError('计划里找不到这个请求或提取器')
-    temp = plan.jmx_path + '.tmp'
-    with open(temp, 'wb') as target:
-        target.write(ET.tostring(root, encoding='utf-8', xml_declaration=True))
-    os.replace(temp, plan.jmx_path)
-    _last.pop(plan.id, None)
-    return {'applied': True, 'sampler': fix['sampler'], 'variable': fix['variable'], 'expression': fix['expression']}
+    return ET.tostring(root, encoding='utf-8', xml_declaration=True)

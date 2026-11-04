@@ -545,6 +545,66 @@ class OpenAPIImporter:
             expected_status=success_codes[0] if success_codes else 200)
 
 
+RESPONSE_FIELDS = 20  # properties listed per object of a documented response
+RESPONSE_DEPTH = 3
+
+
+def _fields(schema, depth=0):
+    """A documented JSON shape, small: {"token": "string", "items": [{"id": "integer"}]}."""
+    if not isinstance(schema, dict):
+        return 'any'
+    if 'example' in schema and depth == 0:
+        return schema['example']
+    for key in ('allOf', 'oneOf', 'anyOf'):
+        if isinstance(schema.get(key), list) and schema[key]:
+            merged = {}
+            for part in schema[key]:
+                shape = _fields(part, depth)
+                if isinstance(shape, dict):
+                    merged.update(shape)
+            return merged or _fields(schema[key][0], depth)
+    if schema.get('type') == 'array' or 'items' in schema:
+        return [_fields(schema.get('items'), depth + 1)] if depth < RESPONSE_DEPTH else ['...']
+    if schema.get('type') == 'object' or 'properties' in schema:
+        if depth >= RESPONSE_DEPTH:
+            return 'object'
+        names = list(schema.get('properties') or {})[:RESPONSE_FIELDS]
+        return {name: _fields(schema['properties'][name], depth + 1) for name in names}
+    return schema.get('type') or 'any'
+
+
+def _response_shape(importer: 'OpenAPIImporter', ep: ParsedEndpoint, spec: dict) -> Optional[dict]:
+    """What the success response of an endpoint carries, so plans extract and check real fields.
+
+    Without it the model guessed: a boundary extractor of 'token":"' missed '{"token": "..."}'
+    and every request needing the token failed.
+    """
+    codes = sorted(code for code in ep.responses if str(code).isdigit() and 200 <= int(code) < 300)
+    if not codes:
+        return None
+    try:
+        response = importer._resolve_refs(ep.responses[codes[0]], spec)
+    except ValueError:
+        return None
+    if not isinstance(response, dict):
+        return None
+    content = response.get('content')
+    if content is None and 'schema' in response:  # Swagger 2
+        content = {'application/json': {'schema': response['schema'], 'example': (response.get('examples') or {}).get('application/json')}}
+    if not isinstance(content, dict):
+        return None
+    media = next((key for key in content if key == 'application/json' or key.endswith('+json')), None)
+    if media is None or not isinstance(content[media], dict):
+        return None
+    body = content[media]
+    example = body.get('example')
+    if example is None and isinstance(body.get('examples'), dict) and body['examples']:
+        first = next(iter(body['examples'].values()))
+        example = first.get('value') if isinstance(first, dict) else None
+    shape = {'status': int(codes[0]), 'json': example if example is not None else _fields(body.get('schema'))}
+    return shape if shape['json'] not in (None, 'any', {}) else None
+
+
 def endpoints_from_document(text: str) -> Optional[dict]:
     """The endpoints of an OpenAPI/Swagger document, parsed by code; None for any other text.
 
@@ -585,6 +645,9 @@ def endpoints_from_document(text: str) -> Optional[dict]:
                 ('headers', api.headers), ('query_params', api.query_params), ('body', api.body),
                 ('content_type', api.content_type if api.body is not None else None),
                 ('expected_status', api.expected_status)) if value})
+        response = _response_shape(importer, ep, spec)
+        if response:
+            item['response'] = response
         if ep.description:
             item['description'] = str(ep.description)[:200]
         if ep.tags:

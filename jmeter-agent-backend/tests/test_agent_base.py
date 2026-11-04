@@ -37,8 +37,6 @@ class FakeAdapter(BaseAIAdapter):
             return self._chat_responses.pop(0)
         return "summary"
 
-    async def chat_stream(self, messages, **kwargs):
-        yield "chunk"
 
     async def generate(self, prompt, **kwargs) -> str:
         return "generated"

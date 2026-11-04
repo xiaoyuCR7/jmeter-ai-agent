@@ -86,8 +86,7 @@ async def _requirements_verdict(execution) -> Optional[dict]:
     from app.services import requirements as requirement_service
     try:
         stored = await requirement_service.get_requirements(execution.project_id or 'default')
-        result = requirement_service.evaluate(stored, execution.summary,
-                                              requirement_service.sampler_routes(execution.jmx_path))
+        result = requirement_service.evaluate_run(stored, execution.summary, execution.jmx_path)
     except Exception as error:
         logger.warning('Requirement verdict unavailable for webhook of %s: %s', execution.id, error)
         return None

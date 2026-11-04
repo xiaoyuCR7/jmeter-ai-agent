@@ -27,7 +27,9 @@ _GAP = (r"(?:\s|[:：=≈~（(]|响应时间|耗时|延迟|实测|实际|整体|
         r"|response\s+times?|latency|overall|measured|reached|around|about|approximately|roughly|only"
         r"|of|is|was|were|at)*")
 # A number followed by a range mark is a time span ("错误率 5-10 s 为 72%"), not the metric's value.
-_NOT_VALUE = r"(?!\s*(?:[%％倍\-–—~至到]|\d|\.\d|x\b|times))"
+# "30 线程" or "30 users" is a load, not the metric's value ("49 TPS（30 线程）" once read as 30 TPS).
+_NOT_VALUE = (r"(?!\s*(?:[%％倍\-–—~至到]|\d|\.\d|x\b|times"
+              r"|个?线程|个?用户|并发|threads?\b|users?\b|vus?\b))")
 _TIME = _GAP + r"(\d+(?:\.\d+)?)\s*(ms|毫秒|seconds?\b|s\b|秒)?" + _NOT_VALUE
 _RATE = _GAP + r"(\d+(?:\.\d+)?)\s*(req/s|requests?/s(?:ec)?|rps|tps|请求/秒)?" + _NOT_VALUE
 _PERCENT = _GAP + r"(\d+(?:\.\d+)?)\s*(%|％|percent)?(?!\s*(?:[倍\-–—~至到]|\d|\.\d|x\b|times))"
@@ -38,6 +40,7 @@ _COMPARISON = re.compile(
     r"|baseline|previous|prior|earlier|last\s+run|history|compared|than|from|versus|vs\.?|target|requirement"
     r"|threshold|limit|expected|goal", re.IGNORECASE)
 _OVERALL = re.compile(r"整体|总体|全部请求|所有请求|全局|overall|in\s+total|all\s+requests", re.IGNORECASE)
+_SEGMENT_END = re.compile(r"[，,、]")
 _CLAUSE_END = re.compile(r"[。；;！？!?\n]|\.(?=\s|$)|，(?=\s*(?:而|但|其中|整体|总体))")
 
 
@@ -64,8 +67,9 @@ class MetricClaimExtractor:
         (r"(?<![a-z])(?:max|maximum|peak)\s+(?:response\s+times?|latency)" + _TIME, "max_response_time", "ms"),
         (r"吞吐量?" + _RATE, "throughput", "req/s"),
         (r"(?<![a-z])throughput" + _RATE, "throughput", "req/s"),
-        (r"(?<![a-z])TPS" + _RATE, "throughput", "req/s"),
-        (r"(?<![a-z])RPS" + _RATE, "throughput", "req/s"),
+        # After a number, TPS is that number's unit, not the name of the next one.
+        (r"(?<![a-z\d.])(?<![\d.]\s)TPS" + _RATE, "throughput", "req/s"),
+        (r"(?<![a-z\d.])(?<![\d.]\s)RPS" + _RATE, "throughput", "req/s"),
         (r"错误率" + _PERCENT, "error_rate", "%"),
         (r"(?<![a-z])(?:error|failure)\s+rate" + _PERCENT, "error_rate", "%"),
         (r"总请求数?" + _GAP + r"(\d+)(?![\d.%％倍])", "total_requests", ""),
@@ -79,8 +83,12 @@ class MetricClaimExtractor:
     def spans(self, text: str) -> list[_Span]:
         """The claims with where they stand, so the validator can read the clause around each."""
         spans = []
+        # Inline code quotes the plan or a setting (`throughput=3000`), not a measured value.
+        code = [(m.start(), m.end()) for m in re.finditer(r"`[^`\n]*`", text)]
         for pattern, canonical_name, default_unit in self.METRIC_PATTERNS:
             for match in re.finditer(pattern, text, re.IGNORECASE):
+                if any(start <= match.start(1) < end for start, end in code):
+                    continue
                 value_str = match.group(1)
                 unit_group = match.group(2) if match.lastindex and match.lastindex >= 2 else None
                 try:
@@ -246,7 +254,16 @@ class FactValidator:
 
             before, clause = self._clause(analysis_text, span)
             label = self._named_label(fact, before)
-            if label is not None:
+            # A request named in this part of the sentence owns the number. One named only in an
+            # earlier part may belong to an earlier item of a list: "search P95 392ms，下单接口 P95 246ms，
+            # 稳态吞吐 194 TPS" once had both later numbers checked against search and "corrected".
+            segment = before[max((m.end() for m in _SEGMENT_END.finditer(before)), default=0):]
+            listed = label is not None and self._named_label(fact, segment) is None
+            if label is not None and listed:
+                scope = label
+                known = [*self._label_values(fact, label, claim.metric_name), actual,
+                         *self._also_measured(fact, claim.metric_name)]
+            elif label is not None:
                 scope, known = label, self._label_values(fact, label, claim.metric_name)
                 if not known:  # The run did not measure this metric for the request; nothing to check.
                     continue

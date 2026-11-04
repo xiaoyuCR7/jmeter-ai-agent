@@ -213,7 +213,10 @@ async def test_update_tool_preserves_dict_property_contract(jmx_file, monkeypatc
     assert props['ThreadGroup.duration'] == '45'
     assert props['ThreadGroup.ramp_time'] == '3'
     assert props['ThreadGroup.scheduler'] is True
-    assert any(n.get('properties', {}).get('ConstantTimer.delay') == '25' for n in nodes)
+    # A random timer keeps the spread new plans get: 25 ms on average is 19-31 ms.
+    timers = [n['properties'] for n in nodes if 'ConstantTimer.delay' in n.get('properties', {})]
+    assert all((t['ConstantTimer.delay'], t.get('RandomTimer.range')) in (('25', None), ('19', '12.5')) for t in timers)
+    assert timers
 
 
 EDITOR_FIXTURE = '''<?xml version="1.0" encoding="UTF-8"?>

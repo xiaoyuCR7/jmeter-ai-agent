@@ -1,5 +1,6 @@
 """Trial runs: the copy that runs, reading its responses, and fixes proven by those responses."""
 import json
+import re
 import xml.etree.ElementTree as ET
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -242,3 +243,31 @@ def test_the_trial_copy_lets_every_request_through_its_controllers():
     root = ET.fromstring(trial_run.trial_copy(plan))
     assert root.find('.//ThroughputController/FloatProperty/value').text == '100.0'
     assert root.find('.//RandomController') is None and root.find('.//GenericController').get('testclass') == 'GenericController'
+
+
+def test_a_proven_json_path_replaces_a_boundary_extractor_that_missed(tmp_path):
+    """A generated plan cut the token at 'token":"' while the server wrote '{"token": "..."}'."""
+    from app.services.jmeter.script_risk import content_hash
+    boundary = re.sub(rb'<JSONPostProcessor .*?</JSONPostProcessor>',
+                      b'<BoundaryExtractor testclass="BoundaryExtractor" testname="token" enabled="true">'
+                      b'<stringProp name="BoundaryExtractor.refname">token</stringProp>'
+                      b'<stringProp name="BoundaryExtractor.lboundary">token&quot;:&quot;</stringProp>'
+                      b'<stringProp name="BoundaryExtractor.rboundary">&quot;</stringProp></BoundaryExtractor>',
+                      PLAN, flags=re.S)
+    assert b'BoundaryExtractor' in boundary
+    path = tmp_path / 'plan.jmx'
+    path.write_bytes(boundary)
+    plan = SimpleNamespace(id='plan-b', project_id='p', jmx_path=str(path))
+    state = trial(tmp_path)
+    state['outline'] = trial_run.outline(boundary)
+    state['sha256'] = content_hash(boundary)
+    fix = trial_run.check_fix({'sampler': 'POST /login', 'variable': 'token', 'expression': '$.data.token',
+                               'action': 'change'}, state)
+    assert fix['verified'] and fix['applicable'] and fix['current_kind'] == 'BoundaryExtractor'
+    state['fixes'] = [fix]
+    trial_run._last[plan.id] = state
+    trial_run.apply_fix(plan, 0)
+    written = open(plan.jmx_path, 'rb').read()
+    assert b'BoundaryExtractor' not in written
+    extractors = trial_run.outline(written)['samplers'][0]['extractors']
+    assert [(e['kind'], e['variable'], e['expression']) for e in extractors] == [('json', 'token', '$.data.token')]

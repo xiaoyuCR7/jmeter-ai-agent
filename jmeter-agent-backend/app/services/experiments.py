@@ -155,8 +155,7 @@ async def requirement_verdict(execution) -> Optional[str]:
     from app.services import requirements as requirement_service
     try:
         stored = await requirement_service.get_requirements(execution.project_id)
-        return requirement_service.evaluate(stored, execution.summary,
-                                            requirement_service.sampler_routes(execution.jmx_path)).verdict
+        return requirement_service.evaluate_run(stored, execution.summary, execution.jmx_path).verdict
     except Exception as error:
         logger.warning('Requirements not evaluated for %s: %s', execution.id, error)
         return None

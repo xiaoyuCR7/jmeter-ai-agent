@@ -200,6 +200,97 @@ async def get_jmx_content(jmx_path: str) -> dict:
     }
 
 
+def _plan_bytes(jmx_path) -> Optional[bytes]:
+    from app.core.config import safe_path
+    try:
+        with open(safe_path(str(jmx_path or ''), allowed_dirs=[settings.TEST_PLANS_DIR]), 'rb') as f:
+            return f.read()
+    except (OSError, ValueError):
+        return None
+
+
+async def update_preview(args: dict) -> Optional[dict]:
+    """The plan's current load next to the requested one, so the user sees what changes (1000 → 0 ms)."""
+    import xml.etree.ElementTree as ET
+    content = _plan_bytes(args.get('jmx_path'))
+    if content is None:
+        return None
+    root = ET.fromstring(content)
+    props = lambda element: {p.get('name'): (p.text or '').strip() for p in element if p.get('name')}
+    group = next((g for g in root.iter() if g.tag.endswith('ThreadGroup') and g.get('enabled') != 'false'), None)
+    timer = next((t for t in root.iter() if t.tag.endswith('Timer') and t.get('enabled') != 'false'
+                  and 'ConstantTimer.delay' in props(t)), None)
+    current = {}
+    if group is not None:
+        values = props(group)
+        for key, prop in (('concurrent_users', 'ThreadGroup.num_threads'), ('ramp_up_seconds', 'ThreadGroup.ramp_time'),
+                          ('duration_seconds', 'ThreadGroup.duration')):
+            if values.get(prop, '').isdigit():
+                current[key] = int(values[prop])
+    if timer is not None:
+        values = props(timer)
+        try:
+            current['think_time_ms'] = round(float(values['ConstantTimer.delay'])
+                                             + float(values.get('RandomTimer.range') or 0) / 2)
+        except ValueError:
+            pass
+    asked = [key for key in ('concurrent_users', 'ramp_up_seconds', 'duration_seconds', 'think_time_ms')
+             if args.get(key) is not None]
+    return {'current': {key: current.get(key) for key in asked}} if asked else None
+
+
+async def extractor_preview(args: dict) -> Optional[dict]:
+    """What sets the variable today, which the new JSON path replaces."""
+    from app.services import trial_run
+    content = _plan_bytes(args.get('jmx_path'))
+    if content is None:
+        return None
+    sampler = next((item for item in trial_run.outline(content)['samplers'] if item['label'] == args.get('sampler')), None)
+    existing = next((item for item in (sampler or {}).get('extractors', []) if item['variable'] == args.get('variable')), None)
+    return {'current': {'extractor': f"{existing['kind']}: {existing['expression']}" if existing else None}}
+
+
+async def set_json_extractor(jmx_path: str, sampler: str, variable: str, json_path: str) -> dict:
+    """Take ``variable`` from ``sampler``'s JSON response at ``json_path``, replacing whatever set it before.
+
+    Without it an assistant could see that a boundary extractor missed the token, and change nothing.
+    """
+    from app.core.config import safe_path
+    from app.services import trial_run
+    try:
+        jmx_path = safe_path(jmx_path, allowed_dirs=[settings.TEST_PLANS_DIR])
+    except ValueError as e:
+        return {"error": str(e), "error_category": "input_error"}
+    if not trial_run._SIMPLE_PATH.fullmatch(json_path or ''):
+        return {"error": "json_path must be a plain path such as $.data.token", "error_category": "input_error"}
+    try:
+        with open(jmx_path, "rb") as f:
+            before = f.read()
+    except OSError as e:
+        return {"error": f"JMX file not found: {e}", "error_category": "input_error"}
+    existing = next((item for item in trial_run.outline(before)['samplers'] if item['label'] == sampler), None)
+    if existing is None:
+        return {"error": f"No request named {sampler!r} in the plan", "error_category": "input_error"}
+    replaced = next((item for item in existing['extractors'] if item['variable'] == variable), None)
+    try:
+        content = trial_run.with_json_extractor(before, sampler, variable, json_path, replace=replaced is not None)
+    except ValueError as e:
+        return {"error": str(e), "error_category": "input_error"}
+    failures, _issues = await asyncio.to_thread(jmx_lint.check, content.decode("utf-8"))
+    if failures:
+        return {"error": "The plan was not changed: " + jmx_lint.describe(failures), "issues": failures}
+    temp_path = f"{jmx_path}.{os.getpid()}.tmp"
+    try:
+        with open(temp_path, "wb") as f:
+            f.write(content)
+        os.replace(temp_path, jmx_path)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+    return {"jmx_path": jmx_path, "updated": True, "sampler": sampler, "variable": variable, "json_path": json_path,
+            "replaced": {"kind": replaced["kind"], "expression": replaced["expression"]} if replaced else None}
+
+
 async def list_test_plans(project_id: Optional[str] = None) -> dict:
     """List the test plans in the app, optionally of one project, with the IDs other tools take."""
     from app.services.storage import store
@@ -322,7 +413,16 @@ async def update_jmx(
                 if "Timer" in node.get("testclass", ""):
                     tprops = node.get("properties", {})
                     if "ConstantTimer.delay" in tprops:
-                        tprops["ConstantTimer.delay"] = str(think_time_ms)
+                        if "RandomTimer.range" in tprops:
+                            # The same spread new plans get (±25%). Left alone, a range of 500 kept a
+                            # think time set to 0 at 0-500 ms.
+                            low, spread = round(think_time_ms * 0.75), think_time_ms * 0.5
+                            tprops["ConstantTimer.delay"] = str(low)
+                            tprops["RandomTimer.range"] = str(float(spread))
+                            if node.get("testclass") == "UniformRandomTimer":
+                                node["testname"] = f"Think Time: {low}-{round(low + spread)}ms"
+                        else:
+                            tprops["ConstantTimer.delay"] = str(think_time_ms)
                         timer_found = True
             if timer_found:
                 applied["think_time_ms"] = think_time_ms
@@ -422,7 +522,7 @@ async def import_jmx(source_path: str, project_id: str = "default",
 
     return {
         "source_path": source_path,
-        "imported_path": target_path,
+        "jmx_path": target_path,  # Named as every other tool names a plan file, for execute_test and the rest.
         "test_plan_id": plan.id,
         "project_id": project_id,
         "message": f"JMX file imported to {target_path}",
@@ -594,14 +694,36 @@ jmx_tools = [
         },
         handler=update_jmx,
         risk='write',
+        preview=update_preview,
     ),
     Tool(
-        name="import_jmx",
-        description="Import an externally created JMX file into the project's test plans directory. The file is validated before import.",
+        name="set_json_extractor",
+        description="Set where a variable comes from: take it from one request's JSON response at a JSON path. "
+                    "Replaces the extractor (JSON, regex or boundary) that set it before, or adds one. "
+                    "Use it when a trial run shows a later request failing because a variable was not extracted.",
         parameters={
             "type": "object",
             "properties": {
-                "source_path": {"type": "string", "description": "Absolute path to the .jmx file on disk"},
+                "jmx_path": {"type": "string", "description": "Path to the .jmx file"},
+                "sampler": {"type": "string", "description": "Exact name of the request whose response holds the value"},
+                "variable": {"type": "string", "description": "Variable name later requests use as ${name}"},
+                "json_path": {"type": "string", "description": "Plain JSON path in that response, e.g. $.data.token"},
+            },
+            "required": ["jmx_path", "sampler", "variable", "json_path"],
+        },
+        handler=set_json_extractor,
+        risk='write',
+        preview=extractor_preview,
+    ),
+    Tool(
+        name="import_jmx",
+        description="Register a .jmx file as a test plan of a project: it is checked, then copied under the project's "
+                    "plans folder. The source must already be inside the app's test plans folder (for example "
+                    "where the user saved or uploaded it); files elsewhere on the machine are refused.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "source_path": {"type": "string", "description": "Absolute path of the .jmx file, inside the test plans folder"},
                 "project_id": {"type": "string", "description": "Target project ID (default: 'default')"},
                 "target_name": {"type": "string", "description": "Name for the imported test plan"},
             },

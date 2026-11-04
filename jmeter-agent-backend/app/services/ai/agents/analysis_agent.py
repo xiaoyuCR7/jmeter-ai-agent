@@ -380,6 +380,9 @@ class AnalysisAgent(BaseAgent):
         """Build the base task prompt with the fact sheet and deterministic evidence."""
         # The evidence block carries the transactions, with small samples' percentiles removed.
         hidden = {"raw_summary", "per_label"} if evidence is not None and evidence.run else {"raw_summary"}
+        # Bookkeeping the model has no use for. computed_at changes with every question and sat
+        # early in the prompt, so no follow-up could reuse the cached evidence; jtl_path is a local path.
+        hidden |= {"computed_at", "jtl_path", "jtl_sha256", "schema_version"}
         fact_json = fact.model_dump_json(exclude=hidden)
 
         parts = [

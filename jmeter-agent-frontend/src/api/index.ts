@@ -79,7 +79,8 @@ export type RequirementOperator = 'lte' | 'lt' | 'gte' | 'gt'
 
 export interface RequirementItem {
   id: string
-  scope: 'global' | 'transaction'
+  // each: every request must meet the limit on its own ("所有接口 P95 < 500ms")
+  scope: 'global' | 'each' | 'transaction'
   transaction: string | null
   metric: RequirementMetric
   operator: RequirementOperator

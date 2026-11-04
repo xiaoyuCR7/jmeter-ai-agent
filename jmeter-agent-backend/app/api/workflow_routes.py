@@ -55,6 +55,7 @@ async def ai_workflow_stream(request: AIWorkflowRequest):
                             else f"已创建项目，共 {count} 个测试计划"),
                 'project_id': result['project_id'], 'test_plan_ids': result['test_plan_ids'],
                 'missing_endpoints': result['missing_endpoints'],
+                'unmatched_requirements': result.get('unmatched_requirements') or [],
                 'diagnostic_summary': result['diagnostic_summary'],
                 'requirements_draft': result['requirements_draft'],
             }

@@ -1,10 +1,10 @@
-from typing import AsyncIterator, List, Optional
+from typing import List, Optional
 import json
 from urllib.parse import urlparse
 
 from anthropic import AsyncAnthropic
 
-from app.services.ai.adapters.base import managed_request, managed_stream, BaseAIAdapter, ToolCallResponse, ToolCallRequest
+from app.services.ai.adapters.base import managed_request, BaseAIAdapter, ToolCallResponse, ToolCallRequest
 from app.models.schemas import AIChatMessage
 from app.services.ai import usage
 
@@ -91,12 +91,6 @@ class AnthropicAdapter(BaseAIAdapter):
             if isinstance(answer, dict):
                 return json.dumps(answer, ensure_ascii=False)
         return "".join(block.text for block in response.content if block.type == "text")
-
-    @managed_stream
-    async def chat_stream(self, messages: List[AIChatMessage], **kwargs) -> AsyncIterator[str]:
-        async with self.client.messages.stream(**self._request(messages, **kwargs)) as stream:
-            async for text in stream.text_stream:
-                yield text
 
     async def generate(self, prompt: str, **kwargs) -> str:
         return await self.chat([AIChatMessage(role="user", content=prompt)], **kwargs)

@@ -32,6 +32,9 @@ class ExecutionEvidence(BaseModel):
     planned_load: list[dict[str, Any]] = []
     configured_load: Optional[dict[str, Any]] = None
     load_generator: Optional[dict[str, Any]] = None
+    # Requests of the plan that produced no sample: a report must not call the others "the only ones tested".
+    unrun_requests: list[str] = []
+    throughput_cap: Optional[float] = None  # requests/s the plan's throughput timers allow
 
 
 CONFIGURED_LOAD_FIELDS = ('test_type', 'concurrent_users', 'ramp_up_seconds', 'duration_seconds', 'target_rps',
@@ -44,6 +47,21 @@ def _read(jmx_path: Optional[str]) -> str:
             return stream.read()
     except OSError:
         return ''
+
+
+def _unrun_requests(content: str, summary: DetailedTestSummary) -> list[str]:
+    """Enabled samplers of the plan with no result in this run."""
+    import xml.etree.ElementTree as ET
+    if not content:
+        return []
+    try:
+        root = ET.fromstring(content.encode('utf-8'))
+    except ET.ParseError:
+        return []
+    ran = set(summary.per_label or {})
+    labels = [element.get('testname') or '' for element in root.iter()
+              if element.tag.endswith(('Sampler', 'SamplerProxy')) and element.get('enabled') != 'false']
+    return [label for label in dict.fromkeys(labels) if label and label not in ran][:40]
 
 
 def _plan_issues(jmx_path: Optional[str]) -> list[dict]:
@@ -77,12 +95,15 @@ async def build_evidence(execution, summary: DetailedTestSummary) -> ExecutionEv
         logger.warning('Run diagnostics unavailable for %s: %s', get('id'), error)
         run = None
     config = (get('context_snapshot') or {}).get('test_config') or {}
+    content = _read(get('jmx_path'))
     return ExecutionEvidence(
+        unrun_requests=_unrun_requests(content, summary) if summary.total_requests else [],
+        throughput_cap=requirement_service.throughput_cap(get('jmx_path')),
         execution_id=get('id'), project_id=project_id, test_plan_id=get('test_plan_id'), run=run,
-        plan_issues=_plan_issues(get('jmx_path')), planned_load=jmx_lint.planned_load(_read(get('jmx_path'))),
+        plan_issues=_plan_issues(get('jmx_path')), planned_load=jmx_lint.planned_load(content),
         configured_load={key: config.get(key) for key in CONFIGURED_LOAD_FIELDS} if config else None,
         load_generator=_load_generator(get('resource_snapshot_pre'), get('resource_snapshot_post')),
-        requirements=requirement_service.evaluate(stored, summary, requirement_service.sampler_routes(get('jmx_path'))),
+        requirements=requirement_service.evaluate_run(stored, summary, get('jmx_path')),
         baseline=history, server_metrics=server)
 
 
@@ -105,6 +126,8 @@ def format_for_prompt(evidence: ExecutionEvidence) -> str:
     return '\n\n'.join(filter(None, [
         f'## 配置负载\n{json.dumps(load, ensure_ascii=False)}' if load else '',
         _format_planned_load(evidence.planned_load),
+        _format_pacing(evidence.throughput_cap),
+        _format_unrun(evidence.unrun_requests),
         _format_plan_issues(evidence.plan_issues),
         _format_load_generator(evidence.load_generator),
         requirement_service.format_for_prompt(evidence.requirements),
@@ -122,6 +145,21 @@ def _format_planned_load(groups: list[dict]) -> str:
             + '\ndelay_seconds 是开始时间，duration_seconds 是持续时间，各线程组叠加后就是预期的线程曲线。')
 
 
+def _format_pacing(cap: Optional[float]) -> str:
+    if not cap:
+        return ''
+    return (f'## 计划的吞吐上限\n计划里的吞吐定时器把总吞吐限制在约 {cap:g} 请求/秒。实测吞吐接近这个值时，'
+            '是计划在限速，不能当作服务端的处理上限，也不要据此提出"服务端到顶"的假设。')
+
+
+def _format_unrun(labels: list[str]) -> str:
+    if not labels:
+        return ''
+    return ('## 计划里有、这次却没有任何结果的请求\n' + '、'.join(labels)
+            + '\n它们没有被执行（常见原因：前面的请求失败后线程按计划停止，或控制器跳过了它们）。'
+            '不要说其余请求是"唯一被测的接口"，也不要对这些请求的性能下结论。')
+
+
 def _format_plan_issues(issues: list[dict]) -> str:
     if not issues:
         return ''
@@ -134,6 +172,8 @@ def comparison_values(evidence: Optional[ExecutionEvidence]) -> list[float]:
     if evidence is None:
         return []
     values = [item.expected for item in evidence.requirements.items]
+    if evidence.throughput_cap:
+        values.append(evidence.throughput_cap)  # The plan's own limit may be quoted.
     for comparison in ((evidence.baseline or {}).get('baseline'), (evidence.baseline or {}).get('previous')):
         for row in [*((comparison or {}).get('deltas') or []), *((comparison or {}).get('transactions') or [])]:
             values += [row.get('baseline'), row.get('target')]

@@ -105,7 +105,59 @@ def _plan_schema() -> dict:
     return plan
 
 
-def save_plans_tool(draft: _Draft) -> Tool:
+TPS_HEADROOM = 1.2  # A rate limit this far above the required TPS lets the requirement pass or fail on its own.
+
+
+def paced(plan: dict, load: Optional[dict]) -> tuple[dict, list[str], Optional[str]]:
+    """The plan with a pace that can reach the required TPS: (plan, notes, refusal).
+
+    A plan capped at exactly 50 rps, with a second of think time per request, was judged against
+    "吞吐量不低于 50 TPS": it could never pass, and the report blamed the server.
+    """
+    target = (load or {}).get('target_tps')
+    if not target or not isinstance(plan, dict):
+        return plan, [], None
+    plan, notes = dict(plan), []
+    if plan.get('think_time_ms') is None:
+        plan['think_time_ms'] = 0  # Not the type's default user pace: the user asked for a rate.
+    users, think = plan.get('concurrent_users') or 0, plan['think_time_ms'] or 0
+    if think and users and users * 1000 / think < target:
+        return plan, notes, (f'{users} users with {think} ms think time send at most {users * 1000 / think:.0f} '
+                             f'requests/s, below the required {target:g} TPS: lower think_time_ms (0 unless the '
+                             'user asked for a pace) or raise concurrent_users')
+    floor = int(target * TPS_HEADROOM + 0.999)
+    if plan.get('target_rps') and plan['target_rps'] < floor:
+        notes.append(f"target_rps {plan['target_rps']} raised to {floor}: a limit at the required "
+                     f'{target:g} TPS could never be exceeded')
+        plan['target_rps'] = floor
+    return plan, notes, None
+
+
+def unmatched_requirements(requirements, plans: list[dict]) -> list[str]:
+    """Requirement items naming a request no saved plan has; a run could never judge them."""
+    from app.services.requirements import _route_keys
+    if requirements is None:
+        return []
+    requested = [(str(ep.get('method', 'GET')).upper(), str(ep.get('path', '')).split('?', 1)[0], str(ep.get('name', '')))
+                 for plan in plans for ep in plan.get('endpoints') or [] if isinstance(ep, dict)]
+    labels = [label for plan in plans for label in plan.get('requests') or []]
+    missing = []
+    for item in requirements.items:
+        if item.scope != 'transaction' or not item.transaction:
+            continue
+        name = item.transaction
+        keys = _route_keys(name)
+        found = name in labels or any(name.lower() in label.lower() for label in labels)
+        for key in keys:
+            method, _, path = key.partition(' ') if ' ' in key else ('', '', key)
+            pattern = _path_pattern(path)
+            found = found or any((not method or method == m) and pattern.match(p) for m, p, _ in requested)
+        if not found:
+            missing.append(f'{item.id}「{name}」')
+    return missing
+
+
+def save_plans_tool(draft: _Draft, load: Optional[dict] = None) -> Tool:
     from app.services.ai.agent.tools.jmx import create_jmx
     from app.services.ai.agent.tools.project import create_project
 
@@ -120,11 +172,17 @@ def save_plans_tool(draft: _Draft) -> Tool:
         gate = asyncio.Semaphore(PARALLEL_PLAN_CHECKS)
 
         async def save(plan: dict) -> dict:
+            plan, notes, refusal = paced(plan, load)
+            if refusal:
+                return {'error': refusal}
             async with gate:
                 try:
-                    return await create_jmx(**plan, base_url=draft.base_url, project_id=draft.project_id)
+                    receipt = await create_jmx(**plan, base_url=draft.base_url, project_id=draft.project_id)
                 except Exception as error:  # One plan's failure must not leave the others unrecorded.
                     return {'error': f'The plan was not created: {error}'}
+            if notes and not receipt.get('error'):
+                receipt['warnings'] = [*(receipt.get('warnings') or []), *notes]
+            return receipt
 
         # Each plan starts JMeter once to be checked (about 8 s), so they are checked side by side.
         receipts = await asyncio.gather(*(save(plan) for plan in plans))
@@ -251,7 +309,7 @@ give; fill it in from its parameters. "auth" is the documented authentication.
 
         draft = _Draft()
         tools = ToolRegistry(source='start-from-document')
-        tools.register(save_plans_tool(draft))
+        tools.register(save_plans_tool(draft, load))
         messages = [AIChatMessage(role='system', content=self.system_prompt),
                     AIChatMessage(role='user', pinned=True, content=self.build_task(document, goal, load or None, parsed))]
 
@@ -282,12 +340,13 @@ give; fill it in from its parameters. "auth" is the documented authentication.
         progress({'step': 'checking_coverage', 'progress': 90,
                   'message': t('正在核对接口覆盖...', 'Checking that every endpoint is covered...')})
         missing = missing_endpoints(parsed, draft.plans)
+        unjudged = unmatched_requirements(requirements, draft.plans)
         refused = [] if outcome.success else [outcome.error or '']
         return {'success': True, 'project_id': draft.project_id,
                 'test_plan_ids': [plan['test_plan_id'] for plan in draft.plans],
-                'missing_endpoints': missing,
+                'missing_endpoints': missing, 'unmatched_requirements': unjudged,
                 'requirements_draft': requirements.model_dump() if requirements else None,
-                'diagnostic_summary': self._summary(draft, missing, refused)}
+                'diagnostic_summary': self._summary(draft, missing, refused, unjudged)}
 
     async def _draft_requirements(self, document: str, goal: str, parsed: Optional[dict]):
         """The requirements the user stated, for review; a failure only loses the draft."""
@@ -297,7 +356,10 @@ give; fill it in from its parameters. "auth" is the documented authentication.
         if not source.strip():
             return None
         try:
-            return await requirement_service.extract_requirements(source.strip(), self.adapter, 'start-from-document')
+            endpoints = [{'route': f"{item['method']} {item.get('documented_path') or item['path']}", 'name': item.get('name')}
+                         for item in (parsed or {}).get('endpoints') or []]
+            return await requirement_service.extract_requirements(source.strip(), self.adapter, 'start-from-document',
+                                                                  endpoints or None)
         except Exception as error:
             logger.warning('Requirement draft failed: %s', error)
             return None
@@ -316,7 +378,7 @@ give; fill it in from its parameters. "auth" is the documented authentication.
         except Exception as error:
             logger.warning('Empty project %s was not removed: %s', draft.project_id, error)
 
-    def _summary(self, draft: _Draft, missing: list[str], refused: list[str]) -> str:
+    def _summary(self, draft: _Draft, missing: list[str], refused: list[str], unjudged: Optional[list[str]] = None) -> str:
         t = _texts(self.en)
         lines = [t(f'已创建项目「{draft.project_name}」（{draft.project_id}），{len(draft.plans)} 个测试计划：',
                    f'Created project "{draft.project_name}" ({draft.project_id}) with {len(draft.plans)} test plans:')]
@@ -335,6 +397,11 @@ give; fill it in from its parameters. "auth" is the documented authentication.
             sections.append('\n'.join([t('文档里这些接口没有进入任何计划，如需测试请在计划里补上：',
                                          'These documented endpoints are in no plan; add them if they should be tested:'),
                                        *[f'- {item}' for item in missing]]))
+        if unjudged:
+            sections.append(t(f'这些需求指定的接口在计划里找不到，运行后会判为"无数据"，保存前请改成计划里的请求（如 POST /api/orders）：'
+                              f'{"、".join(unjudged)}',
+                              f'These requirements name a request no plan has and would never be judged; change them to '
+                              f'a request of the plan (such as POST /api/orders) before saving: {", ".join(unjudged)}'))
         if refused:
             sections.append(t(f'有计划最终没有通过校验：{refused[0]}', f'Some plans never passed their checks: {refused[0]}'))
         sections.append(t('下一步：核对性能需求，试跑一次确认接口能通、变量提取正确，再正式运行。',

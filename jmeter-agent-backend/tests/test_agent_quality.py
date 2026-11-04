@@ -164,8 +164,6 @@ class FakeAdapter(BaseAIAdapter):
         self.chat_count += 1
         return self.chat_replies.pop(0) if self.chat_replies else 'summary'
 
-    async def chat_stream(self, messages, **kwargs):
-        yield 'x'
 
     async def generate(self, prompt, **kwargs):
         return 'x'

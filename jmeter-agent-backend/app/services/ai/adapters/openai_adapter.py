@@ -3,7 +3,7 @@ from typing import AsyncIterator, List, Optional
 
 from openai import AsyncAzureOpenAI, AsyncOpenAI, BadRequestError
 
-from app.services.ai.adapters.base import managed_request, managed_stream, BaseAIAdapter, ToolCallResponse, ToolCallRequest
+from app.services.ai.adapters.base import managed_request, BaseAIAdapter, ToolCallResponse, ToolCallRequest
 from app.models.schemas import AIChatMessage
 from app.services.ai import usage
 
@@ -77,22 +77,6 @@ class OpenAIAdapter(BaseAIAdapter):
         response = await self._create(client, request)
         usage.record_openai(response)
         return response.choices[0].message.content or ""
-
-    @managed_stream
-    async def chat_stream(self, messages: List[AIChatMessage], **kwargs) -> AsyncIterator[str]:
-        response = await self._create(self.client, dict(
-            model=self.model,
-            messages=[m.to_wire() for m in messages],
-            temperature=kwargs.get("temperature", 0.2),
-            max_tokens=kwargs.get("max_tokens", 8000),
-            stream=True,
-        ))
-        try:
-            async for chunk in response:
-                if chunk.choices and chunk.choices[0].delta.content:
-                    yield chunk.choices[0].delta.content
-        finally:
-            await response.close()
 
     async def generate(self, prompt: str, **kwargs) -> str:
         return await self.chat([AIChatMessage(role="user", content=prompt)], **kwargs)

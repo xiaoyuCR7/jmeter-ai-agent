@@ -86,8 +86,8 @@ def saved(monkeypatch):
         if draft.project_id and not draft.plans:
             record['discarded'].append(draft.project_id)
 
-    async def extract(source, adapter, name):
-        record['requirement_source'] = source
+    async def extract(source, adapter, name, endpoints=None):
+        record['requirement_source'], record['requirement_endpoints'] = source, endpoints
         return requirement_service.PerformanceRequirements(
             load_profile=requirement_service.LoadProfile(concurrency=5, duration_seconds=60, source='5 并发 1 分钟'))
 
@@ -152,6 +152,8 @@ async def test_documented_endpoints_left_out_of_every_plan_are_reported(saved):
     assert result['missing_endpoints'] == ['DELETE /items/{id}']
     assert 'DELETE /items/{id}' in result['diagnostic_summary']
     assert saved['requirement_source'] == 'baseline'  # A spec states endpoints, not targets.
+    # ...and its endpoints are what a requirement must name, so a verdict can find the request.
+    assert {item['route'] for item in saved['requirement_endpoints']} >= {'GET /items', 'DELETE /items/{id}'}
 
 
 def test_coverage_matches_bound_path_variables_and_query_strings():

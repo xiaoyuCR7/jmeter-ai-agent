@@ -148,7 +148,8 @@ resource_tools = [
             "required": ["url"],
         },
         handler=import_openapi_spec,
-        risk='draft',
+        # It makes this machine fetch any URL the caller names, local services included: the user sees it first.
+        risk='write',
     ),
     Tool(
         name="detect_anomalies",
