@@ -1,7 +1,8 @@
 """Tool definition and registry — function-calling bridge to LLM tools API."""
 
-import time
 import copy
+import inspect
+import time
 import json
 from jsonschema import Draft202012Validator
 from typing import Any, Literal, Optional, Callable, Awaitable
@@ -141,6 +142,13 @@ class ToolRegistry:
                 return ToolResult(success=False, tool_name=name, error=error,
                                   error_category=ErrorCategory.INPUT_ERROR)
             args = json.loads(json.dumps(args, allow_nan=False))
+            # Checked before asking for approval. A TypeError the handler raises later is its own bug.
+            try:
+                inspect.signature(tool.handler).bind(**args)
+            except TypeError as e:
+                return ToolResult(success=False, tool_name=name, error=f"Tool '{name}' argument error: {e}",
+                                  duration_ms=(time.time() - start) * 1000,
+                                  error_category=ErrorCategory.INPUT_ERROR)
             from app.services.confirmations import confirmation_source, confirmations
             confirmation_source.set(self.source)  # also covers approvals a handler asks for itself
             if tool.require_confirmation:
@@ -151,11 +159,12 @@ class ToolRegistry:
             result = await tool.handler(**args)
             duration = (time.time() - start) * 1000
 
-            # Explicit business failures must not become successful observations.
+            # Explicit business failures must not become successful observations. A run's status is the
+            # outcome of a tool that ran it; a read tool reporting a failed or cancelled run read it fine.
             if isinstance(result, dict) and (
                 result.get("error") or result.get("success") is False
                 or result.get("valid") is False
-                or result.get("status") in ("failed", "cancelled")
+                or (tool.risk != 'read' and result.get("status") in ("failed", "cancelled"))
             ):
                 error_msg = str(result.get("error") or result.get("error_message")
                                 or f"Tool '{name}' reported an unsuccessful result")
@@ -165,7 +174,8 @@ class ToolRegistry:
                     error=error_msg,
                     tool_name=name,
                     duration_ms=duration,
-                    error_category=(ErrorCategory.CANCELLED if result.get("status") == "cancelled"
+                    error_category=(ErrorCategory.CANCELLED
+                                    if tool.risk != 'read' and result.get("status") == "cancelled"
                                     else reported_category(result, error_msg)),
                 )
 
@@ -174,15 +184,6 @@ class ToolRegistry:
                 data=result,
                 tool_name=name,
                 duration_ms=duration,
-            )
-        except TypeError as e:
-            duration = (time.time() - start) * 1000
-            return ToolResult(
-                success=False,
-                error=f"Tool '{name}' argument error: {str(e)}",
-                tool_name=name,
-                duration_ms=duration,
-                error_category=ErrorCategory.INPUT_ERROR,
             )
         except Exception as e:
             duration = (time.time() - start) * 1000

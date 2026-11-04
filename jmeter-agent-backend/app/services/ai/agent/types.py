@@ -122,22 +122,24 @@ ToolHandler = Callable[..., Awaitable[Any]]
 # ── Shared error classification ───────────────────────────────
 import re as _re  # used by classify_error below
 
+# Status codes and words stand alone: execution id 9b4031aa is not a 403, a path under jmeter-agent/
+# that is not found is not a missing JMeter, and an invalid timeout value is not a timeout.
 _RETRYABLE_PATTERNS = [
-    r'timeout', r'timed\s*out', r'connection.*refused', r'connect.*refused',
-    r'rate.*limit', r'too\s+many\s+requests', r'429', r'503', r'502', r'504',
+    r'timed\s*out', r'\btimeout\b(?!\s+(value|must|should|is\s+invalid))', r'connection.*refused',
+    r'connect.*refused', r'rate.*limit', r'too\s+many\s+requests', r'\b(429|502|503|504)\b',
     r'temporarily\s+unavailable', r'retry', r'busy', r'overloaded',
 ]
 _INPUT_ERROR_PATTERNS = [
     r'not\s+found', r'does\s+not\s+exist', r'no\s+such\s+file', r'file\s+not\s+found',
-    r'invalid', r'bad\s+request', r'malformed', r'400', r'validation\s+error',
+    r'invalid', r'bad\s+request', r'malformed', r'\b400\b', r'validation\s+error',
     r'missing', r'required', r'cannot\s+be\s+empty', r'not\s+configured',
     r'unknown\s+tool', r'Tool\s+.*\s+not\s+found',
 ]
 _SYSTEM_ERROR_PATTERNS = [
-    r'permission\s+denied', r'access\s+denied', r'forbidden', r'403',
+    r'permission\s+denied', r'access\s+denied', r'forbidden', r'\b403\b',
     r'disk\s+full', r'out\s+of\s+memory', r'cannot\s+allocate',
     r'not\s+installed', r'executable\s+not\s+found', r'command\s+not\s+found',
-    r'jmeter.*not\s+found', r'no\s+space', r'read.only',
+    r'jmeter\s+(executable\s+|binary\s+)?(is\s+)?not\s+found', r'no\s+space', r'read.only',
 ]
 
 

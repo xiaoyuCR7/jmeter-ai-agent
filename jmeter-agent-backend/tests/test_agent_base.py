@@ -309,7 +309,7 @@ async def test_mixed_tool_batch_preserves_success_and_closes_cancelled_calls(cat
                     'status': 'cancelled' if category == ErrorCategory.CANCELLED else 'failed',
                     'error': 'temporarily unavailable' if category == ErrorCategory.RETRYABLE else 'invalid input'}
         return {'project_id': 'created-project', 'jmx_path': '/plans/created.jmx'}
-    registry.register(Tool('artifact', 'artifact', {'type': 'object', 'properties': {'mode': {'type': 'string'}}}, handler))
+    registry.register(Tool('artifact', 'artifact', {'type': 'object', 'properties': {'mode': {'type': 'string'}}}, handler, risk='draft'))
     requested = [ToolCallRequest('one', 'artifact', {'mode': 'create'}),
                  ToolCallRequest('two', 'artifact', {'mode': 'fail'})]
     if category == ErrorCategory.CANCELLED:
@@ -651,7 +651,7 @@ class TestAuditRegressions:
             return {'status': 'cancelled'}
 
         registry = ToolRegistry()
-        registry.register(Tool('echo_tool', 'echo', {'type': 'object', 'properties': {'msg': {'type': 'string'}}}, handler))
+        registry.register(Tool('echo_tool', 'echo', {'type': 'object', 'properties': {'msg': {'type': 'string'}}}, handler, risk='draft'))
         adapter = FakeAdapter(tool_responses=[ToolCallResponse(tool_calls=[
             ToolCallRequest('1', 'echo_tool', {'msg': 'first'}),
             ToolCallRequest('2', 'echo_tool', {'msg': 'must not run'})])])
@@ -674,7 +674,7 @@ class TestToolResultContract:
     ])
     async def test_explicit_business_failure_is_not_success(self, payload):
         registry = ToolRegistry()
-        registry.register(Tool('result', 'result', {'type': 'object'}, AsyncMock(return_value=payload)))
+        registry.register(Tool('result', 'result', {'type': 'object'}, AsyncMock(return_value=payload), risk='draft'))
         result = await registry.execute('result', {})
         assert not result.success
         assert result.error
