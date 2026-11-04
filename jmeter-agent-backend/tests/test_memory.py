@@ -14,7 +14,6 @@ from app.services.ai.memory import experience, prediction
 from app.services.ai.memory.fact_ledger import FactLedger
 from app.services.ai.memory.hypothesis_ledger import HypothesisLedger
 from app.services.ai.memory.provenance import snapshot_scope
-from app.services.ai.rag.store import LanceRAGStore
 
 LESSON = '订单查询在库存同步时会锁表，P95 会升到 2 秒以上，避开整点再压测。'
 JMX = ('<jmeterTestPlan><hashTree><ThreadGroup testname="users" enabled="true">'
@@ -45,11 +44,11 @@ async def memory(tmp_path, monkeypatch):
     from app.api import memory_routes
     facts = FactLedger(str(tmp_path / 'facts.db'))
     hypotheses = HypothesisLedger(str(tmp_path / 'hypotheses.db'))
-    knowledge = LanceRAGStore(db_path=str(tmp_path / 'rag'))
+    knowledge = experience.LessonStore(str(tmp_path / 'lessons.db'))
     for module in (analysis_context, memory_routes):
         monkeypatch.setattr(module, 'fact_ledger', facts)
         monkeypatch.setattr(module, 'hypothesis_ledger', hypotheses)
-    monkeypatch.setattr(experience, 'rag_store', knowledge)
+    monkeypatch.setattr(experience, 'lesson_store', knowledge)
     try:
         yield SimpleNamespace(facts=facts, hypotheses=hypotheses, knowledge=knowledge, tmp_path=tmp_path)
     finally:
@@ -316,7 +315,7 @@ def test_other_plans_are_spread_across_requests():
 
 @pytest.mark.asyncio
 async def test_deleting_a_project_removes_its_reports_and_memory(memory, monkeypatch, tmp_path):
-    from app.api import routes
+    from app.api import project_routes
     from app.services.ai import memory as ledgers
     monkeypatch.setattr(ledgers, 'fact_ledger', memory.facts)
     monkeypatch.setattr(ledgers, 'hypothesis_ledger', memory.hypotheses)
@@ -324,7 +323,7 @@ async def test_deleting_a_project_removes_its_reports_and_memory(memory, monkeyp
     (reports / 'run-1').mkdir(parents=True)
     outside = tmp_path / 'elsewhere'
     outside.mkdir()
-    monkeypatch.setattr(type(routes.settings), 'REPORTS_DIR', property(lambda self: str(reports)))
+    monkeypatch.setattr(type(project_routes.settings), 'REPORTS_DIR', property(lambda self: str(reports)))
     assert await memory.facts.save(fact('run-1', 'plan-a', 5, 300))
     # Recorded before facts carried their project: found by the run instead.
     assert await memory.facts.save(FactSheet(execution_id='legacy', module='plan-a', total_requests=1))
@@ -335,10 +334,36 @@ async def test_deleting_a_project_removes_its_reports_and_memory(memory, monkeyp
     experience.save('p', 'known_issue', '订单锁表', LESSON, [])
     kept = experience.save('other', 'known_issue', '别的项目', LESSON, [])
 
-    await routes._forget_project('p', [SimpleNamespace(id='run-1', report_dir=str(reports / 'run-1')),
+    await project_routes._forget_project('p', [SimpleNamespace(id='run-1', report_dir=str(reports / 'run-1')),
                                        SimpleNamespace(id='legacy', report_dir=str(outside)),
                                        SimpleNamespace(id='none', report_dir=None)])
     assert not (reports / 'run-1').exists() and outside.exists() and reports.exists()
     assert [await memory.facts.load(run_id) is None for run_id in ('run-1', 'legacy', 'keep')] == [True, True, False]
     assert await memory.hypotheses.get('h') is None and await memory.hypotheses.get('k') is not None
     assert experience.for_project('p', include_retired=True) == [] and experience.for_project('other')[0].id == kept.id
+
+
+@pytest.mark.asyncio
+async def test_memory_from_older_versions_moves_into_the_app_database_once(tmp_path, monkeypatch):
+    from app.core.config import settings
+    monkeypatch.setattr(settings, 'BASE_DIR', str(tmp_path))
+    old = FactLedger(str(tmp_path / 'facts.db'))
+    assert await old.save(fact('earlier', 'plan-a', 5, 300))
+    await old.close()
+    ledger = FactLedger(str(tmp_path / 'app.db'))
+    ledger._adopted = False  # As the shared ledger, which opens the app's database by default.
+    try:
+        assert (await ledger.load('earlier')).percentiles['p95'] == 300
+        assert not (tmp_path / 'facts.db').exists() and (tmp_path / 'facts.db.migrated').exists()
+    finally:
+        await ledger.close()
+
+
+def test_memory_shares_the_app_database_file(monkeypatch):
+    import os
+    from app.core.config import settings
+    from app.services.ai.memory.storage import memory_db_path
+    monkeypatch.setattr(settings, 'DATABASE_URL', 'sqlite+aiosqlite:///./data/app.db')
+    assert memory_db_path() == os.path.abspath('./data/app.db')
+    monkeypatch.setattr(settings, 'DATABASE_URL', 'postgresql+asyncpg://db/app')
+    assert memory_db_path() == os.path.join(settings.BASE_DIR, 'memory.db')

@@ -94,9 +94,6 @@ class Settings(BaseSettings):
     AGENT_CONTEXT_TOKEN_BUDGET: int = 16384      # fallback for models whose context window is unknown
     AGENT_MAX_TOOL_CALLS_PER_RESPONSE: int = 8
 
-    # RAG Store — LanceDB
-    RAG_LANCEDB_PATH: str = ""                   # empty = auto-generate under BASE_DIR
-
     # i18n
     I18N_DEFAULT_LANG: str = "zh-CN"             # default language
     I18N_ENABLED_LANGS: str = "zh-CN,en"         # comma-separated enabled languages

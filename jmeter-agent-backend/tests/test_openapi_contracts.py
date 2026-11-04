@@ -396,21 +396,21 @@ async def test_external_or_cyclic_refs_are_actionable_failure(imported):
 
 @pytest.mark.asyncio
 async def test_inline_api_forwards_execute_flag(monkeypatch):
-    from app.api import routes
+    from app.api import workflow_routes
     from app.services.openapi_importer import ImportResult
     fake = AsyncMock(return_value=ImportResult(success=False, error='fixture'))
     monkeypatch.setattr(OpenAPIImporter, 'import_from_dict', fake)
-    await routes.openapi_import({'spec': spec(), 'execute': True})
+    await workflow_routes.openapi_import({'spec': spec(), 'execute': True})
     assert fake.call_args.kwargs['execute_tests'] is True
 
 
 @pytest.mark.asyncio
 async def test_inline_api_project_rename_keeps_cache_version_in_sync(imported):
-    from app.api import routes
+    from app.api import workflow_routes
     from app.services.db_store import db_store
     from app.services.execution_lifecycle import persist_project
 
-    result = await routes.openapi_import({
+    result = await workflow_routes.openapi_import({
         'spec': spec(), 'execute': False, 'project_name': 'Renamed fixture',
     })
     project_id = result['project_id']
@@ -427,11 +427,11 @@ async def test_inline_api_project_rename_keeps_cache_version_in_sync(imported):
 @pytest.mark.parametrize('value', ['false', 'true', 0, 1, None])
 async def test_openapi_execute_requires_a_json_boolean(monkeypatch, value):
     from fastapi import HTTPException
-    from app.api import routes
+    from app.api import workflow_routes
     fake = AsyncMock()
     monkeypatch.setattr(OpenAPIImporter, 'import_from_dict', fake)
     with pytest.raises(HTTPException) as error:
-        await routes.openapi_import({'spec': spec(), 'execute': value})
+        await workflow_routes.openapi_import({'spec': spec(), 'execute': value})
     assert error.value.status_code == 422
     fake.assert_not_awaited()
 

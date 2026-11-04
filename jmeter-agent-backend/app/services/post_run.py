@@ -230,6 +230,13 @@ async def analysis_for(execution: TestExecutionInfo, ai_model=None) -> ReportAna
 
 
 async def _analyse(execution: TestExecutionInfo, ai_model) -> ReportAnalysis:
+    # Runs that finish together queue here instead of all calling the model at once.
+    from app.services.ai.agent.base import agent_slot
+    async with agent_slot(wait_seconds=None):
+        return await _analyse_now(execution, ai_model)
+
+
+async def _analyse_now(execution: TestExecutionInfo, ai_model) -> ReportAnalysis:
     test_config = (execution.context_snapshot or {}).get('test_config') or {}
     try:
         analyzer = TestAnalyzer(model_type=ai_model)  # None: the factory picks the default model

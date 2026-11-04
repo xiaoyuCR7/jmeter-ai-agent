@@ -1,13 +1,14 @@
 """BaseAgent — one task, one tool-calling conversation, rerun while its failure is transient.
 
 A request makes its own agent. ``run`` returns the result; ``stream`` yields the run's events as they
-happen and ends with a "done" event. At most AGENT_MAX_CONCURRENT runs talk to models at once.
+happen and ends with a "done" event. At most AGENT_MAX_CONCURRENT model tasks run at once, whether
+agents, the document workflow or report analyses: each holds an ``agent_slot`` while it works.
 """
 
 import asyncio
 import logging
 import time
-from contextlib import aclosing
+from contextlib import aclosing, asynccontextmanager
 from typing import AsyncIterator, Awaitable, Callable, Optional
 
 from app.core.config import settings
@@ -29,6 +30,36 @@ COMMON_RULES = """## Rules
 MAX_RETRIES = 2
 SLOT_WAIT_SECONDS = 120
 
+_semaphore: Optional[asyncio.Semaphore] = None
+
+
+class NoFreeSlot(RuntimeError):
+    pass
+
+
+def slots_busy() -> bool:
+    return _semaphore is not None and _semaphore.locked()
+
+
+@asynccontextmanager
+async def agent_slot(wait_seconds: Optional[float] = SLOT_WAIT_SECONDS):
+    """Hold one of the AGENT_MAX_CONCURRENT slots; ``wait_seconds=None`` waits as long as it takes."""
+    global _semaphore
+    if _semaphore is None:
+        _semaphore = asyncio.Semaphore(settings.AGENT_MAX_CONCURRENT)
+    semaphore = _semaphore
+    try:
+        async with asyncio.timeout(wait_seconds):
+            await semaphore.acquire()
+    except TimeoutError:
+        raise NoFreeSlot(f'{settings.AGENT_MAX_CONCURRENT} AI tasks are already running and none '
+                         'finished within 2 minutes; try again when one is done') from None
+    try:
+        yield
+    finally:
+        semaphore.release()
+
+
 STEP_PROMPT = ("Complete the task above. Tool calls and results already in this conversation are done: "
                "reuse the IDs and paths they returned instead of repeating those calls. "
                "Reply without a tool call once the task is complete.")
@@ -37,8 +68,6 @@ STEP_PROMPT = ("Complete the task above. Tool calls and results already in this 
 class BaseAgent:
     # Whether a task must end in a tool call. Evidence already in the prompt may be enough to answer.
     requires_tools = True
-
-    _concurrency_semaphore: Optional[asyncio.Semaphore] = None
 
     def __init__(self, name: str, adapter: BaseAIAdapter, tools: Optional[ToolRegistry] = None,
                  system_prompt: str = '', max_rounds: int = 5):
@@ -58,12 +87,6 @@ class BaseAgent:
             self._listener(event)
         return event
 
-    @classmethod
-    def _slots(cls) -> asyncio.Semaphore:
-        if BaseAgent._concurrency_semaphore is None:
-            BaseAgent._concurrency_semaphore = asyncio.Semaphore(settings.AGENT_MAX_CONCURRENT)
-        return BaseAgent._concurrency_semaphore
-
     async def run(self, task: str, context: Optional[str] = None) -> AgentResult:
         result = await self.converse(task, context)
         self.emit('complete' if result.success else 'error', (result.output or result.error or '')[:200],
@@ -74,22 +97,16 @@ class BaseAgent:
     async def converse(self, task: str, context: Optional[str] = None) -> AgentResult:
         """The run without its closing event, for agents that still check the answer afterwards."""
         started = time.monotonic()
-        slots = self._slots()
-        if slots.locked():
+        if slots_busy():
             # Otherwise a queued run looks the same as a stuck one.
             self.emit('queued', f'Waiting for a free agent slot ({settings.AGENT_MAX_CONCURRENT} run at a time)',
                       {'limit': settings.AGENT_MAX_CONCURRENT})
         try:
-            async with asyncio.timeout(SLOT_WAIT_SECONDS):
-                await slots.acquire()
-        except TimeoutError:
+            async with agent_slot():
+                result = await self._attempts(task, context)
+        except NoFreeSlot as error:
             return AgentResult(False, task, events=self.events, duration_seconds=time.monotonic() - started,
-                               error=(f'{settings.AGENT_MAX_CONCURRENT} AI tasks are already running and none '
-                                      'finished within 2 minutes; try again when one is done'))
-        try:
-            result = await self._attempts(task, context)
-        finally:
-            slots.release()
+                               error=str(error))
         result.duration_seconds = time.monotonic() - started
         result.events = self.events
         return result

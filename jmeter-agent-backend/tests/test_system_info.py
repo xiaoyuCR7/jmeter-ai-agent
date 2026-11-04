@@ -5,7 +5,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.api import routes
+from app.api import system_routes
 from app.core import config
 from app.services.jmeter.executor import JMeterExecutor
 
@@ -26,10 +26,10 @@ def test_jmeter_is_found_from_its_bin_folder_or_install_root(tmp_path, monkeypat
 async def test_info_shows_the_jmeter_found_on_path_not_the_configured_folder(tmp_path, monkeypatch):
     monkeypatch.setattr(config.settings, 'JMETER_EXECUTION_MODE', 'local')
     monkeypatch.setattr(config.settings, 'JMETER_HOME', str(tmp_path / 'missing'))
-    monkeypatch.setattr(routes, 'get_executor', lambda: SimpleNamespace(jmeter_path='jmeter.bat'))
+    monkeypatch.setattr(system_routes, 'get_executor', lambda: SimpleNamespace(jmeter_path='jmeter.bat'))
     found = str(tmp_path / 'tools' / 'jmeter.bat')
-    monkeypatch.setattr(routes.shutil, 'which', lambda name: found)
-    info = await routes.system_info()
+    monkeypatch.setattr(system_routes.shutil, 'which', lambda name: found)
+    info = await system_routes.system_info()
     assert info['jmeter_executable'] == found and info['jmeter_home'] == str(tmp_path / 'tools')
     assert info['execution_mode'] == 'local' and info['jmeter_image'] is None
 
@@ -39,8 +39,8 @@ async def test_info_says_when_jmeter_is_missing(monkeypatch):
     def missing():
         raise FileNotFoundError('JMeter executable not found')
     monkeypatch.setattr(config.settings, 'JMETER_EXECUTION_MODE', 'local')
-    monkeypatch.setattr(routes, 'get_executor', missing)
-    info = await routes.system_info()
+    monkeypatch.setattr(system_routes, 'get_executor', missing)
+    info = await system_routes.system_info()
     assert info['jmeter_home'] is None and info['jmeter_executable'] is None
 
 
@@ -48,7 +48,7 @@ async def test_info_says_when_jmeter_is_missing(monkeypatch):
 async def test_container_mode_shows_the_image_not_a_local_jmeter(monkeypatch):
     monkeypatch.setattr(config.settings, 'JMETER_EXECUTION_MODE', 'container')
     monkeypatch.setattr(config.settings, 'JMETER_CONTAINER_IMAGE', 'jmeter@sha256:abc')
-    info = await routes.system_info()
+    info = await system_routes.system_info()
     assert info['execution_mode'] == 'container' and info['jmeter_image'] == 'jmeter@sha256:abc'
     assert info['jmeter_home'] is None and info['jmeter_executable'] is None
 

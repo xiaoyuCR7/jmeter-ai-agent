@@ -300,7 +300,7 @@ async def test_agent_created_plan_is_immediately_registered(env):
 
 @pytest.mark.asyncio
 async def test_http_and_agent_use_same_lifecycle(env, monkeypatch):
-    from app.api import routes
+    from app.api import execution_routes, shared
     from app.services.ai.agent.tools import jmeter
     from fastapi import BackgroundTasks
     lifecycle, module = service()
@@ -310,9 +310,9 @@ async def test_http_and_agent_use_same_lifecycle(env, monkeypatch):
     fake = SimpleNamespace(submit=AsyncMock(return_value=marker), execute=AsyncMock(return_value=marker))
     monkeypatch.setattr(module, 'execution_lifecycle', fake)
     # Module imports may hold the singleton too.
-    monkeypatch.setattr(routes, 'execution_lifecycle', fake, raising=False)
+    monkeypatch.setattr(execution_routes, 'execution_lifecycle', fake, raising=False)
     monkeypatch.setattr(jmeter, 'execution_lifecycle', fake, raising=False)
-    response = await routes.execute_test_plan(plan.id, BackgroundTasks(), ai_model=None)
+    response = await execution_routes.execute_test_plan(plan.id, BackgroundTasks(), ai_model=None)
     assert response.id == 'shared'
     fake.submit.assert_awaited_once()
     response = await jmeter.execute_test(str(env.path), skip_resource_check=True)
@@ -333,12 +333,9 @@ async def test_common_report_parse_failure_is_persisted_without_fake_process_fai
 
 
 @pytest.mark.asyncio
-async def test_cloned_and_imported_plans_register_without_overwriting(env):
-    from app.services.ai.agent.tools.jmx import clone_jmx, import_jmx
+async def test_imported_plans_register_without_overwriting(env):
+    from app.services.ai.agent.tools.jmx import import_jmx
     await service()[0].register_path(str(env.path))
-    cloned = await clone_jmx(str(env.path), 'Clone')
-    assert cloned.get('test_plan_id')
-    assert await env.db.get_test_plan(cloned['test_plan_id'])
     imported = await import_jmx(str(env.path), target_name='Imported')
     assert imported.get('test_plan_id')
     assert await env.db.get_test_plan(imported['test_plan_id'])
@@ -390,24 +387,24 @@ async def test_legacy_database_migration_is_idempotent_and_preserves_rows(env):
 
 @pytest.mark.asyncio
 async def test_cancelled_before_start_report_is_readable(env):
-    from app.api import routes
+    from app.api import execution_routes, shared
     lifecycle, _ = service()
     execution = await lifecycle.prepare(str(env.path), 'early-cancel')
     await lifecycle.cancel(execution.id)
-    report = await routes.get_report(execution.id)
+    report = await execution_routes.get_report(execution.id)
     assert report.status == 'cancelled' and report.duration_seconds == 0
 
 
 @pytest.mark.asyncio
 async def test_recovery_never_infers_success_from_jtl_presence(env):
-    from app.api import routes
+    from app.api import execution_routes, shared
     for name, flag in [('legacy-unknown', None), ('legacy-failed', 'FAILED')]:
         directory = env.root / 'reports' / name
         directory.mkdir(parents=True)
         (directory / 'result.jtl').write_text('partial')
         if flag:
             (directory / '_done.flag').write_text(flag)
-    routes.scan_reports()
+    shared.scan_reports()
     assert store.get_execution('legacy-unknown').status == Status.FAILED
     assert store.get_execution('legacy-failed').status == Status.FAILED
 

@@ -112,14 +112,6 @@ class TestBuildCommand:
         assert os.path.isdir(report_dir)
         assert os.path.isdir(html_dir)
 
-    def test_response_data_on_error_enabled(self, tmp_path):
-        # SelfHeal diagnosis depends on these JMeter properties being set
-        ex = make_executor()
-        cmd, *_ = ex._build_command("plan.jmx", str(tmp_path / "r"))
-        joined = " ".join(cmd)
-        assert "jmeter.save.saveservice.response_data_on_error=true" in joined
-
-
 # ── Flag writing ──────────────────────────────────────────────
 
 

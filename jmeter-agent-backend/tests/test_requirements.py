@@ -193,7 +193,7 @@ async def test_requirements_round_trip_and_project_scoping(api):
 @pytest.mark.asyncio
 async def test_execution_list_rows_carry_plan_name_and_requirement_verdict(api, monkeypatch):
     from datetime import datetime
-    from app.api.routes import list_executions
+    from app.api.execution_routes import list_executions
     from app.models.schemas import TestExecutionInfo, TestExecutionStatus
     body = {'items': [item(id='R1', value=500).model_dump()]}
     assert (await api.put('/api/v1/projects/shop/requirements', json=body)).status_code == 200

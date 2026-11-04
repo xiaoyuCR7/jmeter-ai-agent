@@ -11,7 +11,6 @@ Later runs of the same project check structured predictions and update status. A
 that held says only that the numbers moved as predicted; the explanation stays a hypothesis.
 """
 
-import os
 import uuid
 import json
 import asyncio
@@ -20,7 +19,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 from fastapi import HTTPException
 
-from app.core.config import settings
+from app.services.ai.memory.storage import MemoryDatabase
 from app.models.schemas import (
     Hypothesis, HypothesisStatus, HypothesisCategory, FactSheet,
 )
@@ -36,49 +35,11 @@ class HypothesisUpdateConflict(RuntimeError):
     """The hypothesis changed after the caller read it; no update was applied."""
 
 
-class HypothesisLedger:
+class HypothesisLedger(MemoryDatabase):
     """Stores and evaluates hypotheses."""
 
-    def __init__(self, db_path: Optional[str] = None):
-        if db_path is None:
-            db_path = os.path.join(settings.BASE_DIR, "hypotheses.db")
-        self.db_path = db_path
-        self._db_conn = None  # Persistent connection
-        # Lazy lock creation: creating asyncio.Lock at import time (no running loop)
-        # on Windows can cause hangs with aiosqlite. The lock is created on first use.
-        self._db_lock: Optional[asyncio.Lock] = None
-
-    def _get_lock(self) -> asyncio.Lock:
-        if self._db_lock is None:
-            self._db_lock = asyncio.Lock()
-        return self._db_lock
-
-    async def _get_db(self):
-        """Return persistent aiosqlite connection."""
-        if self._db_conn is not None:
-            return self._db_conn
-        import aiosqlite
-        db = await aiosqlite.connect(self.db_path)
-        try:
-            await db.execute("PRAGMA journal_mode=WAL")
-            await db.execute("PRAGMA foreign_keys=ON")
-        except (Exception, asyncio.CancelledError):
-            try:
-                await db.close()
-            except Exception:
-                logger.warning('Failed to close uninitialized hypothesis connection')
-            raise
-        self._db_conn = db
-        return db
-
-    async def close(self):
-        """Close the persistent database connection (safe to call multiple times)."""
-        if self._db_conn is not None:
-            try:
-                await self._db_conn.close()
-            except Exception:
-                pass
-            self._db_conn = None
+    TABLE = 'hypotheses'
+    LEGACY_FILE = 'hypotheses.db'
 
     async def _ensure_table(self):
         async with self._get_lock():
@@ -128,6 +89,7 @@ class HypothesisLedger:
                 CREATE INDEX IF NOT EXISTS idx_hyp_source_exec
                 ON hypotheses(source_execution_id)
             """)
+            await self._adopt_legacy(db)
             await db.commit()
 
     @staticmethod

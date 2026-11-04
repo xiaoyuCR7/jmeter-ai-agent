@@ -23,7 +23,7 @@ from typing import AsyncIterator, Optional
 
 from app.models.schemas import AIChatMessage
 from app.services.ai.adapters.base import BaseAIAdapter
-from app.services.ai.agent.base import BaseAgent, COMMON_RULES, SLOT_WAIT_SECONDS
+from app.services.ai.agent.base import COMMON_RULES, NoFreeSlot, agent_slot, slots_busy
 from app.services.ai.agent.loop import RESPONSE_TOKENS, tool_loop
 from app.services.ai.agent.tool_registry import Tool, ToolRegistry
 from app.services.ai.prompts.jmx_generator import SCENARIO_RULES
@@ -251,26 +251,21 @@ give; fill it in from its parameters. "auth" is the documented authentication.
                 progress({'step': 'fixing_plans', 'progress': 60,
                           'message': t('有计划没通过校验，正在修正...', 'Some plans failed their checks; fixing them...')})
 
-        slots = BaseAgent._slots()
-        if slots.locked():
+        if slots_busy():
             progress({'step': 'queued', 'progress': 20, 'message': t('其它 AI 任务正在运行，正在排队等待...',
                                                                    'Other AI tasks are running; waiting for one to finish...')})
         try:
-            async with asyncio.timeout(SLOT_WAIT_SECONDS):
-                await slots.acquire()
-        except TimeoutError:
+            async with agent_slot():
+                progress({'step': 'writing_plans', 'progress': 30,
+                          'message': t('正在根据文档编写测试计划...', 'Writing test plans from the document...')})
+                outcome = await tool_loop(
+                    self.adapter, messages, tools, max_rounds=PLAN_ROUNDS, require_tool=True, emit=on_event,
+                    done=lambda results: bool(results) and results[-1].success)
+        except NoFreeSlot:
             return self._failure(t('同时运行的 AI 任务太多，请稍后再试', 'Too many AI tasks are running; try again later'))
-        try:
-            progress({'step': 'writing_plans', 'progress': 30,
-                      'message': t('正在根据文档编写测试计划...', 'Writing test plans from the document...')})
-            outcome = await tool_loop(
-                self.adapter, messages, tools, max_rounds=PLAN_ROUNDS, require_tool=True, emit=on_event,
-                done=lambda results: bool(results) and results[-1].success)
-        except Exception:
+        except BaseException:
             await self._discard_empty(draft)
             raise
-        finally:
-            slots.release()
 
         if not draft.plans:
             await self._discard_empty(draft)
@@ -333,7 +328,9 @@ give; fill it in from its parameters. "auth" is the documented authentication.
                                        *[f'- {item}' for item in missing]]))
         if refused:
             sections.append(t(f'有计划最终没有通过校验：{refused[0]}', f'Some plans never passed their checks: {refused[0]}'))
-        sections.append(t('下一步：核对性能需求，再在测试计划页运行。', 'Next: review the requirements, then run a plan.'))
+        sections.append(t('下一步：核对性能需求，试跑一次确认接口能通、变量提取正确，再正式运行。',
+                          'Next: review the requirements, trial-run a plan to check its requests and extracted '
+                          'variables, then run it.'))
         return '\n\n'.join(sections)
 
     def _failure(self, error: str, **extra) -> dict:

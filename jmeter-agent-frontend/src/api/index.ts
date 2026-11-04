@@ -159,6 +159,49 @@ export interface ExecutionEvidence {
   server_metrics: ServerMetricsEvidence | null
 }
 
+export interface TrialSample {
+  label: string
+  method: string
+  url: string
+  code: string
+  message: string
+  success: boolean
+  elapsed_ms: number
+  failures: string[]
+  content_type: string
+  response: string
+  response_truncated: boolean
+}
+
+export interface TrialResult {
+  status: 'passed' | 'failed' | 'error'
+  error: string | null
+  duration_seconds: number
+  environment: string | null
+  passed: number
+  failed: number
+  samples: TrialSample[]
+}
+
+export interface TrialFix {
+  id: number
+  sampler: string
+  variable: string
+  expression: string
+  action: 'change' | 'add'
+  reason: string
+  verified: boolean
+  applicable: boolean
+  current: string | null
+  preview: string | null
+}
+
+export interface TrialDiagnosis {
+  summary: string
+  advice: string[]
+  fixes: TrialFix[]
+  usage?: { calls: number; input_tokens: number; output_tokens: number }
+}
 
 const instance = axios.create({
   baseURL,
@@ -276,6 +319,14 @@ export const api = {
   parseTestPlan: (id: string) => instance.get(`/test-plans/${id}/parse`),
   saveTestPlanTree: (id: string, data: any) => instance.put(`/test-plans/${id}/tree`, data),
   getJmxContent: (id: string) => instance.get(`/test-plans/${id}/jmx/content`),
+  // One user, one pass through the plan; it waits for the load generator when a run is using it.
+  trialRun: (planId: string) => withScriptApproval((approvedSha256, confirmProduction) =>
+    instance.post<TrialResult>(`/test-plans/${encodeURIComponent(planId)}/trial`, null,
+      { params: { approved_sha256: approvedSha256, confirm_production: confirmProduction }, timeout: 600000 })),
+  diagnoseTrial: (planId: string) =>
+    instance.post<TrialDiagnosis>(`/test-plans/${encodeURIComponent(planId)}/trial/diagnosis`, null, { timeout: 300000 }),
+  applyTrialFix: (planId: string, fixId: number) =>
+    instance.post(`/test-plans/${encodeURIComponent(planId)}/trial/fixes/${fixId}`),
 
   getComponents: () => instance.get('/jmeter/components'),
   getComponentChildren: (parent: string) => instance.get(`/jmeter/components/${parent}/children`),
@@ -287,8 +338,6 @@ export const api = {
   getExecutions: (projectId?: string) => instance.get('/executions', { params: projectId ? { project_id: projectId } : {} }),
   cancelExecution: (id: string) => instance.post(`/executions/${id}/cancel`),
 
-  askAboutRun: (executionId: string, question: string) =>
-    instance.post(`/executions/${encodeURIComponent(executionId)}/questions`, { question }, { timeout: 300000 }),
   // Progress arrives as {step: 'progress'} events, then {step: 'answer'} or {step: 'error'}.
   askAboutRunStream: (executionId: string, question: string, signal?: AbortSignal) => {
     const lang = currentLang()

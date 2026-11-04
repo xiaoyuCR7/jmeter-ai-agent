@@ -40,8 +40,6 @@
   "jmx.invalid": "Test plan validation failed: {issues}",
   "autotune.converged": "AutoTune converged: optimal {users} users",
   "autotune.iteration": "AutoTune iter {n}: {users} users → P99={p99}ms",
-  "selfheal.fixed": "SelfHeal: fixed {count} extraction rule(s)",
-  "selfheal.no_fix": "SelfHeal: no extraction rules to fix",
   "websocket.connected": "WebSocket connected (session: {id})",
   "websocket.disconnected": "WebSocket disconnected",
   "websocket.reconnecting": "WebSocket reconnecting... (attempt {n}/{max})"

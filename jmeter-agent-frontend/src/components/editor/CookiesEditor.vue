@@ -39,6 +39,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { Plus } from '@element-plus/icons-vue'
 import { useI18n } from '@/composables/useI18n'
 import FunctionInput from './FunctionInput.vue'
 

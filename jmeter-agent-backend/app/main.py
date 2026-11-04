@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 from app.core.config import settings
-from app.api import routes
+from app.api import routes, shared
 
 
 @asynccontextmanager
@@ -49,7 +49,7 @@ async def lifespan(app: FastAPI):
     if "*" in settings.CORS_ORIGINS:
         raise RuntimeError("CORS_ORIGINS must list trusted origins, not '*'")
 
-    await routes.ensure_default_project()
+    await shared.ensure_default_project()
 
     import asyncio as _asyncio
     from app.api.mcp_routes import init_mcp_server

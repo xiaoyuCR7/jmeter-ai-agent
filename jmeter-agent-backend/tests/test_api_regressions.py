@@ -9,47 +9,9 @@ from fastapi import HTTPException, UploadFile
 
 
 @pytest.mark.asyncio
-async def test_rag_document_filters_are_combined_and_list_limit_is_forwarded(monkeypatch):
-    from app.api import routes
-    calls = []
-    def hybrid(**kwargs):
-        calls.append(kwargs)
-        return []
-    monkeypatch.setattr(routes.rag_store, 'hybrid_search', hybrid)
-    monkeypatch.setattr(routes.rag_store, 'full_text_search', lambda *args, **kwargs: pytest.fail('Filters bypassed'))
-    await routes.list_rag_documents(doc_type='known_issue', module='orders', keyword='timeout', limit=100)
-    assert calls[0]['module'] == 'orders' and calls[0]['doc_type'] == 'known_issue'
-    assert calls[0]['query_text'] == 'timeout'
-    limits = []
-    monkeypatch.setattr(routes.rag_store, 'list_all', lambda limit=50: limits.append(limit) or [])
-    await routes.list_rag_documents(doc_type=None, module=None, keyword=None, limit=100)
-    assert limits == [100]
-
-
-@pytest.mark.asyncio
-async def test_empty_rag_search_does_not_broaden_scope(monkeypatch):
-    from app.api import routes
-    monkeypatch.setattr(routes.rag_store, 'hybrid_search', lambda **kwargs: [])
-    monkeypatch.setattr(routes.rag_store, 'full_text_search', lambda *args, **kwargs: pytest.fail('Unscoped fallback'))
-    assert (await routes.search_rag(q='timeout', module='orders', doc_type='known_issue', limit=20))['documents'] == []
-
-
-@pytest.mark.asyncio
-async def test_rag_query_does_not_run_on_event_loop_thread(monkeypatch):
-    import threading
-    from app.api import routes
-    caller = threading.get_ident()
-    def query(**kwargs):
-        assert threading.get_ident() != caller, 'RAG query blocks event loop'
-        return []
-    monkeypatch.setattr(routes.rag_store, 'hybrid_search', query)
-    await routes.list_rag_documents(doc_type=None, module=None, keyword='fixture', limit=10)
-
-
-@pytest.mark.asyncio
 async def test_system_resource_sampling_does_not_block_event_loop(monkeypatch):
     import threading
-    from app.api import routes
+    from app.api import execution_routes, plan_routes, shared, system_routes, workflow_routes
     from app.services.jmeter.resource_monitor import get_resource_monitor
     caller = threading.get_ident()
     threads = []
@@ -57,23 +19,23 @@ async def test_system_resource_sampling_does_not_block_event_loop(monkeypatch):
         threads.append(threading.get_ident())
         return SimpleNamespace(to_dict=lambda: {'cpu_percent': 0})
     monkeypatch.setattr(get_resource_monitor(), 'snapshot', sample)
-    assert await routes.get_system_resources() == {'cpu_percent': 0}
+    assert await system_routes.get_system_resources() == {'cpu_percent': 0}
     assert threads and threads[0] != caller
 
 
 @pytest.mark.asyncio
 async def test_resource_fallback_uses_configured_readiness_thresholds(monkeypatch):
     import psutil
-    from app.api import routes
+    from app.api import execution_routes, plan_routes, shared, system_routes, workflow_routes
     from app.services.jmeter.resource_monitor import get_resource_monitor
     def failed():
         raise OSError('fixture unavailable disk')
     monkeypatch.setattr(get_resource_monitor(), 'snapshot', failed)
-    monkeypatch.setattr(routes.settings, 'RESOURCE_CPU_THRESHOLD', 50)
-    monkeypatch.setattr(routes.settings, 'RESOURCE_MEMORY_THRESHOLD', 70)
+    monkeypatch.setattr(shared.settings, 'RESOURCE_CPU_THRESHOLD', 50)
+    monkeypatch.setattr(shared.settings, 'RESOURCE_MEMORY_THRESHOLD', 70)
     monkeypatch.setattr(psutil, 'cpu_percent', lambda **kwargs: 60)
     monkeypatch.setattr(psutil, 'virtual_memory', lambda: SimpleNamespace(percent=60, used=1024, total=2048))
-    assert (await routes.get_system_resources())['is_healthy'] is False
+    assert (await system_routes.get_system_resources())['is_healthy'] is False
 
 
 @pytest.mark.asyncio
@@ -96,20 +58,17 @@ async def test_invalid_analysis_is_recorded_on_the_analysis_not_the_report(monke
 
 @pytest.mark.asyncio
 async def test_failed_execution_without_report_directory_is_readable(monkeypatch):
-    from app.api import routes
+    from app.api import execution_routes, plan_routes, shared, system_routes, workflow_routes
     from app.models.schemas import TestExecutionInfo
 
     execution = TestExecutionInfo(id='failed-no-report', test_plan_id='unknown', status='failed',
                                  start_time=datetime.now(), jmx_path='missing.jmx', report_dir=None)
-    monkeypatch.setitem(routes.store.executions, execution.id, execution)
-    report = await routes.get_report(execution.id)
+    monkeypatch.setitem(plan_routes.store.executions, execution.id, execution)
+    report = await execution_routes.get_report(execution.id)
     assert report.status == 'failed'
     assert report.raw_data_path is None
     assert report.html_report_path is None
     assert report.summary.total_requests == 0
-    with pytest.raises(HTTPException) as error:
-        await routes.get_html_report(execution.id)
-    assert error.value.status_code == 404
 
 
 @pytest.fixture
@@ -175,27 +134,27 @@ def test_utc_now_naive_preserves_legacy_database_contract():
 
 @pytest.mark.asyncio
 async def test_saving_tree_with_new_name_persists_the_rename(monkeypatch, tmp_path):
-    from app.api import routes
+    from app.api import execution_routes, plan_routes, shared, system_routes, workflow_routes
     from app.models.schemas import TestConfig, TestPlanInfo, UpdateJMXTreeRequest
     jmx = tmp_path / 'plan.jmx'
     jmx.write_text('<jmeterTestPlan><hashTree><TestPlan testclass="TestPlan" testname="P"/><hashTree/></hashTree></jmeterTestPlan>',
                    encoding='utf-8')
     plan = TestPlanInfo(id='abcd1234', project_id='default', name='Old', jmx_path=str(jmx),
                         created_at=datetime.now(), test_config=TestConfig(test_type='baseline'), endpoints_count=1)
-    monkeypatch.setitem(routes.store.test_plans, plan.id, plan)
+    monkeypatch.setitem(plan_routes.store.test_plans, plan.id, plan)
     persisted = []
-    monkeypatch.setattr(routes, '_persist_test_plan', AsyncMock(side_effect=persisted.append))
-    tree = routes.parse_jmx(str(jmx))
-    await routes.update_jmx_tree(plan.id, UpdateJMXTreeRequest(tree=tree, name='New'))
+    monkeypatch.setattr(plan_routes, '_persist_test_plan', AsyncMock(side_effect=persisted.append))
+    tree = plan_routes.parse_jmx(str(jmx))
+    await plan_routes.update_jmx_tree(plan.id, UpdateJMXTreeRequest(tree=tree, name='New'))
     assert [p.name for p in persisted] == ['New']
-    await routes.update_jmx_tree(plan.id, UpdateJMXTreeRequest(tree=tree))
+    await plan_routes.update_jmx_tree(plan.id, UpdateJMXTreeRequest(tree=tree))
     assert len(persisted) == 1
     assert sorted(p.name for p in tmp_path.iterdir()) == ['plan.jmx']  # no .backup or .tmp left behind
 
 
 @pytest.mark.asyncio
 async def test_failed_tree_save_keeps_the_old_file(monkeypatch, tmp_path):
-    from app.api import routes
+    from app.api import execution_routes, plan_routes, shared, system_routes, workflow_routes
     from app.models.schemas import TestConfig, TestPlanInfo, UpdateJMXTreeRequest
     jmx = tmp_path / 'plan.jmx'
     jmx.write_text('<jmeterTestPlan><hashTree><TestPlan testclass="TestPlan" testname="P"/><hashTree/></hashTree></jmeterTestPlan>',
@@ -203,12 +162,12 @@ async def test_failed_tree_save_keeps_the_old_file(monkeypatch, tmp_path):
     original = jmx.read_bytes()
     plan = TestPlanInfo(id='abcd1234', project_id='default', name='Old', jmx_path=str(jmx),
                         created_at=datetime.now(), test_config=TestConfig(test_type='baseline'), endpoints_count=1)
-    monkeypatch.setitem(routes.store.test_plans, plan.id, plan)
+    monkeypatch.setitem(plan_routes.store.test_plans, plan.id, plan)
     def broken_replace(src, dst):
         raise OSError('disk full')
-    monkeypatch.setattr(routes.os, 'replace', broken_replace)
+    monkeypatch.setattr(plan_routes.os, 'replace', broken_replace)
     with pytest.raises(HTTPException):
-        await routes.update_jmx_tree(plan.id, UpdateJMXTreeRequest(tree=routes.parse_jmx(str(jmx))))
+        await plan_routes.update_jmx_tree(plan.id, UpdateJMXTreeRequest(tree=plan_routes.parse_jmx(str(jmx))))
     assert jmx.read_bytes() == original
     assert sorted(p.name for p in tmp_path.iterdir()) == ['plan.jmx']
 
@@ -252,7 +211,7 @@ def test_analysis_prompt_includes_evidence_only_when_given():
 
 async def _workflow_events(monkeypatch, items, lang=None):
     import json
-    from app.api import routes
+    from app.api import execution_routes, plan_routes, shared, system_routes, workflow_routes
     from app.models.schemas import AIWorkflowRequest
     from app.services.ai.agents import workflow_agent
 
@@ -264,8 +223,8 @@ async def _workflow_events(monkeypatch, items, lang=None):
             for item in items:
                 yield item
     monkeypatch.setattr(workflow_agent, 'WorkflowAgent', FakeAgent)
-    monkeypatch.setattr(routes.AIAdapterFactory, 'get_adapter', lambda model: object())
-    response = await routes.ai_workflow_stream(AIWorkflowRequest(api_documentation='doc', testing_requirements='req',
+    monkeypatch.setattr(plan_routes.AIAdapterFactory, 'get_adapter', lambda model: object())
+    response = await workflow_routes.ai_workflow_stream(AIWorkflowRequest(api_documentation='doc', testing_requirements='req',
                                                                  lang=lang))
     body = ''.join([chunk if isinstance(chunk, str) else chunk.decode() async for chunk in response.body_iterator])
     return [json.loads(line[6:]) for line in body.splitlines() if line.startswith('data: ')]
@@ -312,3 +271,19 @@ async def test_analysis_crash_is_recorded_on_the_analysis_and_announced(monkeypa
     assert execution.ai_analysis.analysis_status == 'failed'
     assert 'model timed out' in execution.ai_analysis.overall_assessment
     emit.assert_awaited_once_with('analysis_completed', execution)
+
+
+@pytest.mark.asyncio
+async def test_the_editor_reads_a_plan_as_a_tree(monkeypatch, tmp_path):
+    from app.api import plan_routes
+    from app.models.schemas import TestConfig, TestPlanInfo
+    jmx = tmp_path / 'plan.jmx'
+    jmx.write_text('<jmeterTestPlan><hashTree><TestPlan testclass="TestPlan" testname="P"/><hashTree/></hashTree></jmeterTestPlan>',
+                   encoding='utf-8')
+    plan = TestPlanInfo(id='abcd1234', project_id='default', name='P', jmx_path=str(jmx),
+                        created_at=datetime.now(), test_config=TestConfig(test_type='baseline'), endpoints_count=0)
+    monkeypatch.setitem(plan_routes.store.test_plans, plan.id, plan)
+    assert (await plan_routes.parse_test_plan(plan.id))['testname'] == 'P'
+    with pytest.raises(HTTPException) as missing:
+        await plan_routes.parse_test_plan('nope')
+    assert missing.value.status_code == 404

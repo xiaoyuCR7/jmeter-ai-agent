@@ -68,9 +68,9 @@ def test_long_tools_are_not_cut_off_by_the_default_tool_limit():
     from app.core.config import settings
     from app.services.ai.agent.tools import get_all_builtin_tools
     tools = {tool.name: tool for tool in get_all_builtin_tools()}
-    for name in ('execute_test', 'execute_distributed', 'selfheal_test', 'import_openapi_spec'):
+    for name in ('execute_test', 'execute_distributed', 'import_openapi_spec'):
         assert tools[name].timeout_seconds > settings.JMETER_TIMEOUT
-    assert tools['read_file'].timeout_seconds == settings.AGENT_TOOL_TIMEOUT_SECONDS
+    assert tools['get_execution_evidence'].timeout_seconds == settings.AGENT_TOOL_TIMEOUT_SECONDS
 
 
 @pytest.mark.asyncio
@@ -168,5 +168,5 @@ async def test_status_lists_each_tools_risk_and_full_description(server):
     server.register_all_agent_tools()
     status = await mcp_routes.mcp_status()
     tools = {tool['name']: tool for tool in status['tools']}
-    assert tools['delete_file']['risk'] == 'write' and tools['read_file']['risk'] == 'read'
+    assert tools['update_jmx']['risk'] == 'write' and tools['get_execution_evidence']['risk'] == 'read'
     assert tools['execute_test']['description'].endswith('execution_id.')

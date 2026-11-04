@@ -375,57 +375,6 @@ async def update_jmx(
         return {"error": str(e)}
 
 
-async def clone_jmx(jmx_path: str, new_name: str = "") -> dict:
-    """Duplicate a test plan with a new name.
-
-    Args:
-        jmx_path: Path to the source .jmx file.
-        new_name: Name for the cloned test plan.
-    """
-    try:
-        from app.core.config import safe_path
-        jmx_path = safe_path(jmx_path)
-    except ValueError as e:
-        return {"error": str(e)}
-
-    if not os.path.exists(jmx_path):
-        return {"error": f"JMX file not found: {jmx_path}"}
-
-    import uuid
-    if not new_name:
-        new_name = f"clone_{os.path.basename(jmx_path)}"
-
-    # Determine target path
-    project_dir = os.path.dirname(jmx_path)
-    new_path = os.path.join(project_dir, f"{new_name}.jmx")
-
-    from pathlib import Path
-    from app.core.config import safe_path
-    try:
-        new_path = safe_path(new_path, allowed_dirs=[settings.TEST_PLANS_DIR])
-        new_path = safe_path(new_path, allowed_dirs=[project_dir])
-        if os.path.exists(new_path):
-            new_path = safe_path(os.path.join(project_dir, f"{new_name}_{str(uuid.uuid4())[:6]}.jmx"),
-                                 allowed_dirs=[project_dir])
-        source_content = Path(jmx_path).read_bytes()
-        with open(new_path, "xb") as dst:
-            dst.write(source_content)
-    except (ValueError, FileExistsError) as error:
-        return {"error": str(error)}
-    from app.services.execution_lifecycle import execution_lifecycle
-    source_plan = await execution_lifecycle.register_path(jmx_path)
-    plan = await execution_lifecycle.register_path(
-        new_path, project_id=source_plan.project_id, name=new_name,
-        test_config=source_plan.test_config, endpoints_count=source_plan.endpoints_count)
-
-    return {
-        "source_path": jmx_path,
-        "cloned_path": new_path,
-        "test_plan_id": plan.id,
-        "message": f"Test plan cloned to {new_path}",
-    }
-
-
 async def import_jmx(source_path: str, project_id: str = "default",
                      target_name: str = "") -> dict:
     """Import an externally created JMX file into the project's test_plans directory.
@@ -643,20 +592,6 @@ jmx_tools = [
         },
         handler=update_jmx,
         risk='write',
-    ),
-    Tool(
-        name="clone_jmx",
-        description="Duplicate an existing test plan with a new name.",
-        parameters={
-            "type": "object",
-            "properties": {
-                "jmx_path": {"type": "string", "description": "Path to the source .jmx file"},
-                "new_name": {"type": "string", "description": "Name for the cloned test plan"},
-            },
-            "required": ["jmx_path"],
-        },
-        handler=clone_jmx,
-        risk='draft',
     ),
     Tool(
         name="import_jmx",

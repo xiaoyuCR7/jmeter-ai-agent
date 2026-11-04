@@ -498,17 +498,10 @@ class TestRunStream:
 
 class TestReactLoop:
 
-    def test_subclasses_share_agent_concurrency_budget(self, monkeypatch):
-        class First(BaseAgent):
-            pass
-        class Second(BaseAgent):
-            pass
-        monkeypatch.setattr(BaseAgent, '_concurrency_semaphore', None)
-        assert First._slots() is Second._slots()
-
     @pytest.mark.asyncio
     async def test_a_run_waits_for_a_free_agent_slot(self, monkeypatch):
-        monkeypatch.setattr(BaseAgent, '_concurrency_semaphore', asyncio.Semaphore(1))
+        from app.services.ai.agent import base
+        monkeypatch.setattr(base, '_semaphore', asyncio.Semaphore(1))
         first, second = talking_agent(), talking_agent()
         entered, release, _ = pause_steps(first)
         running = asyncio.create_task(first.run('first'))
@@ -518,6 +511,27 @@ class TestReactLoop:
         assert not waiting.done() and second.adapter.chat_with_tools_calls == 0
         release.set()
         assert (await running).success and (await waiting).success
+
+    @pytest.mark.asyncio
+    async def test_report_analyses_queue_behind_agents_for_the_same_slots(self, monkeypatch):
+        from app.services import post_run
+        from app.services.ai.agent import base
+        monkeypatch.setattr(base, '_semaphore', asyncio.Semaphore(1))
+        started = []
+
+        async def analyse_now(execution, ai_model):
+            started.append(execution)
+            return 'analysis'
+        monkeypatch.setattr(post_run, '_analyse_now', analyse_now)
+        agent = talking_agent()
+        entered, release, _ = pause_steps(agent)
+        running = asyncio.create_task(agent.run('task'))
+        await entered.wait()
+        analysis = asyncio.create_task(post_run._analyse('run-1', None))
+        await asyncio.sleep(0.05)
+        assert started == []  # Waits instead of calling the model beside the agent.
+        release.set()
+        assert (await running).success and await analysis == 'analysis' and started == ['run-1']
 
     @pytest.mark.asyncio
     async def test_react_preserves_native_call_ids_in_observation(self):

@@ -25,12 +25,13 @@
         <template #default="{ row }"><span class="num">{{ formatTime(row.created_at) }}</span></template>
       </el-table-column>
       <!-- Pinned so Run stays reachable when a narrow window makes the table scroll. -->
-      <el-table-column :label="L('操作', 'Actions')" width="210" align="right" fixed="right">
+      <el-table-column :label="L('操作', 'Actions')" width="270" align="right" fixed="right">
         <template #default="{ row }">
           <div class="actions" @click.stop>
             <el-button size="small" type="primary" :loading="running === row.id" @click="run(row.id)">
               <el-icon><VideoPlay /></el-icon> {{ L('运行', 'Run') }}
             </el-button>
+            <el-button size="small" @click="trialPlan = row.id">{{ L('试跑', 'Trial') }}</el-button>
             <el-button size="small" @click="openEditor(row.id)">{{ L('编辑', 'Edit') }}</el-button>
             <el-dropdown trigger="click" @command="(cmd: string) => cmd === 'download' ? download(row) : remove(row)">
               <el-button size="small" text><el-icon><MoreFilled /></el-icon></el-button>
@@ -45,6 +46,8 @@
         </template>
       </el-table-column>
     </el-table>
+    <TrialRunDialog :model-value="!!trialPlan" :plans="plans" :initial-plan-id="trialPlan || undefined"
+      @update:model-value="open => { if (!open) trialPlan = null }" />
   </section>
 </template>
 
@@ -54,6 +57,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { VideoPlay, MoreFilled } from '@element-plus/icons-vue'
 import { api } from '@/api'
+import TrialRunDialog from '@/components/TrialRunDialog.vue'
 import { useI18n } from '@/composables/useI18n'
 import { formatTime, testTypeText } from '@/utils/format'
 
@@ -67,6 +71,7 @@ const typeText = (type?: string) => testTypeText(type, currentLang.value)
 const plans = ref<any[]>([])
 const loading = ref(false)
 const running = ref<string | null>(null)
+const trialPlan = ref<string | null>(null)
 
 async function load() {
   const id = props.projectId

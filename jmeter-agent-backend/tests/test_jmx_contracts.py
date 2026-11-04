@@ -117,7 +117,7 @@ def test_explicit_rate_generates_one_shared_rps_timer_without_losing_duration(ki
 
 
 def test_template_rps_converts_samples_per_second_to_per_minute():
-    from app.api.routes import TEST_TEMPLATES
+    from app.api.plan_routes import TEST_TEMPLATES
     for template in TEST_TEMPLATES:
         if template.id in {'ramp_up', 'spike'}:
             continue
@@ -214,18 +214,6 @@ async def test_update_tool_preserves_dict_property_contract(jmx_file, monkeypatc
     assert props['ThreadGroup.ramp_time'] == '3'
     assert props['ThreadGroup.scheduler'] is True
     assert any(n.get('properties', {}).get('ConstantTimer.delay') == '25' for n in nodes)
-
-
-def test_selfheal_reads_and_updates_dict_extractor_properties():
-    from app.services.ai.agents.selfheal_agent import SelfHealAgent, ExtractionFix
-
-    tree = {'testclass': 'JSONPostProcessor', 'properties': {
-        'JSONPostProcessor.referenceNames': 'token',
-        'JSONPostProcessor.jsonPathExprs': '$.token'}, 'children': []}
-    agent = SelfHealAgent()
-    assert agent._find_extractions(tree)[0]['expression'] == '$.token'
-    agent._apply_fixes(tree, [ExtractionFix('$.token', '$.data.token', 'token', 1, 'json_path')])
-    assert tree['properties']['JSONPostProcessor.jsonPathExprs'] == '$.data.token'
 
 
 EDITOR_FIXTURE = '''<?xml version="1.0" encoding="UTF-8"?>

@@ -19,6 +19,10 @@
 /jmeter-agent-backend/test_plans/
 /jmeter-agent-backend/reports/
 rag_lancedb/
+rag_lancedb.migrated/
+*.db.migrated
+*.db-wal.migrated
+*.db-shm.migrated
 /jmeter-agent-backend/uploads/
 /jmeter-agent-backend/test_exec_id.txt
 /jmeter-agent-backend/test_plan_id.txt

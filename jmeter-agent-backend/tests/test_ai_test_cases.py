@@ -296,7 +296,7 @@ async def test_create_jmx_passes_the_new_controls_through(monkeypatch, test_type
 @pytest.mark.asyncio
 async def test_generate_route_saves_nothing_jmeter_cannot_load(monkeypatch):
     from fastapi import HTTPException
-    from app.api import routes
+    from app.api import plan_routes
     from app.models.schemas import GenerateTestPlanRequest, ProjectInfo
     from app.services.storage import store
     monkeypatch.setattr(store, '_projects', {'p': ProjectInfo(id='p', name='P')})
@@ -305,7 +305,7 @@ async def test_generate_route_saves_nothing_jmeter_cannot_load(monkeypatch):
     request = GenerateTestPlanRequest(api_doc='d', base_url=BASE, test_config=LoadConfig(test_type='baseline'),
                                       endpoints=[APIEndpoint(name='a', method='GET', path='/a')])
     with pytest.raises(HTTPException) as caught:
-        await routes.generate_test_plan(request, 'p')
+        await plan_routes.generate_test_plan(request, 'p')
     assert caught.value.status_code == 422
 
 

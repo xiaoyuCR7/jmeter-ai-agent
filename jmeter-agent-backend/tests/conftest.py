@@ -13,12 +13,11 @@ _DATA = Path(tempfile.mkdtemp(prefix='jmeter-agent-tests-'))
 
 os.environ.update({
     'DATABASE_URL': f'sqlite+aiosqlite:///{(_DATA / "jmeter_agent.db").as_posix()}',
-    # BASE_DIR roots facts.db, hypotheses.db, RAG data and test_data.
+    # Memory tables share the database above; BASE_DIR roots test_data and the old memory files.
     'BASE_DIR': str(_DATA),
     'TEST_PLANS_DIR_DEFAULT': str(_DATA / 'test_plans'),
     'REPORTS_DIR_DEFAULT': str(_DATA / 'reports'),
     'AI_MODELS_CONFIG_FILE': str(_DATA / 'ai_models_config.json'),
-    'RAG_LANCEDB_PATH': str(_DATA / 'rag_lancedb'),
 })
 
 import pytest  # noqa: E402

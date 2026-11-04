@@ -12,7 +12,7 @@ from app.middleware.local_guard import (
 
 
 def guarded_app():
-    from app.api.routes import create_session, session_token
+    from app.api.system_routes import create_session, session_token
     app = FastAPI()
     app.add_api_route('/api/v1/session', create_session, methods=['POST'])
     app.add_api_route('/api/v1/session/token', session_token)

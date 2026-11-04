@@ -7,6 +7,7 @@
       </template>
       <template #extra>
         <el-button type="primary" @click="emit('review')">{{ L('核对性能需求', 'Review requirements') }}</el-button>
+        <el-button v-if="planIds?.length" @click="openTrial">{{ L('试跑计划', 'Trial-run a plan') }}</el-button>
         <el-button @click="router.push(`/projects/${projectId}/plans`)">{{ L('查看测试计划', 'View test plans') }}</el-button>
       </template>
     </el-result>
@@ -16,21 +17,40 @@
     </div>
     <p v-if="usageText(usage, currentLang)" class="usage">{{ usageText(usage, currentLang) }}</p>
     <div class="actions"><el-button text @click="emit('reset')">{{ L('再导入一份', 'Start another') }}</el-button></div>
+    <TrialRunDialog v-model="trialOpen" :plans="plans" />
   </section>
 </template>
 
 <script setup lang="ts">
+import { ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
+import { api } from '@/api'
+import TrialRunDialog from '@/components/TrialRunDialog.vue'
 import MarkdownIt from 'markdown-it'
 import { useI18n } from '@/composables/useI18n'
 import { usageText, type ModelUsage } from '@/utils/format'
 
-defineProps<{ projectId: string; title: string; detail: string; diagnostic?: string; draftCount?: number; usage?: ModelUsage }>()
+const props = defineProps<{ projectId: string; title: string; detail: string; diagnostic?: string; draftCount?: number;
+  usage?: ModelUsage; planIds?: string[] }>()
 const emit = defineEmits<{ review: []; reset: [] }>()
 const md = new MarkdownIt()
 const router = useRouter()
 const { currentLang } = useI18n()
 const L = (zh: string, en: string) => currentLang.value === 'en' ? en : zh
+
+// The plans this document produced, so the trial picks among them only.
+const plans = ref<{ id: string; name: string }[]>([])
+const trialOpen = ref(false)
+async function openTrial() {
+  try {
+    const all = (await api.getProjectTestPlans(props.projectId)).data || []
+    plans.value = all.filter((plan: any) => props.planIds?.includes(plan.id))
+    trialOpen.value = plans.value.length > 0
+  } catch {
+    ElMessage.error(L('读取测试计划失败', 'Could not load the test plans'))
+  }
+}
 </script>
 
 <style scoped lang="scss">

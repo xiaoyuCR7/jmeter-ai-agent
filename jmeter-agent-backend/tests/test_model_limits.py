@@ -59,16 +59,16 @@ def test_adapter_budget_follows_the_configured_window(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_saving_a_model_keeps_a_manual_window_and_fills_a_missing_one(monkeypatch):
-    from app.api import routes
+    from app.api import model_routes
     calls = []
 
     async def detect(config):
         calls.append(config['model'])
         return 1048576
     monkeypatch.setattr(model_limits, 'detect_context_window', detect)
-    manual = await routes._fill_context_window({'model': 'a', 'api_key': 'k', 'context_window': 65536})
-    filled = await routes._fill_context_window({'model': 'b', 'api_key': 'k', 'context_window': None})
-    redacted = await routes._fill_context_window({'model': 'c', 'api_key': '***', 'context_window': None})
+    manual = await model_routes._fill_context_window({'model': 'a', 'api_key': 'k', 'context_window': 65536})
+    filled = await model_routes._fill_context_window({'model': 'b', 'api_key': 'k', 'context_window': None})
+    redacted = await model_routes._fill_context_window({'model': 'c', 'api_key': '***', 'context_window': None})
     assert (manual['context_window'], filled['context_window'], redacted['context_window']) == (65536, 1048576, None)
     assert calls == ['b']
 

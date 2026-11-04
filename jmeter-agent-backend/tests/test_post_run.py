@@ -129,36 +129,50 @@ def test_a_failure_diagnosis_shows_the_line_it_read():
 
 @pytest.fixture
 def run_with_report(monkeypatch, tmp_path):
-    from app.api import routes
+    from app.api import execution_routes, model_routes, routes, shared
     execution = Execution(id='run', test_plan_id='plan', status=Status.COMPLETED, jmx_path='a.jmx',
                           report_dir=str(tmp_path), start_time=datetime.now(), ai_analysis=ReportAnalysis(
                               overall_assessment='还行', conclusion='结束'))
-    monkeypatch.setattr(routes.store, 'get_execution', lambda execution_id: execution)
+    monkeypatch.setattr(shared.store, 'get_execution', lambda execution_id: execution)
     saved = []
     async def persist(updated):
         saved.append(updated)
-    monkeypatch.setattr(routes, 'persist_execution', persist)
-    monkeypatch.setattr(routes.AIAdapterFactory, 'create', lambda model: SimpleNamespace())
+    monkeypatch.setattr(execution_routes, 'persist_execution', persist)
+    monkeypatch.setattr(model_routes.AIAdapterFactory, 'create', lambda model: SimpleNamespace())
     ask = AsyncMock(return_value=AgentResult(True, 'q', output='慢在建连', analysis={
         'validation': {'mismatches': [{'metric': 'p95', 'claimed': 1, 'actual': 2}]}}))
-    monkeypatch.setattr(routes, 'AnalysisAgent', type('Agent', (), {
-        'resolve_execution': staticmethod(AsyncMock(return_value={'execution_id': 'run'})),
-        '__init__': lambda self, adapter: None, 'run_analysis': lambda self, *a, **k: ask(*a, **k)}))
+    from app.services.ai.agent.base import BaseAgent
+
+    class Agent(BaseAgent):
+        resolve_execution = staticmethod(AsyncMock(return_value={'execution_id': 'run'}))
+
+        def __init__(self, adapter):
+            super().__init__('questions', adapter)
+
+        async def run_analysis(self, *args, **kwargs):
+            return await ask(*args, **kwargs)
+    monkeypatch.setattr(execution_routes, 'AnalysisAgent', Agent)
     app = FastAPI()
     app.include_router(routes.router)
     return SimpleNamespace(app=app, ask=ask, saved=saved, execution=execution)
 
 
 async def post_question(app, question='为什么慢？'):
+    """The status, and for a started answer its last event: the saved answer or the error."""
+    import json
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://fixture') as client:
-        return await client.post('/executions/run/questions', json={'question': question})
+        response = await client.post('/executions/run/questions/stream', json={'question': question})
+    if response.status_code != 200:
+        return response.status_code, None
+    events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith('data: ')]
+    return 200, events[-1]
 
 
 @pytest.mark.asyncio
 async def test_a_question_is_answered_and_kept_with_the_analysis(run_with_report, tmp_path):
-    response = await post_question(run_with_report.app)
-    assert response.status_code == 200 and response.json()['answer'] == '慢在建连'
-    assert response.json()['mismatches'][0]['metric'] == 'p95'
+    status, last = await post_question(run_with_report.app)
+    assert status == 200 and last['step'] == 'answer' and last['answer']['answer'] == '慢在建连'
+    assert last['answer']['mismatches'][0]['metric'] == 'p95'
     assert '还行' in run_with_report.ask.call_args.kwargs['context']
     stored = run_with_report.saved[0].ai_analysis.follow_ups
     assert stored[0]['question'] == '为什么慢？'
@@ -168,14 +182,14 @@ async def test_a_question_is_answered_and_kept_with_the_analysis(run_with_report
 @pytest.mark.asyncio
 async def test_a_failed_answer_keeps_nothing(run_with_report):
     run_with_report.ask.return_value = AgentResult(False, 'q', error='model down')
-    response = await post_question(run_with_report.app)
-    assert response.status_code == 502 and 'model down' in response.text and not run_with_report.saved
+    status, last = await post_question(run_with_report.app)
+    assert last['step'] == 'error' and 'model down' in last['message'] and not run_with_report.saved
 
 
 @pytest.mark.asyncio
 async def test_a_run_without_an_analysis_cannot_be_questioned(run_with_report):
     run_with_report.execution.ai_analysis = None
-    assert (await post_question(run_with_report.app)).status_code == 409
+    assert (await post_question(run_with_report.app))[0] == 409
     run_with_report.ask.assert_not_awaited()
 
 
@@ -189,32 +203,32 @@ def test_questions_are_bounded():
 
 @pytest.mark.asyncio
 async def test_a_run_deleted_while_answering_keeps_nothing(run_with_report, monkeypatch):
-    from app.api import routes
+    from app.api import execution_routes, model_routes, routes, shared
     reads = iter([run_with_report.execution, None])
-    monkeypatch.setattr(routes.store, 'get_execution', lambda execution_id: next(reads))
-    assert (await post_question(run_with_report.app)).status_code == 409
+    monkeypatch.setattr(shared.store, 'get_execution', lambda execution_id: next(reads))
+    assert (await post_question(run_with_report.app))[1]['step'] == 'error'
     assert not run_with_report.saved
 
 
 @pytest.mark.asyncio
 async def test_a_run_cannot_be_questioned_while_its_analysis_is_written(run_with_report):
     run_with_report.execution.report_status = 'running'
-    assert (await post_question(run_with_report.app)).status_code == 409
+    assert (await post_question(run_with_report.app))[0] == 409
     run_with_report.ask.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_questions_asked_together_are_both_kept(run_with_report, monkeypatch):
     import asyncio
-    from app.api import routes
+    from app.api import execution_routes, model_routes, routes, shared
     latest = {'run': run_with_report.execution}
-    monkeypatch.setattr(routes.store, 'get_execution', lambda execution_id: latest['run'])
+    monkeypatch.setattr(shared.store, 'get_execution', lambda execution_id: latest['run'])
     async def persist(updated):
         await asyncio.sleep(0)  # A database write gives the other request its turn.
         latest['run'] = updated
-    monkeypatch.setattr(routes, 'persist_execution', persist)
+    monkeypatch.setattr(execution_routes, 'persist_execution', persist)
     responses = await asyncio.gather(post_question(run_with_report.app, '一'), post_question(run_with_report.app, '二'))
-    assert [r.status_code for r in responses] == [200, 200]
+    assert [last['step'] for _, last in responses] == ['answer', 'answer']
     assert sorted(item['question'] for item in latest['run'].ai_analysis.follow_ups) == ['一', '二']
 
 
@@ -280,8 +294,8 @@ async def test_a_restart_ends_analyses_that_were_running(stored_run):
 @pytest.mark.asyncio
 @pytest.mark.parametrize('failure, status', [(LookupError('run'), 404), (ValueError('no'), 409), (RuntimeError('busy'), 409)])
 async def test_the_analysis_endpoint_reports_why_it_cannot_start(monkeypatch, failure, status):
-    from app.api import routes
-    monkeypatch.setattr(routes.post_run, 'start_reanalysis', AsyncMock(side_effect=failure))
+    from app.api import execution_routes, model_routes, routes, shared
+    monkeypatch.setattr(execution_routes.post_run, 'start_reanalysis', AsyncMock(side_effect=failure))
     app = FastAPI()
     app.include_router(routes.router)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://fixture') as client:

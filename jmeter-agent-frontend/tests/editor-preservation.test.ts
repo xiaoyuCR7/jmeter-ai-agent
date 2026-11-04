@@ -9,6 +9,7 @@ import { compile } from '@vue/compiler-dom'
 import { flushPromises, mount } from '@vue/test-utils'
 import ElementPlus, { ElInput, ElInputNumber, ElSwitch } from 'element-plus'
 import HeadersEditor from '../src/components/editor/HeadersEditor.vue'
+import { usePlanTree } from '../src/composables/usePlanTree'
 
 vi.mock('@/composables/useI18n', () => ({ useI18n: () => ({ t: (key: string) => key }) }))
 
@@ -34,6 +35,8 @@ function editor(path = 'src/views/TestCaseEditor.vue') {
     t: (key: string, args?: any) => args?.msg || key,
     computed: Vue.computed,
   }
+  // The tree conversion lives in a composable; the view's own functions call it by these names.
+  Object.assign(context, usePlanTree(context as any))
   const names = declarations.flatMap(node => ts.isFunctionDeclaration(node) ? [node.name!.text] :
     (node as ts.VariableStatement).declarationList.declarations.map(d => (d.name as ts.Identifier).text))
   const functions = runInNewContext(`${js}\n({${names.join(',')}})`, context)

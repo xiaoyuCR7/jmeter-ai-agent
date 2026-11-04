@@ -40,8 +40,6 @@
   "jmx.invalid": "测试计划验证失败: {issues}",
   "autotune.converged": "AutoTune 收敛: 最优并发 {users}",
   "autotune.iteration": "AutoTune 迭代 {n}: {users} 并发 → P99={p99}ms",
-  "selfheal.fixed": "SelfHeal: 修复了 {count} 个提取规则",
-  "selfheal.no_fix": "SelfHeal: 未找到可修复的提取规则",
   "websocket.connected": "WebSocket 已连接 (session: {id})",
   "websocket.disconnected": "WebSocket 已断开",
   "websocket.reconnecting": "WebSocket 重连中... (尝试 {n}/{max})"

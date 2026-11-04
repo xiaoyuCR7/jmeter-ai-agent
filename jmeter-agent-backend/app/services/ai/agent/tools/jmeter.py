@@ -203,24 +203,6 @@ async def read_test_log(log_path: str, lines: int = 100) -> dict:
     return {"log": content, "line_count": len(content.splitlines())}
 
 
-async def get_html_report_path(report_dir: str) -> dict:
-    """Get the HTML report path for a test execution.
-
-    Args:
-        report_dir: The report directory (e.g., reports/<execution_id>).
-    """
-    from app.core.config import safe_path
-    try:
-        report_dir = safe_path(report_dir, [settings.REPORTS_DIR])
-        safe_path(os.path.join(report_dir, 'html', 'index.html'), [settings.REPORTS_DIR])
-    except ValueError as error:
-        return {"error": str(error), "html_report_path": None, "exists": False}
-    html_path = _report_parser.get_html_report_url(report_dir)
-    if html_path:
-        return {"html_report_path": html_path, "exists": True}
-    return {"html_report_path": None, "exists": False}
-
-
 async def cancel_execution(execution_id: str) -> dict:
     """Cancel a running JMeter test execution.
 
@@ -365,18 +347,6 @@ jmeter_tools = [
         handler=read_test_log,
     ),
     Tool(
-        name="get_html_report_path",
-        description="Check if an HTML report exists for a test execution and get its path.",
-        parameters={
-            "type": "object",
-            "properties": {
-                "report_dir": {"type": "string", "description": "Report directory path, e.g. reports/<execution_id>"},
-            },
-            "required": ["report_dir"],
-        },
-        handler=get_html_report_path,
-    ),
-    Tool(
         name="cancel_execution",
         description="Cancel a running JMeter test.",
         parameters={
@@ -390,14 +360,6 @@ jmeter_tools = [
         risk='write',
     ),
     Tool(
-        name="list_report_dir",
-        description="List all test execution reports and their status.",
-        parameters={
-            "type": "object",
-            "properties": {},
-        },
-        handler=list_report_dir,
-    ),    Tool(
         name="execute_distributed",
         description="Execute a JMeter test across multiple remote engines for high-scale distributed load testing. Uses the -R flag to coordinate master-slave execution.",
         parameters={

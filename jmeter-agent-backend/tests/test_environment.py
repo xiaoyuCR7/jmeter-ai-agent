@@ -161,22 +161,22 @@ async def test_production_waits_for_a_yes_and_the_thread_cap_always_holds(env): 
 
 @pytest.mark.asyncio
 async def test_saving_a_page_that_only_saw_the_mask_keeps_the_secret(env):  # noqa: F811
-    from app.api import routes
+    from app.api import project_routes
     from app.models.schemas import UpdateEnvironmentRequest
     from app.services.storage import store
     project = ProjectInfo(id='masked', name='Shop', environments=ProjectEnvironments(environments=[
         EnvironmentConfig(id='s', name='Staging', **STAGING)], active_id='s'))
     from app.services.execution_lifecycle import persist_project
     await persist_project(project)
-    shown = (await routes.list_environments('masked')).model_dump()['environments'][0]
+    shown = (await project_routes.list_environments('masked')).model_dump()['environments'][0]
     assert shown['headers']['Authorization'] == '******'
-    saved = await routes.update_environment('masked', 's', UpdateEnvironmentRequest(
+    saved = await project_routes.update_environment('masked', 's', UpdateEnvironmentRequest(
         headers={**shown['headers'], 'X-Env': 'staging-2'}, kind='production', max_threads=50,
         prometheus_url='http://prom:9090'))
     stored = store.get_project('masked').environments.environments[0]
     assert stored.revealed()['headers'] == {'Authorization': 'Bearer real-token', 'X-Env': 'staging-2'}
     assert (saved.kind, saved.max_threads, saved.prometheus_url) == ('production', 50, 'http://prom:9090')
-    await routes.update_environment('masked', 's', UpdateEnvironmentRequest(
+    await project_routes.update_environment('masked', 's', UpdateEnvironmentRequest(
         headers={'X-Env': 'staging-2'}, clear_max_threads=True))
     stored = store.get_project('masked').environments.environments[0]
     assert stored.secret_keys == [] and stored.max_threads is None  # A secret whose name is gone is forgotten.
@@ -184,12 +184,12 @@ async def test_saving_a_page_that_only_saw_the_mask_keeps_the_secret(env):  # no
 
 @pytest.mark.asyncio
 async def test_a_copied_environment_keeps_the_secrets_the_page_never_saw(env):  # noqa: F811
-    from app.api import routes
+    from app.api import project_routes
     from app.services.execution_lifecycle import persist_project
     await persist_project(ProjectInfo(id='copy', name='Shop', environments=ProjectEnvironments(environments=[
         EnvironmentConfig(id='s', name='Staging', **STAGING)], active_id='s')))
-    shown = (await routes.list_environments('copy')).model_dump()['environments'][0]
-    copy = await routes.create_environment('copy', CreateEnvironmentRequest(
+    shown = (await project_routes.list_environments('copy')).model_dump()['environments'][0]
+    copy = await project_routes.create_environment('copy', CreateEnvironmentRequest(
         name='Staging copy', headers=shown['headers'], secret_keys=shown['secret_keys'], copy_from='s'))
     assert copy.revealed()['headers']['Authorization'] == 'Bearer real-token'
 

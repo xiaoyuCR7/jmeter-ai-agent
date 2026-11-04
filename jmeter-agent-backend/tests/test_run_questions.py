@@ -52,7 +52,7 @@ async def test_runs_of_other_projects_cannot_be_compared(run, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_a_question_streams_its_progress_then_the_saved_answer(monkeypatch):
-    from app.api import routes
+    from app.api import execution_routes
     from app.models.schemas import RunQuestion
     from app.services.ai.agent.base import BaseAgent
     from app.services.ai.agent.types import AgentResult
@@ -65,14 +65,14 @@ async def test_a_question_streams_its_progress_then_the_saved_answer(monkeypatch
             return AgentResult(True, question, output='Slowest is POST /b.', analysis={'validation': {'mismatches': []}})
 
     agent = Agent('questions', adapter=None)
-    monkeypatch.setattr(routes, '_question_setup', AsyncMock(return_value=({}, 'REPORT', agent)))
+    monkeypatch.setattr(execution_routes, '_question_setup', AsyncMock(return_value=({}, 'REPORT', agent)))
     saved = []
 
     async def save(execution_id, question, result, used):
         saved.append(result.output)
         return {'question': question, 'answer': result.output}
-    monkeypatch.setattr(routes, '_save_answer', save)
-    response = await routes.ask_about_execution_stream('run-1', RunQuestion(question='Which is slowest?'), lang='en')
+    monkeypatch.setattr(execution_routes, '_save_answer', save)
+    response = await execution_routes.ask_about_execution_stream('run-1', RunQuestion(question='Which is slowest?'), lang='en')
     body = ''.join([chunk async for chunk in response.body_iterator])
     events = [json.loads(line[6:]) for line in body.splitlines() if line.startswith('data: ')]
     assert [e['message'] for e in events[:-1]] == [

@@ -57,7 +57,7 @@ flowchart LR
 | **Server-side evidence** | Prometheus presets for host (node_exporter), JVM + HikariCP and MySQL; collected per run window and cached. |
 | **Honest AI analysis** | Fact sheet and number validation. Reports compare with earlier runs of the plan, other loads and the same requests in other plans, check earlier predictions automatically, and cite lessons your team saved. DeepSeek, OpenAI, Claude, Qwen or any OpenAI-compatible endpoint. |
 | **MCP built in** | Streamable HTTP endpoint with evidence tools (`get_execution_evidence`, `extract_performance_requirements`, `promote_execution_to_baseline`, …). Writes need your confirmation in the UI. |
-| **Solid JMeter plumbing** | Streaming JTL parser with exact percentiles and flat memory use, queued runs when the load generator is busy, live progress over WebSocket, SelfHeal for broken extractors. |
+| **Solid JMeter plumbing** | Streaming JTL parser with exact percentiles and flat memory use, queued runs when the load generator is busy, live progress over WebSocket, and a one-user trial run that shows each response and offers extractor fixes proven by it. |
 | **Private by default** | No accounts and no login; the server refuses to bind to anything but loopback, and Host/Origin checks block other sites in your browser. |
 
 ## Screenshots

@@ -9,11 +9,11 @@ from app.models.schemas import AIChatMessage
 
 @pytest.mark.asyncio
 async def test_manual_model_probe_has_small_output_and_no_sdk_retry(monkeypatch):
-    from app.api import routes
+    from app.api import model_routes
     adapter = SimpleNamespace(chat=AsyncMock(return_value='hello'))
-    monkeypatch.setattr(routes.AIAdapterFactory, 'get_model_config', lambda _: {'id': 'fixture'})
-    monkeypatch.setattr(routes.AIAdapterFactory, 'create', lambda _: adapter)
-    result = await routes.test_model_config('fixture')
+    monkeypatch.setattr(model_routes.AIAdapterFactory, 'get_model_config', lambda _: {'id': 'fixture'})
+    monkeypatch.setattr(model_routes.AIAdapterFactory, 'create', lambda _: adapter)
+    result = await model_routes.test_model_config('fixture')
     assert result == {'success': True, 'message': '连接成功', 'response': 'hello'}
     assert adapter.chat.call_args.kwargs.get('max_tokens', 8000) <= 32
     assert adapter.chat.call_args.kwargs.get('max_retries') == 0
@@ -23,30 +23,30 @@ async def test_manual_model_probe_has_small_output_and_no_sdk_retry(monkeypatch)
 async def test_manual_model_probe_times_out_and_cancels_request(monkeypatch):
     import asyncio
     from fastapi import HTTPException
-    from app.api import routes
+    from app.api import model_routes
     cancelled = asyncio.Event()
     async def blocked(*args, **kwargs):
         try:
             await asyncio.Event().wait()
         finally:
             cancelled.set()
-    monkeypatch.setattr(routes, 'HEALTH_CHECK_TIMEOUT_SECONDS', .01, raising=False)
-    monkeypatch.setattr(routes.AIAdapterFactory, 'get_model_config', lambda _: {'id': 'fixture'})
-    monkeypatch.setattr(routes.AIAdapterFactory, 'create', lambda _: SimpleNamespace(chat=blocked))
+    monkeypatch.setattr(model_routes, 'HEALTH_CHECK_TIMEOUT_SECONDS', .01, raising=False)
+    monkeypatch.setattr(model_routes.AIAdapterFactory, 'get_model_config', lambda _: {'id': 'fixture'})
+    monkeypatch.setattr(model_routes.AIAdapterFactory, 'create', lambda _: SimpleNamespace(chat=blocked))
     with pytest.raises(HTTPException) as error:
-        await asyncio.wait_for(routes.test_model_config('fixture'), .5)
+        await asyncio.wait_for(model_routes.test_model_config('fixture'), .5)
     assert error.value.status_code == 400 and cancelled.is_set()
 
 
 @pytest.mark.asyncio
 async def test_manual_model_probe_does_not_echo_provider_secrets(monkeypatch):
     from fastapi import HTTPException
-    from app.api import routes
-    monkeypatch.setattr(routes.AIAdapterFactory, 'get_model_config', lambda _: {'id': 'fixture'})
-    monkeypatch.setattr(routes.AIAdapterFactory, 'create', lambda _: SimpleNamespace(
+    from app.api import model_routes
+    monkeypatch.setattr(model_routes.AIAdapterFactory, 'get_model_config', lambda _: {'id': 'fixture'})
+    monkeypatch.setattr(model_routes.AIAdapterFactory, 'create', lambda _: SimpleNamespace(
         chat=AsyncMock(side_effect=RuntimeError('private-key-in-provider-error'))))
     with pytest.raises(HTTPException) as error:
-        await routes.test_model_config('fixture')
+        await model_routes.test_model_config('fixture')
     assert error.value.status_code == 400 and 'RuntimeError' in error.value.detail
     assert 'private-key' not in error.value.detail
 

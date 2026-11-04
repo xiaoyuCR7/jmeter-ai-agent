@@ -55,7 +55,7 @@ flowchart LR
 | **服务端证据** | 内置主机（node_exporter）、JVM + HikariCP、MySQL 的 Prometheus 指标预设，按测试时间窗采集并缓存。 |
 | **可信的 AI 分析** | 事实表和数字校验。报告会对比同一计划的历史运行、不同负载和其它计划里的相同接口，自动验证之前的预测，并引用团队保存的经验。支持 DeepSeek、OpenAI、Claude、通义千问及任何 OpenAI 兼容接口。 |
 | **内置 MCP** | Streamable HTTP 端点，提供 `get_execution_evidence`、`extract_performance_requirements`、`promote_execution_to_baseline` 等证据工具；写操作需要在界面上确认。 |
-| **扎实的 JMeter 底座** | 流式 JTL 解析（精确分位数、内存不随样本数增长）、压测机繁忙时自动排队、WebSocket 实时进度、SelfHeal 修复失效的提取规则。 |
+| **扎实的 JMeter 底座** | 流式 JTL 解析（精确分位数、内存不随样本数增长）、压测机繁忙时自动排队、WebSocket 实时进度；单用户试跑会列出每个请求的响应，并给出经响应核对过的提取规则修改。 |
 | **默认私有** | 没有账号和登录；服务只允许监听本机回环地址，并校验 Host / Origin，防止浏览器里的其它网站调用本地接口。 |
 
 ## 界面截图

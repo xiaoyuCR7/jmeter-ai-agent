@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Optional
 from fastapi import HTTPException
 
-from app.core.config import settings
+from app.services.ai.memory.storage import MemoryDatabase
 from app.models.schemas import FactSheet, DetailedTestSummary
 from app.services.jmeter.report_parser import ReportParser
 from app.services.ai.memory.read_errors import ledger_read_boundary
@@ -23,51 +23,13 @@ from app.services.ai.memory.read_errors import ledger_read_boundary
 logger = logging.getLogger(__name__)
 
 
-class FactLedger:
+class FactLedger(MemoryDatabase):
     """Stores and retrieves deterministic FactSheets per execution."""
 
     SCHEMA_VERSION = "1.0"
 
-    def __init__(self, db_path: Optional[str] = None):
-        if db_path is None:
-            db_path = os.path.join(settings.BASE_DIR, "facts.db")
-        self.db_path = db_path
-        self._db_conn = None  # Persistent connection — initialized once, reused
-        # Lazy lock creation: creating asyncio.Lock at import time (no running loop)
-        # on Windows can cause hangs with aiosqlite. The lock is created on first use.
-        self._db_lock: Optional[asyncio.Lock] = None
-
-    def _get_lock(self) -> asyncio.Lock:
-        if self._db_lock is None:
-            self._db_lock = asyncio.Lock()
-        return self._db_lock
-
-    async def _get_db(self):
-        """Return persistent aiosqlite connection. Creates on first call, reuses thereafter."""
-        if self._db_conn is not None:
-            return self._db_conn
-        import aiosqlite
-        db = await aiosqlite.connect(self.db_path)
-        try:
-            await db.execute("PRAGMA journal_mode=WAL")
-            await db.execute("PRAGMA foreign_keys=ON")
-        except (Exception, asyncio.CancelledError):
-            try:
-                await db.close()
-            except Exception:
-                logger.warning('Failed to close uninitialized fact connection')
-            raise
-        self._db_conn = db
-        return db
-
-    async def close(self):
-        """Close the persistent database connection (safe to call multiple times)."""
-        if self._db_conn is not None:
-            try:
-                await self._db_conn.close()
-            except Exception:
-                pass
-            self._db_conn = None
+    TABLE = 'fact_sheets'
+    LEGACY_FILE = 'facts.db'
 
     async def _ensure_table(self):
         async with self._get_lock():
@@ -93,6 +55,7 @@ class FactLedger:
                 CREATE INDEX IF NOT EXISTS idx_facts_computed_at
                 ON fact_sheets(computed_at)
             """)
+            await self._adopt_legacy(db)
             await db.commit()
 
     @staticmethod

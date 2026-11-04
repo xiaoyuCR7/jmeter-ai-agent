@@ -18,5 +18,4 @@ aiosqlite==0.20.0
 passlib[bcrypt]==1.7.4
 PyJWT[crypto]==2.13.0
 python-multipart==0.0.31
-lancedb==0.34.0
 jsonschema==4.25.1

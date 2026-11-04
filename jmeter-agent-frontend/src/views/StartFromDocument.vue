@@ -17,7 +17,7 @@
     <ProgressStep v-else-if="stage === 1" :steps="workflowSteps" :running="workflowRunning" @back="resetWorkflow" />
     <ResultStep v-else :project-id="result!.projectId" :title="result!.title" :detail="result!.detail"
       :diagnostic="workflowResult?.diagnostic_summary" :draft-count="workflowResult?.requirements_draft?.items?.length"
-      :usage="workflowResult?.usage"
+      :usage="workflowResult?.usage" :plan-ids="workflowResult?.test_plan_ids"
       @review="reviewRequirements" @reset="resetWorkflow" />
   </div>
 </template>

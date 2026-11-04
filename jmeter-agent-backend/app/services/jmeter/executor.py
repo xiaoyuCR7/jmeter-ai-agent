@@ -120,30 +120,30 @@ class JMeterExecutor:
         
         raise FileNotFoundError(f"JMeter executable not found. Checked: {candidates}")
     
-    def _build_command(self, jmx_path: str, report_dir: str) -> tuple:
+    # A trial run records each response in an XML result; the HTML dashboard needs CSV, so it has none.
+    TRIAL_PROPERTIES = (
+        "-Jjmeter.save.saveservice.output_format=xml",
+        "-Jjmeter.save.saveservice.response_data=true",
+        "-Jjmeter.save.saveservice.url=true",
+        "-Jjmeter.save.saveservice.response_headers=true",
+    )
+
+    def _build_command(self, jmx_path: str, report_dir: str, trial: bool = False) -> tuple:
         """构建JMeter命令参数"""
         jtl_path = os.path.join(report_dir, "result.jtl")
         log_path = os.path.join(report_dir, "jmeter.log")
         html_report_dir = os.path.join(report_dir, "html")
-        
+
         os.makedirs(report_dir, exist_ok=True)
-        os.makedirs(html_report_dir, exist_ok=True)
-        
-        cmd = [
-            self.jmeter_path,
-            "-n",
-            "-t", jmx_path,
-            "-l", jtl_path,
-            "-j", log_path,
-            "-e",
-            "-o", html_report_dir,
-            # Save response body for failed requests — enables SelfHeal diagnosis
-            "-Jjmeter.save.saveservice.response_data_on_error=true",
-            "-Jjmeter.save.saveservice.assertion_results_failure_message=true",
-        ]
-        
+        cmd = [self.jmeter_path, "-n", "-t", jmx_path, "-l", jtl_path, "-j", log_path]
+        if trial:
+            cmd += self.TRIAL_PROPERTIES
+        else:
+            os.makedirs(html_report_dir, exist_ok=True)
+            cmd += ["-e", "-o", html_report_dir]
+        cmd.append("-Jjmeter.save.saveservice.assertion_results_failure_message=true")
         return cmd, jtl_path, log_path, html_report_dir
-    
+
     @staticmethod
     def validate_execution_id(execution_id: str):
         import re
@@ -156,7 +156,7 @@ class JMeterExecutor:
     async def execute(self, jmx_path: str, execution_id: str,
                       progress_callback: Optional[Callable[[int], None]] = None, *,
                       remote_engines: Optional[list[str]] = None,
-                      working_directory: Optional[str] = None) -> TestExecutionInfo:
+                      working_directory: Optional[str] = None, trial: bool = False) -> TestExecutionInfo:
         """Run one owned child process; queued and active work share cancellation."""
         self.validate_execution_id(execution_id)
         if any(entry.get('cleanup_failed') for entry in self._running_processes.values()):
@@ -176,7 +176,7 @@ class JMeterExecutor:
         flag_file = os.path.join(report_dir, '_done.flag')
         if os.path.exists(flag_file) or os.path.exists(os.path.join(report_dir, 'result.jtl')):
             raise ValueError('Execution output already exists; use a new execution ID')
-        cmd, jtl_path, log_path, _ = self._build_command(jmx_path, report_dir)
+        cmd, jtl_path, log_path, _ = self._build_command(jmx_path, report_dir, trial)
         if remote_engines:
             cmd += ['-R', ','.join(remote_engines)]
         info = TestExecutionInfo(id=execution_id, test_plan_id='', status=TestExecutionStatus.PENDING,

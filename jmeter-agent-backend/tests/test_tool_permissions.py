@@ -53,41 +53,9 @@ def test_general_tool_paths_cannot_read_backend_configuration(tmp_path, monkeypa
         safe_path(str(tmp_path / 'ai_models_config.json'))
 
 
-@pytest.mark.asyncio
-async def test_file_mutations_cannot_change_execution_evidence(tmp_path, monkeypatch):
-    from app.core.config import settings
-    from app.services.ai.agent.tools import file
-    reports = tmp_path / 'reports'; reports.mkdir()
-    plan = tmp_path / 'plans'; plan.mkdir()
-    monkeypatch.setattr(settings, 'REPORTS_DIR_DEFAULT', str(reports))
-    monkeypatch.setattr(settings, 'TEST_PLANS_DIR_DEFAULT', str(plan))
-    # Exercise both old static-root and new dynamic-root implementations.
-    monkeypatch.setattr(file, '_ALLOWED_ROOTS', {str(reports), str(plan)}, raising=False)
-    snapshot = reports / 'snapshot.jmx'; snapshot.write_text('original')
-    assert 'error' in await file.write_file(str(snapshot), 'changed')
-    assert 'error' in await file.delete_file(str(snapshot))
-    assert snapshot.read_text() == 'original'
-    assert (await file.write_file(str(plan / 'editable.jmx'), 'valid'))['written']
-
-
-def test_file_path_resolves_links_before_checking_root(tmp_path, monkeypatch):
-    from app.services.ai.agent.tools import file
-    from app.core.config import settings
-    root = tmp_path / 'plans'; root.mkdir()
-    secret = tmp_path / 'outside.txt'; secret.write_text('do-not-read')
-    monkeypatch.setattr(settings, 'TEST_PLANS_DIR_DEFAULT', str(root))
-    monkeypatch.setattr(file, '_ALLOWED_ROOTS', {str(root)}, raising=False)
-    # Simulate an OS-resolved link, without requiring Windows symlink privileges.
-    realpath = file.os.path.realpath
-    monkeypatch.setattr(file.os.path, 'realpath', lambda path: str(secret) if str(path) == str(root / 'link') else realpath(path))
-    with pytest.raises(ValueError, match='Access denied'):
-        file._resolve_path(str(root / 'link'))
-
-
 def test_composite_execution_tools_require_confirmation():
     from app.services.ai.agent.tools.resource import resource_tools
     tools = {tool.name: tool for tool in resource_tools}
-    assert tools['selfheal_test'].require_confirmation
     assert tools['import_openapi_spec'].require_confirmation
 
 
@@ -98,32 +66,11 @@ async def test_analysis_paths_are_checked_before_parser_access(tmp_path, monkeyp
     from unittest.mock import Mock
     parser = Mock(side_effect=AssertionError('must not open untrusted path'))
     monkeypatch.setattr(ReportParser, 'parse_jtl', parser)
-    result = await resource.evaluate_sla(str(tmp_path / 'outside.jtl'))
+    result = await resource.compare_runs(str(tmp_path / 'outside.jtl'), str(tmp_path / 'other.jtl'))
     assert 'Access denied' in result['error']
     parser.assert_not_called()
     with pytest.raises(ValueError):
         await resource.detect_anomalies('../outside')
-
-
-@pytest.mark.asyncio
-async def test_resource_wait_rejects_unbounded_or_busy_loop_parameters():
-    from app.services.ai.agent.tools import resource
-    with pytest.raises(ValueError):
-        await resource.start_resource_monitoring(0)
-    with pytest.raises(ValueError):
-        await resource.wait_for_resources(float('inf'))
-
-
-@pytest.mark.asyncio
-async def test_file_read_bounds_single_long_line_and_rejects_zero_limit(tmp_path, monkeypatch):
-    from app.core.config import settings
-    from app.services.ai.agent.tools import file
-    monkeypatch.setattr(settings, 'TEST_PLANS_DIR_DEFAULT', str(tmp_path))
-    path = tmp_path / 'large.txt'; path.write_text('a' * 100000)
-    result = await file.read_file(str(path))
-    assert result['truncated']
-    assert len(result['content']) <= 65536
-    assert 'error' in await file.read_file(str(path), max_lines=0)
 
 
 @pytest.mark.asyncio
@@ -157,11 +104,10 @@ def test_every_built_in_tool_has_a_deliberate_risk():
     for tool in get_all_builtin_tools():
         levels.setdefault(tool.risk, set()).add(tool.name)
     assert 'get_execution_status' in levels['read']
-    assert levels['execute'] == {'execute_test', 'execute_distributed', 'import_openapi_spec', 'selfheal_test'}
-    assert levels['write'] == {'update_jmx', 'update_project_env', 'cancel_execution', 'write_file', 'delete_file',
+    assert levels['execute'] == {'execute_test', 'execute_distributed', 'import_openapi_spec'}
+    assert levels['write'] == {'update_jmx', 'update_project_env', 'cancel_execution',
                                'save_performance_requirements', 'promote_execution_to_baseline'}
-    assert levels['draft'] == {'create_jmx', 'clone_jmx', 'import_jmx', 'create_project',
-                               'start_resource_monitoring', 'stop_resource_monitoring'}
+    assert levels['draft'] == {'create_jmx', 'import_jmx', 'create_project'}
     assert all(tool.require_confirmation == (tool.risk in ('write', 'execute')) for tool in get_all_builtin_tools())
 
 
@@ -186,9 +132,9 @@ async def test_mcp_clients_are_told_each_tools_risk():
     server.register_all_agent_tools()
     response = await server.handle_request(json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/list'}))
     hints = {tool['name']: tool['annotations'] for tool in response['result']['tools']}
-    assert hints['read_file'] == {'readOnlyHint': True, 'destructiveHint': False}
+    assert hints['get_execution_evidence'] == {'readOnlyHint': True, 'destructiveHint': False}
     assert hints['create_jmx'] == {'readOnlyHint': False, 'destructiveHint': False}
-    assert hints['delete_file'] == {'readOnlyHint': False, 'destructiveHint': True}
+    assert hints['update_jmx'] == {'readOnlyHint': False, 'destructiveHint': True}
 
 
 @pytest.mark.asyncio
@@ -212,16 +158,13 @@ async def test_confirmations_show_who_is_asking_and_for_which_project(source, mo
 
 
 @pytest.mark.asyncio
-async def test_selfheal_rerun_asks_for_approval_instead_of_failing(monkeypatch):
+async def test_a_plan_with_scripts_asks_for_approval_instead_of_failing(monkeypatch):
     from app.services.ai.agent.tools import jmeter
-    from app.services.ai.agents import selfheal_agent
     from app.services.jmeter.script_risk import ScriptApprovalRequired
-    import inspect
-    assert 'execute_with_script_approval' in inspect.getsource(selfheal_agent)
     finding = [{'name': 'Shell', 'kind': 'SystemSampler'}]
     execute = AsyncMock(side_effect=[ScriptApprovalRequired(finding, 'digest'), 'finished'])
     monkeypatch.setattr(jmeter.execution_lifecycle, 'execute', execute)
     from app.services.confirmations import confirmations
     monkeypatch.setattr(confirmations, 'request', AsyncMock(return_value=True))
-    assert await jmeter.execute_with_script_approval('selfheal_test', 'a.jmx', 'run') == 'finished'
+    assert await jmeter.execute_with_script_approval('execute_test', 'a.jmx', 'run') == 'finished'
     assert execute.await_args.kwargs['approved_sha256'] == 'digest'

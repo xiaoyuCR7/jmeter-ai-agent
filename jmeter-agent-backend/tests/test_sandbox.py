@@ -129,19 +129,19 @@ async def test_agent_runs_scripts_only_after_a_second_explicit_approval(monkeypa
 @pytest.mark.asyncio
 async def test_web_run_returns_the_scripts_for_the_ui_to_confirm(monkeypatch):
     from fastapi import HTTPException
-    from app.api import routes
+    from app.api import execution_routes
     finding = [{'name': 'Parse token', 'kind': 'JSR223PostProcessor'}]
     plan = SimpleNamespace(jmx_path='plan.jmx', test_config=SimpleNamespace(model_dump=lambda: {}))
-    monkeypatch.setitem(routes.store.test_plans, 'scripted', plan)
+    monkeypatch.setitem(execution_routes.store.test_plans, 'scripted', plan)
     submit = AsyncMock(side_effect=script_risk.ScriptApprovalRequired(finding, 'digest'))
-    monkeypatch.setattr(routes.execution_lifecycle, 'submit', submit)
+    monkeypatch.setattr(execution_routes.execution_lifecycle, 'submit', submit)
     with pytest.raises(HTTPException) as refused:
-        await routes.execute_test_plan('scripted', None, None, None)
+        await execution_routes.execute_test_plan('scripted', None, None, None)
     assert refused.value.status_code == 409
     assert refused.value.detail['code'] == 'scripts_need_approval' and refused.value.detail['findings'] == finding
     submit.side_effect = None
     submit.return_value = 'started'
-    assert await routes.execute_test_plan('scripted', None, None, 'digest') == 'started'
+    assert await execution_routes.execute_test_plan('scripted', None, None, 'digest') == 'started'
     assert submit.await_args.kwargs['approved_sha256'] == 'digest'
 
 

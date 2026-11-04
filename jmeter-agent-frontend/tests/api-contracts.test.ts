@@ -21,12 +21,10 @@ it('OpenAPI import sends the actual route/body contract', async () => {
   expect(instance.post).toHaveBeenLastCalledWith('/openapi/import', { url: 'https://fixture.invalid/spec.json', execute: true })
 })
 
-it('run questions and re-analysis go to their own routes', () => {
+it('re-analysis goes to its own route', () => {
   const source = readFileSync(new URL('../src/api/index.ts', import.meta.url), 'utf8')
   const instance = { post: vi.fn() }
   const { api } = selected(source, ['api'], { instance })
-  api.askAboutRun('run/1', 'why?')
-  expect(instance.post).toHaveBeenLastCalledWith('/executions/run%2F1/questions', { question: 'why?' }, { timeout: 300000 })
   api.reanalyzeRun('run/1')
   expect(instance.post).toHaveBeenLastCalledWith('/executions/run%2F1/analysis')
 })
@@ -47,7 +45,7 @@ it('memory calls name the run, lesson or hypothesis they change', () => {
 })
 
 it('CSV preview maps the response columns and row arrays to table objects', async () => {
-  const source = readFileSync(new URL('../src/views/TestCaseEditor.vue', import.meta.url), 'utf8').match(/<script setup lang="ts">([\s\S]*?)<\/script>/)![1]
+  const source = readFileSync(new URL('../src/components/editor/CsvDatasetPanel.vue', import.meta.url), 'utf8').match(/<script setup lang="ts">([\s\S]*?)<\/script>/)![1]
   const context = { api: { previewCSV: vi.fn().mockResolvedValue({ data: { columns: ['name', 'age'], rows: [['Alice', '3']] } }) },
     csvDatasetConfig: { filePath: 'fixture.csv' }, csvPreviewColumns: { value: [] }, csvPreviewData: { value: [] },
     ElMessage: { error: vi.fn() }, t: (s: string) => s }
