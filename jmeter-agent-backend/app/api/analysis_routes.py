@@ -39,10 +39,3 @@ async def detect_anomalies(execution_id: str):
         raise HTTPException(409, 'Execution has no timeline for anomaly analysis')
     return _json_safe(ml_detector.analyze_timeline(execution.summary.timeline_segments).model_dump())
 
-
-@router.post('/analysis/correlate')
-async def correlate_metrics(execution_id: str, prometheus_url: str = None, promql: str = None):
-    _execution(execution_id)
-    # No approved outbound-URL policy exists for this adapter yet. An explicit
-    # unsupported response is safer than an unrestricted server-side fetch.
-    raise HTTPException(501, 'Remote metric correlation is not configured; use collected local metrics')

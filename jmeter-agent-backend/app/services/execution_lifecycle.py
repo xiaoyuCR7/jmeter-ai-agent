@@ -26,6 +26,7 @@ from app.services.jmeter.executor import get_executor
 from app.services.jmeter import environment as environment_for_run, jmx_lint
 from app.services.jmeter.environment import ProductionRunNeedsConfirmation
 from app.services.jmeter.script_risk import ScriptApprovalRequired, content_hash, scan as scan_scripts
+from app.services.jmeter import run_guard
 
 logger = logging.getLogger(__name__)
 ENVIRONMENT_FILE = 'environment.json'  # Which environment a run used, next to its results.
@@ -127,6 +128,7 @@ class ExecutionLifecycle:
         self._listeners = {event: [] for event in EVENTS}
         self._finished = set()
         self._post_run = None
+        self._guard_reasons = {}  # execution_id -> why the run guard stopped it
 
     def on(self, event, handler):
         """Call ``await handler(execution)`` on ``event`` for every run, whatever started it.
@@ -259,8 +261,13 @@ class ExecutionLifecycle:
             ))
 
     async def prepare(self, jmx_path, execution_id='', *, test_plan_id=None,
-                      project_id='default', test_config=None, approved_sha256=None, confirm_production=False):
-        """``approved_sha256`` is the user's approval to run these exact bytes on this machine."""
+                      project_id='default', test_config=None, approved_sha256=None, confirm_production=False,
+                      threads=None, purpose=None):
+        """``approved_sha256`` is the user's approval to run these exact bytes on this machine.
+
+        ``threads`` runs the plan scaled to that many users (the plan file is not changed);
+        ``purpose`` records why the run was started, such as a verification or a capacity step.
+        """
         if self._closed:
             raise RuntimeError('Execution lifecycle is shutting down')
         execution_id = validate_id(execution_id or uuid.uuid4().hex)
@@ -272,6 +279,10 @@ class ExecutionLifecycle:
             findings = scan_scripts(content, str(path.parent))
             if findings:
                 raise ScriptApprovalRequired(findings, digest)
+        if threads is not None:
+            from app.services.jmeter.load_variants import scale_threads
+            # Only thread counts change, so the approval of the plan's scripts still holds.
+            content = await asyncio.to_thread(scale_threads, content, threads)
         if store.get_execution(execution_id) or await db_store.get_execution(execution_id):
             raise ValueError(f'Execution ID already exists: {execution_id}')
         if test_plan_id:
@@ -322,6 +333,10 @@ class ExecutionLifecycle:
             'environment_fingerprint': fingerprint,
             'test_config': plan.test_config.model_dump(mode='json'),
         }
+        if threads is not None:
+            context_snapshot['test_config']['concurrent_users'] = threads
+        if purpose:
+            context_snapshot['purpose'] = purpose
         execution = TestExecutionInfo(
             id=execution_id, project_id=plan.project_id, test_plan_id=plan.id,
             status=TestExecutionStatus.PENDING, jmx_path=str(snapshot),
@@ -369,11 +384,17 @@ class ExecutionLifecycle:
                     progress_callback(pct)
             executor = executor or get_executor()
             self._executors[execution_id] = executor
-            result = await executor.execute(
-                execution.jmx_path, execution_id, progress_callback=progress,
-                remote_engines=remote_engines,
-                working_directory=str(Path(execution.source_jmx_path).parent),
-            )
+            guard = asyncio.create_task(run_guard.watch(
+                str(Path(execution.report_dir) / 'result.jtl'), lambda reason: self._guard_stop(execution_id, reason)))
+            try:
+                result = await executor.execute(
+                    execution.jmx_path, execution_id, progress_callback=progress,
+                    remote_engines=remote_engines,
+                    working_directory=str(Path(execution.source_jmx_path).parent),
+                )
+            finally:
+                guard.cancel()
+                await asyncio.gather(guard, return_exceptions=True)
             # JMeter has read the plan; its copy need not hold the environment's secrets any longer.
             await asyncio.to_thread(environment_for_run.scrub, execution.jmx_path)
             for field in ('status', 'end_time', 'error_message', 'resource_snapshot_pre', 'resource_snapshot_post'):
@@ -438,6 +459,8 @@ class ExecutionLifecycle:
             await persist_execution(execution)
             return execution
         except asyncio.CancelledError:
+            if execution_id in self._guard_reasons:
+                execution.error_message = self._guard_reasons.pop(execution_id)
             executor = self._executors.get(execution_id)
             still_owned = executor and execution_id in getattr(executor, '_running_processes', {})
             if still_owned:
@@ -469,12 +492,21 @@ class ExecutionLifecycle:
             if executor and execution_id not in getattr(executor, '_running_processes', {}):
                 self._executors.pop(execution_id, None)
 
+    async def _guard_stop(self, execution_id, reason):
+        """The run guard's stop: a cancel that remembers why, so the run says it."""
+        self._guard_reasons[execution_id] = reason
+        executor = self._executors.get(execution_id)
+        if executor and execution_id in getattr(executor, '_running_processes', {}):
+            # Ends JMeter and the task waiting for it; run() records the reason as it unwinds.
+            await executor.cancel(execution_id)
+
     async def execute(self, jmx_path, execution_id='', *, test_plan_id=None,
                       project_id='default', test_config=None, approved_sha256=None,
-                      confirm_production=False, **kwargs):
+                      confirm_production=False, threads=None, purpose=None, **kwargs):
         execution = await self.prepare(jmx_path, execution_id, test_plan_id=test_plan_id,
                                        project_id=project_id, test_config=test_config,
-                                       approved_sha256=approved_sha256, confirm_production=confirm_production)
+                                       approved_sha256=approved_sha256, confirm_production=confirm_production,
+                                       threads=threads, purpose=purpose)
         return await self._run_prepared(execution, **kwargs)
 
     async def _run_prepared(self, execution, **kwargs):
@@ -500,10 +532,16 @@ class ExecutionLifecycle:
 
     async def submit(self, jmx_path, execution_id='', *, test_plan_id=None,
                      project_id='default', test_config=None, approved_sha256=None,
-                     confirm_production=False, **kwargs):
+                     confirm_production=False, threads=None, purpose=None, **kwargs):
         execution = await self.prepare(jmx_path, execution_id, test_plan_id=test_plan_id,
                                        project_id=project_id, test_config=test_config,
-                                       approved_sha256=approved_sha256, confirm_production=confirm_production)
+                                       approved_sha256=approved_sha256, confirm_production=confirm_production,
+                                       threads=threads, purpose=purpose)
+        self.submit_prepared(execution, **kwargs)
+        return execution
+
+    def submit_prepared(self, execution, **kwargs):
+        """Run a prepared execution in its own task, so cancelling the run never cancels the caller."""
         task = asyncio.create_task(self._run_prepared(execution, **kwargs))
         self._tasks[execution.id] = task
         def finished(done):
@@ -512,7 +550,14 @@ class ExecutionLifecycle:
             if not done.cancelled() and done.exception():
                 logger.error('Execution task %s failed: %s', execution.id, done.exception())
         task.add_done_callback(finished)
-        return execution
+        return task
+
+    async def wait(self, execution_id):
+        """The run once it has ended, however it ended; for callers that started it with ``submit``."""
+        task = self._tasks.get(execution_id)
+        if task is not None and task is not asyncio.current_task():
+            await asyncio.gather(task, return_exceptions=True)
+        return store.get_execution(execution_id)
 
     async def cancel(self, execution_id):
         validate_id(execution_id)

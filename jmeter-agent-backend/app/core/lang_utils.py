@@ -91,3 +91,28 @@ def localize_prompt(prompt: str, lang: str) -> str:
     Returns the prompt with language instructions appended.
     """
     return prompt + get_lang_system_prompt(lang)
+
+
+def normalize_lang(value) -> "str | None":
+    """'en' or 'zh-CN' for the spellings people use, None for anything else."""
+    if not isinstance(value, str):
+        return None
+    lowered = value.strip().lower()
+    if lowered in ("en", "en-us", "en-gb", "english"):
+        return "en"
+    if lowered in ("zh-cn", "zh", "cn", "chinese"):
+        return "zh-CN"
+    return None
+
+
+def report_lang(value=None) -> str:
+    """The language a report is written in: the one asked for, else REPORT_LANGUAGE, else the default."""
+    from app.core.config import settings
+    return (normalize_lang(value) or normalize_lang(settings.REPORT_LANGUAGE)
+            or normalize_lang(settings.I18N_DEFAULT_LANG) or "zh-CN")
+
+
+def language_instruction(lang: str) -> str:
+    """The line that tells a model which language to write in."""
+    return ("Write every sentence of your answer in English, whatever language the data is in."
+            if lang == "en" else "用中文写回答。")

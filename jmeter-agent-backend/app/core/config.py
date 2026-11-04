@@ -77,6 +77,13 @@ class Settings(BaseSettings):
 
     # JMeter
     JMETER_TIMEOUT: int = 3600  # seconds
+    # Run guard: stop a run whose recent requests nearly all fail (see services/jmeter/run_guard.py)
+    RUN_GUARD_ENABLED: bool = True
+    RUN_GUARD_ERROR_RATE: float = 90.0           # % of failed requests in the window
+    RUN_GUARD_WINDOW_SECONDS: float = 30.0
+    RUN_GUARD_MIN_SAMPLES: int = 50              # fewer requests than this in the window say nothing
+    RUN_GUARD_GRACE_SECONDS: float = 30.0        # from the first sample; warm-up errors are common
+    REPORT_LANGUAGE: str = ""  # zh-CN or en for reports written after a run; empty follows I18N_DEFAULT_LANG
     AUTO_ANALYSIS_ENABLED: bool = True  # Off to spare model calls on batches; facts are recorded either way
     JMETER_MAX_OUTPUT_MB: int = 10240  # stop a run whose report directory grows past this; 0 = no limit
 

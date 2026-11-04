@@ -3,6 +3,8 @@
 A request makes its own agent. ``run`` returns the result; ``stream`` yields the run's events as they
 happen and ends with a "done" event. At most AGENT_MAX_CONCURRENT model tasks run at once, whether
 agents, the document workflow or report analyses: each holds an ``agent_slot`` while it works.
+Background work (reports written after runs) never holds the last slot, so a batch of finished runs
+cannot keep a person's question or document waiting.
 """
 
 import asyncio
@@ -31,6 +33,7 @@ MAX_RETRIES = 2
 SLOT_WAIT_SECONDS = 120
 
 _semaphore: Optional[asyncio.Semaphore] = None
+_background: Optional[asyncio.Semaphore] = None
 
 
 class NoFreeSlot(RuntimeError):
@@ -42,22 +45,38 @@ def slots_busy() -> bool:
 
 
 @asynccontextmanager
-async def agent_slot(wait_seconds: Optional[float] = SLOT_WAIT_SECONDS):
-    """Hold one of the AGENT_MAX_CONCURRENT slots; ``wait_seconds=None`` waits as long as it takes."""
-    global _semaphore
+async def agent_slot(wait_seconds: Optional[float] = SLOT_WAIT_SECONDS, *, background: bool = False):
+    """Hold one of the AGENT_MAX_CONCURRENT slots; ``wait_seconds=None`` waits as long as it takes.
+
+    ``background`` work first takes one of AGENT_MAX_CONCURRENT - 1 background places (at least one).
+    """
+    global _semaphore, _background
     if _semaphore is None:
         _semaphore = asyncio.Semaphore(settings.AGENT_MAX_CONCURRENT)
-    semaphore = _semaphore
+    if _background is None:
+        _background = asyncio.Semaphore(max(1, settings.AGENT_MAX_CONCURRENT - 1))
+    semaphore, gate = _semaphore, (_background if background else None)
+    held = []
     try:
         async with asyncio.timeout(wait_seconds):
-            await semaphore.acquire()
+            for lock in (gate, semaphore):
+                if lock is not None:
+                    await lock.acquire()
+                    held.append(lock)
     except TimeoutError:
+        for lock in held:
+            lock.release()
         raise NoFreeSlot(f'{settings.AGENT_MAX_CONCURRENT} AI tasks are already running and none '
                          'finished within 2 minutes; try again when one is done') from None
+    except BaseException:
+        for lock in held:
+            lock.release()
+        raise
     try:
         yield
     finally:
-        semaphore.release()
+        for lock in reversed(held):
+            lock.release()
 
 
 STEP_PROMPT = ("Complete the task above. Tool calls and results already in this conversation are done: "

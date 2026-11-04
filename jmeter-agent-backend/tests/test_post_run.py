@@ -34,7 +34,7 @@ def completed(tmp_path, **overrides):
 def steps(monkeypatch):
     """Records which post-run steps ran."""
     ran = []
-    async def analyze(execution, ai_model):
+    async def analyze(execution, ai_model, lang=None):
         ran.append(('analysis', ai_model))
     async def record(execution):
         ran.append('facts')
@@ -253,7 +253,7 @@ def stored_run(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_an_analysis_can_be_written_again(stored_run, monkeypatch):
-    async def analyze(execution, ai_model):
+    async def analyze(execution, ai_model, lang=None):
         execution.ai_analysis = ReportAnalysis(overall_assessment=f'by {ai_model}', conclusion='done')
     monkeypatch.setattr(post_run, '_write_analysis', analyze)
     started = await post_run.start_reanalysis('run', 'model-b')

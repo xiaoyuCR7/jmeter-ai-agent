@@ -53,7 +53,10 @@ flowchart LR
 | **从文档开始** | 一个向导接收需求 / 接口文档或 OpenAPI 地址，生成项目、测试计划和需求草稿。 |
 | **稳定的基线** | 在报告上一键「设为基线」；基线保存指标快照，删掉旧执行也不影响对比。 |
 | **服务端证据** | 内置主机（node_exporter）、JVM + HikariCP、MySQL 的 Prometheus 指标预设，按测试时间窗采集并缓存。 |
-| **可信的 AI 分析** | 事实表和数字校验。报告会对比同一计划的历史运行、不同负载和其它计划里的相同接口，自动验证之前的预测，并引用团队保存的经验。支持 DeepSeek、OpenAI、Claude、通义千问及任何 OpenAI 兼容接口。 |
+| **可信的 AI 分析** | 事实表和数字校验：每个数字按它说的是哪个接口、还是整体去核对，中英文报告都会核对。报告会对比同一计划的历史运行、不同负载和其它计划里的相同接口，自动验证之前的预测，并引用团队保存的经验。报告语言跟随界面，也可以用 `REPORT_LANGUAGE` 固定。 |
+| **主流模型都能用** | 内置 25 家服务商预设：OpenAI、Claude、Gemini、Azure OpenAI、xAI Grok、Mistral、Cohere、Groq、OpenRouter、Together，DeepSeek、通义千问、Kimi、智谱 GLM、豆包、文心、混元、MiniMax、阶跃星辰、硅基流动，以及本地的 Ollama、LM Studio、vLLM 和任意 OpenAI / Anthropic 兼容接口。推理模型要求的参数差异由程序自动适配。 |
+| **验证与容量探索** | 报告里能被程序验证的假设可以一键「运行验证」，程序会按预测里写的负载重跑，跑完自动判定。「容量探索」从起始线程数开始逐级加压，在第一个需求不达标、错误率超限或吞吐量不再增长的负载处停下，给出这个计划能承受的负载。 |
+| **运行守护与 CI 门禁** | 运行中最近 30 秒的请求几乎全部失败时，程序自动停止这次运行并写明原因。`scripts/ci_gate.py` 运行计划并按门禁结果返回退出码：需求不达标或相对基线退化时失败。 |
 | **内置 MCP** | Streamable HTTP 端点，提供 `get_execution_evidence`、`extract_performance_requirements`、`promote_execution_to_baseline` 等证据工具；写操作需要在界面上确认。 |
 | **扎实的 JMeter 底座** | 流式 JTL 解析（精确分位数、内存不随样本数增长）、压测机繁忙时自动排队、WebSocket 实时进度；单用户试跑会列出每个请求的响应，并给出经响应核对过的提取规则修改。 |
 | **默认私有** | 没有账号和登录；服务只允许监听本机回环地址，并校验 Host / Origin，防止浏览器里的其它网站调用本地接口。 |
@@ -106,8 +109,8 @@ cd jmeter-agent-backend && pip install -r requirements.txt && python -m app.main
 cd jmeter-agent-frontend && npm install && npm run dev                             # 打开后端打印的链接
 ```
 
-**3. 添加模型**：在「设置 → AI 模型配置」里选择 DeepSeek、通义千问、OpenAI、Claude 或任意 OpenAI 兼容接口，填入 API Key。
-「上下文窗口」留空即可，保存时会向服务商查询这个模型的真实大小（DeepSeek 和 Claude 的接口会返回，其余按官方公布值）。
+**3. 添加模型**：在「设置 → AI 模型配置」里选择服务商（国内、海外、本地三组共 25 家），填入 API Key。Ollama、LM Studio 等本机服务不需要 Key；Azure OpenAI 需要填资源地址和 API 版本，模型名填部署名。
+「上下文窗口」留空即可，保存时会向服务商查询这个模型的真实大小，查不到时用官方公布值。
 然后点左上角「从文档开始」。
 
 接口文档地址：http://127.0.0.1:8000/api/docs
@@ -122,6 +125,16 @@ claude mcp add --transport http jmeter-agent http://127.0.0.1:8000/api/v1/mcp --
 
 通过 MCP 调用时，`execute_test` 和 `execute_distributed` 在执行启动后立即返回，客户端的请求超时不会中止压测，结果用 `get_execution_status` 查询。
 会修改或运行内容的工具最多等待两分钟，由你在 JMeter Agent 窗口里批准，请保持窗口打开。客户端在此之前取消或断开，这次请求和待确认项都会撤销。
+
+## 接入 CI
+
+在运行 JMeter Agent 的机器上（自托管 runner）执行：
+
+```bash
+python jmeter-agent-backend/scripts/ci_gate.py --plan <测试计划ID>
+```
+
+脚本会启动这个计划，轮询 `GET /api/v1/executions/{id}/gate`，然后按结果退出：需求和基线都通过时退出码为 `0`；需求不达标或相对基线退化时为 `1`；运行没有完成或等待超时为 `2`。令牌按 `--token`、环境变量 `JMETER_AGENT_TOKEN`、`.local_access_token` 文件的顺序读取。如果计划里含脚本，第一次会被拒绝，并打印出需要批准的 `sha256`，确认可信后用 `--approved-sha256` 传入。
 
 ## 配置
 
@@ -139,6 +152,11 @@ claude mcp add --transport http jmeter-agent http://127.0.0.1:8000/api/v1/mcp --
 | `RESOURCE_CPU_THRESHOLD` / `RESOURCE_MEMORY_THRESHOLD` | 压测机占用超过该比例（%）时新执行排队 | `80` / `85` |
 | `DEFAULT_AI_MODEL` | 请求没有指定模型时使用的模型 ID | 第一个启用的模型 |
 | `AGENT_CONTEXT_TOKEN_BUDGET` | 上下文窗口未知的模型使用的 token 预算 | `16384` |
+| `AGENT_MAX_CONCURRENT` | 同时运行的 AI 任务数；运行后自动写报告最多占用其中 N-1 个，给追问留一个 | `3` |
+| `REPORT_LANGUAGE` | 运行后自动写报告用的语言，`zh-CN` 或 `en`；留空则用 `I18N_DEFAULT_LANG`。手动重写报告和追问跟随页面语言 | 空 |
+| `RUN_GUARD_ENABLED` | 运行守护：最近的请求几乎全部失败时停止运行 | `true` |
+| `RUN_GUARD_ERROR_RATE` / `RUN_GUARD_WINDOW_SECONDS` | 触发停止的错误率（%）和统计窗口（秒）；连续两次检查超限才停止 | `90` / `30` |
+| `RUN_GUARD_MIN_SAMPLES` / `RUN_GUARD_GRACE_SECONDS` | 窗口内少于这么多请求不判断；运行开始后的这段时间不判断 | `50` / `30` |
 
 模型的 API Key 不从 `.env` 读取，请在界面里添加。它们保存在 `jmeter-agent-backend/ai_models_config.json`，这个文件已被 git 忽略。
 
@@ -247,6 +265,8 @@ jmeter-ai-agent/
 </details>
 
 ## 开发
+
+代码如何分工、AI 在哪里起作用：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
 ```bash
 cd jmeter-agent-backend && pip install -r requirements-dev.txt && pytest tests

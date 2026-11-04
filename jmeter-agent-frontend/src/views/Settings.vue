@@ -174,9 +174,14 @@
         label-position="right"
       >
         <el-form-item :label="t('settings.form.provider')">
-          <el-select v-model="form.provider" @change="onProviderChange">
-            <el-option v-for="p in PROVIDERS" :key="p.key" :value="p.key" :label="p.label || t('settings.form.providerCustom')" />
+          <el-select v-model="form.provider" filterable @change="onProviderChange">
+            <el-option-group v-for="group in providerGroups" :key="group.key" :label="t(`settings.providerGroup.${group.key}`)">
+              <el-option v-for="p in group.providers" :key="p.key" :value="p.key" :label="providerLabel(p)" />
+            </el-option-group>
           </el-select>
+          <div v-if="currentProvider.docs" class="form-tip">
+            <a :href="currentProvider.docs" target="_blank" rel="noopener noreferrer">{{ t('settings.form.providerDocs') }}</a>
+          </div>
         </el-form-item>
 
         <el-form-item :label="t('settings.form.model')" prop="model">
@@ -189,11 +194,16 @@
           >
             <el-option v-for="m in currentProvider.models" :key="m" :label="m" :value="m" />
           </el-select>
+          <div v-if="providerNote" class="form-tip">{{ providerNote }}</div>
         </el-form-item>
 
-        <el-form-item v-if="form.provider === 'custom'" :label="t('settings.form.apiBase')" prop="api_base">
-          <el-input v-model="form.api_base" placeholder="https://api.xxx.com/v1" />
-          <div class="form-tip">{{ t('settings.form.apiBaseCustomTip') }}</div>
+        <el-form-item v-if="currentProvider.base_editable" :label="t('settings.form.apiBase')" prop="api_base">
+          <el-input v-model="form.api_base" :placeholder="currentProvider.api_base || 'https://api.xxx.com/v1'" />
+          <div class="form-tip">{{ t(currentProvider.adapter_type === 'anthropic' ? 'settings.form.apiBaseAnthropicTip' : 'settings.form.apiBaseCustomTip') }}</div>
+        </el-form-item>
+
+        <el-form-item v-if="currentProvider.adapter_type === 'azure_openai'" :label="t('settings.form.apiVersion')">
+          <el-input v-model="form.api_version" :placeholder="currentProvider.api_version || ''" />
         </el-form-item>
 
         <el-form-item :label="t('settings.form.apiKey')" prop="api_key">
@@ -201,7 +211,7 @@
             v-model="form.api_key"
             type="password"
             show-password
-            :placeholder="isEdit ? t('settings.form.apiKeyKeep') : t('settings.form.apiKeyPlaceholder')"
+            :placeholder="isEdit ? t('settings.form.apiKeyKeep') : t(keyRequired ? 'settings.form.apiKeyPlaceholder' : 'settings.form.apiKeyOptional')"
           />
         </el-form-item>
 
@@ -289,19 +299,34 @@ const pathsForm = reactive({
   reports_dir: ''
 })
 
-// 服务商预设：选中后自动带出 API 地址和适配器，无需手填。
-// 模型名按各家 2026-10-25 的官方文档；列表外的名字也可以直接输入。
-const PROVIDERS = [
-  { key: 'deepseek', label: 'DeepSeek', api_base: 'https://api.deepseek.com/v1', adapter_type: 'openai_compatible',
-    models: ['deepseek-flash', 'deepseek-v4-pro'] },
-  { key: 'qwen', label: 'Qwen 通义千问', api_base: 'https://dashscope.aliyuncs.com/compatible-mode/v1', adapter_type: 'openai_compatible',
-    models: ['qwen-plus', 'qwen-flash', 'qwen-max'] },
-  { key: 'openai', label: 'OpenAI', api_base: 'https://api.openai.com/v1', adapter_type: 'openai_compatible',
-    models: ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-luna'] },
-  { key: 'anthropic', label: 'Claude', api_base: '', adapter_type: 'anthropic',
-    models: ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-1'] },
-  { key: 'custom', label: '', api_base: '', adapter_type: 'openai_compatible', models: [] as string[] }
-]
+// 服务商预设由后端提供（/ai/providers）：选中后自动带出 API 地址和适配器，列表外的模型名也可以直接输入。
+interface Provider {
+  key: string
+  label: string
+  label_en: string
+  group: string
+  api_base: string
+  adapter_type: string
+  models: string[]
+  key_required: boolean
+  base_editable: boolean
+  api_version: string | null
+  docs: string
+  note: string
+  note_en: string
+}
+const CUSTOM: Provider = {
+  key: 'custom', label: '其它 OpenAI 兼容接口', label_en: 'Other OpenAI-compatible API', group: 'custom', api_base: '',
+  adapter_type: 'openai_compatible', models: [], key_required: true, base_editable: true, api_version: null,
+  docs: '', note: '', note_en: ''
+}
+const providers = ref<Provider[]>([CUSTOM])
+const GROUPS = ['china', 'global', 'local', 'custom']
+const providerGroups = computed(() => GROUPS
+  .map(key => ({ key, providers: providers.value.filter(p => p.group === key) }))
+  .filter(group => group.providers.length))
+const isEn = computed(() => appStore.currentLang === 'en')
+const providerLabel = (p: Provider) => (isEn.value ? p.label_en : p.label) || p.key
 
 const form = ref({
   id: '',
@@ -309,24 +334,45 @@ const form = ref({
   model: '',
   api_key: '',
   api_base: '',
+  api_version: '',
   context_window: null as number | null,
   enabled: true
 })
 
 const formatTokens = (n: number) => n >= 1_000_000 ? `${+(n / 1_000_000).toFixed(2)}M` : `${Math.round(n / 1024)}K`
 
-const currentProvider = computed(() => PROVIDERS.find(p => p.key === form.value.provider) || PROVIDERS[PROVIDERS.length - 1])
+const currentProvider = computed(() => providers.value.find(p => p.key === form.value.provider) || CUSTOM)
+const providerNote = computed(() => isEn.value ? currentProvider.value.note_en : currentProvider.value.note)
+
+const isLocalBase = (url: string) => {
+  try {
+    const host = new URL(url).hostname.replace(/^\[|\]$/g, '')
+    return ['localhost', '127.0.0.1', '::1'].includes(host) || host.endsWith('.localhost')
+  } catch {
+    return false
+  }
+}
+// Matches the backend: local servers run without a key.
+const keyRequired = computed(() => currentProvider.value.key_required
+  && !isLocalBase(currentProvider.value.base_editable ? form.value.api_base : currentProvider.value.api_base))
 
 const onProviderChange = () => {
-  form.value.model = currentProvider.value.models[0] || ''
+  const provider = currentProvider.value
+  form.value.model = provider.models[0] || ''
+  form.value.api_base = provider.base_editable && !provider.api_base.includes('<') ? provider.api_base : ''
+  form.value.api_version = provider.api_version || ''
 }
 
-// 编辑时根据已保存的地址/适配器反推服务商
+// 编辑时用保存的服务商；旧配置没有记录，就根据地址/适配器反推
 const detectProvider = (row: any) => {
-  if (row.adapter_type === 'anthropic') return 'anthropic'
+  if (row.provider && providers.value.some(p => p.key === row.provider)) return row.provider
+  if (row.adapter_type === 'azure_openai') return 'azure_openai'
   // "https://api.deepseek.com" and ".../v1/" are the same endpoint.
   const base = (url: string) => (url || '').replace(/\/+$/, '').replace(/\/v1$/, '')
-  return PROVIDERS.find(p => p.api_base && base(p.api_base) === base(row.api_base))?.key || 'custom'
+  const known = providers.value.find(p => p.api_base && !p.base_editable && base(p.api_base) === base(row.api_base))
+  if (known) return known.key
+  if (row.adapter_type === 'anthropic') return row.api_base ? 'custom_anthropic' : 'anthropic'
+  return 'custom'
 }
 
 // 由模型名生成唯一标识，如 deepseek-chat、deepseek-chat-2
@@ -340,19 +386,22 @@ const generateId = (model: string) => {
 
 const rules = computed(() => ({
   model: [{ required: true, message: t('settings.rule.modelIdRequired2'), trigger: 'blur' }],
-  api_key: isEdit.value ? [] : [{ required: true, message: t('settings.rule.apiKeyRequired'), trigger: 'blur' }],
+  api_key: isEdit.value || !keyRequired.value ? [] : [{ required: true, message: t('settings.rule.apiKeyRequired'), trigger: 'blur' }],
   api_base: [{ required: true, message: t('settings.rule.apiBaseRequired'), trigger: 'blur' }]
 }))
 
 const fetchData = async () => {
   loading.value = true
   try {
-    const [sysRes, configsRes] = await Promise.all([
+    const [sysRes, configsRes, providersRes] = await Promise.all([
       api.getSystemInfo(),
-      api.getModelConfigs()
+      api.getModelConfigs(),
+      // An older backend has no preset list; the custom endpoint still works.
+      api.getProviders().catch(() => ({ data: [] }))
     ])
     systemInfo.value = sysRes.data
     modelConfigs.value = configsRes.data
+    if (Array.isArray(providersRes.data) && providersRes.data.length) providers.value = providersRes.data
   } catch (error) {
     ElMessage.error(t('settings.message.loadFailed'))
   } finally {
@@ -415,12 +464,14 @@ const savePaths = async () => {
 
 const openAddDialog = () => {
   isEdit.value = false
+  const first = providers.value.find(p => p.key === 'deepseek') || providers.value[0]
   form.value = {
     id: '',
-    provider: PROVIDERS[0].key,
-    model: PROVIDERS[0].models[0],
+    provider: first.key,
+    model: first.models[0] || '',
     api_key: '',
     api_base: '',
+    api_version: '',
     context_window: null,
     enabled: true
   }
@@ -435,6 +486,7 @@ const openEditDialog = (row: any) => {
     model: row.model || '',
     api_key: '',
     api_base: row.api_base || '',
+    api_version: row.api_version || '',
     context_window: row.context_window ?? null,
     enabled: row.enabled
   }
@@ -451,12 +503,14 @@ const handleSubmit = async () => {
     const model = form.value.model.trim()
     const payload = {
       id: isEdit.value ? form.value.id : generateId(model),
-      name: provider.label ? `${provider.label} ${model}` : model,
+      name: `${providerLabel(provider)} ${model}`,
       model,
-      // 编辑时留空：后端把 "***" 识别为保留原 Key
-      api_key: form.value.api_key || '***',
-      api_base: (provider.key === 'custom' ? form.value.api_base.trim() : provider.api_base) || null,
+      // 编辑时留空：后端把 "***" 识别为保留原 Key；本机服务可以没有 Key
+      api_key: form.value.api_key || (isEdit.value ? '***' : ''),
+      api_base: (provider.base_editable ? form.value.api_base.trim() : provider.api_base) || null,
       adapter_type: provider.adapter_type,
+      provider: provider.key,
+      api_version: provider.adapter_type === 'azure_openai' ? (form.value.api_version.trim() || provider.api_version) : null,
       // Empty: the backend asks the provider for the real size.
       context_window: form.value.context_window || null,
       enabled: form.value.enabled

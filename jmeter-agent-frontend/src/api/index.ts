@@ -2,6 +2,37 @@ import axios from 'axios'
 import { withScriptApproval } from './scriptApproval'
 import { baseURL, requestAccess } from './session'
 
+export interface CapacitySearchInput {
+  start_threads: number
+  max_threads: number
+  factor: number
+  max_error_rate: number
+}
+
+export interface CapacityStep {
+  threads: number
+  execution_id: string | null
+  status: 'pending' | 'running' | 'passed' | 'stopped' | 'failed'
+  throughput: number | null
+  p95: number | null
+  error_rate: number | null
+  requirements: string | null
+  note: string
+}
+
+export interface CapacitySearch {
+  id: string
+  plan_id: string
+  status: 'running' | 'finished' | 'failed' | 'cancelled'
+  max_error_rate: number
+  steps: CapacityStep[]
+  capacity_threads: number | null
+  capacity_throughput: number | null
+  stop_reason: string
+  created_at: string
+  finished_at: string | null
+}
+
 export type LessonKind = 'known_issue' | 'defect_retrospective' | 'module_standard'
 
 export interface LessonInput {
@@ -278,6 +309,7 @@ export const api = {
 
   getModels: () => instance.get('/ai/models'),
   getModelConfigs: () => instance.get('/ai/model-configs'),
+  getProviders: () => instance.get('/ai/providers'),
   addModelConfig: (data: any) => instance.post('/ai/model-configs', data),
   updateModelConfig: (id: string, data: any) => instance.put(`/ai/model-configs/${id}`, data),
   deleteModelConfig: (id: string) => instance.delete(`/ai/model-configs/${id}`),
@@ -335,6 +367,18 @@ export const api = {
   executeTest: (planId: string, aiModel?: string) => withScriptApproval((approvedSha256, confirmProduction) =>
     instance.post(`/test-plans/${planId}/execute`, null,
       { params: { ai_model: aiModel, approved_sha256: approvedSha256, confirm_production: confirmProduction } })),
+  // Reruns the hypothesis' plan at the load its prediction names; the run then settles the prediction.
+  startVerificationRun: (hypothesisId: string) => withScriptApproval((approvedSha256, confirmProduction) =>
+    instance.post(`/hypotheses/${encodeURIComponent(hypothesisId)}/verification-run`, null,
+      { params: { approved_sha256: approvedSha256, confirm_production: confirmProduction } })),
+  startCapacitySearch: (planId: string, body: CapacitySearchInput) => withScriptApproval((approvedSha256, confirmProduction) =>
+    instance.post<CapacitySearch>(`/test-plans/${encodeURIComponent(planId)}/capacity-searches`, body,
+      { params: { approved_sha256: approvedSha256, confirm_production: confirmProduction } })),
+  listCapacitySearches: (planId: string) =>
+    instance.get<CapacitySearch[]>(`/test-plans/${encodeURIComponent(planId)}/capacity-searches`),
+  getCapacitySearch: (searchId: string) => instance.get<CapacitySearch>(`/capacity-searches/${encodeURIComponent(searchId)}`),
+  cancelCapacitySearch: (searchId: string) => instance.post(`/capacity-searches/${encodeURIComponent(searchId)}/cancel`),
+  getExecutionGate: (executionId: string) => instance.get(`/executions/${encodeURIComponent(executionId)}/gate`),
   getExecutions: (projectId?: string) => instance.get('/executions', { params: projectId ? { project_id: projectId } : {} }),
   cancelExecution: (id: string) => instance.post(`/executions/${id}/cancel`),
 

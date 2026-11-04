@@ -79,7 +79,10 @@ async def lifespan(app: FastAPI):
         cleanup.callback(notifications.unregister, execution_lifecycle)
         cleanup.push_async_callback(execution_lifecycle.shutdown)
         cleanup.push_async_callback(post_run.stop_reanalyses)
+        from app.services import experiments
+        cleanup.push_async_callback(experiments.stop_searches)
         await post_run.recover_interrupted()
+        await _asyncio.to_thread(experiments.recover_searches)
         # A run cut off by a restart never masked the secrets its copy of the plan carried.
         from app.services.jmeter import environment as run_environment
         for execution in list(store.executions.values()):

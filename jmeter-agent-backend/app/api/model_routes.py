@@ -13,7 +13,9 @@ router = APIRouter()
 
 async def _fill_context_window(config: dict) -> dict:
     """Keep a user-entered size; otherwise ask the provider or use the documented size."""
-    if not config.get("context_window") and config.get("api_key") not in (None, "", "***"):
+    from app.services.ai.providers import needs_key
+    has_key = config.get("api_key") not in (None, "", "***") or not needs_key(config)
+    if not config.get("context_window") and has_key and config.get("adapter_type") != "azure_openai":
         from app.services.ai.model_limits import detect_context_window
         config = {**config, "context_window": await detect_context_window(config)}
     return config
@@ -31,6 +33,13 @@ def _load_and_merge_model_config(model_id: str, payload: dict) -> dict:
 
 
 # ===== AI Models =====
+@router.get("/ai/providers", response_model=list)
+async def get_providers():
+    """设置页可选的模型服务商：地址、适配器、常用模型和是否需要 Key"""
+    from app.services.ai.providers import catalog
+    return catalog()
+
+
 @router.get("/ai/models", response_model=list)
 async def get_models():
     """获取可用的 AI 模型列表（仅用户已添加的模型，API Key 已脱敏）"""

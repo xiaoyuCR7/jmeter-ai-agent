@@ -4,7 +4,8 @@ from typing import Optional, Dict
 
 from app.core.config import settings, get_all_model_configs
 from app.services.ai.adapters.base import BaseAIAdapter
-from app.services.ai.adapters.openai_adapter import OpenAIAdapter
+from app.services.ai.adapters.openai_adapter import AzureOpenAIAdapter, OpenAIAdapter
+from app.services.ai.providers import ANTHROPIC, AZURE_OPENAI, LOCAL_KEY, OPENAI_COMPATIBLE, needs_key
 from app.services.ai.adapters.anthropic_adapter import AnthropicAdapter
 
 logger = logging.getLogger(__name__)
@@ -71,17 +72,25 @@ class AIAdapterFactory:
         if not cfg.get("enabled", True):
             raise ValueError(f"AI model is disabled: {model}")
 
-        adapter_type = cfg.get("adapter_type", "openai_compatible")
-        api_key = cfg["api_key"]
+        adapter_type = cfg.get("adapter_type", OPENAI_COMPATIBLE)
+        api_key = cfg.get("api_key") or ""
         model_name = cfg["model"]
         api_base = cfg.get("api_base")
 
         if not api_key:
-            raise ValueError(f"API key not configured for model: {model}")
+            if needs_key(cfg):
+                raise ValueError(f"API key not configured for model: {model}")
+            api_key = LOCAL_KEY
 
-        if adapter_type == "anthropic":
+        if adapter_type == ANTHROPIC:
             adapter = AnthropicAdapter(
                 api_key=api_key, model=model_name, api_base=api_base,
+            )
+        elif adapter_type == AZURE_OPENAI:
+            if not api_base:
+                raise ValueError(f"Azure OpenAI needs the resource endpoint: {model}")
+            adapter = AzureOpenAIAdapter(
+                api_key=api_key, model=model_name, api_base=api_base, api_version=cfg.get("api_version"),
             )
         else:
             adapter = OpenAIAdapter(

@@ -290,7 +290,7 @@ async def test_a_follow_up_question_sees_the_same_recall_as_the_report(monkeypat
     monkeypatch.setattr('app.services.storage.store.get_execution', lambda execution_id: SimpleNamespace(id=execution_id))
     monkeypatch.setattr(module.analysis_context, 'recall', AsyncMock(return_value=analysis_context.Recall(
         text='\n\n## 这个计划最近的运行 X', numbers=[777.0], counts={'same_config': 1})))
-    result = await agent.analyze_with_rag(execution_id='now', module='plan-a', user_task='和上次比呢？')
+    result = await agent.answer_from_evidence(execution_id='now', module='plan-a', user_task='和上次比呢？')
     assert '## 这个计划最近的运行 X' in agent.converse.call_args.args[0]
     assert result['validation']['mismatches'] == [] and result['recall'] == {'same_config': 1}
 

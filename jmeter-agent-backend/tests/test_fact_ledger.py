@@ -405,7 +405,7 @@ async def test_an_answer_is_checked_only_when_the_model_gave_one(monkeypatch, ou
     agent.converse = AsyncMock(return_value=SimpleNamespace(success=outcome != 'model_failed', output=output,
                                                      error='model down' if outcome == 'model_failed' else None,
                                                      plan=[], iterations=1))
-    result = await agent.analyze_with_rag(module='api', user_task='why?')
+    result = await agent.answer_from_evidence(module='api', user_task='why?')
     assert result['fact']['execution_id'] == 'fixture' and result['output'] == output
     if outcome == 'answered':
         assert result['success'] and result['error'] is None and result['validation'] is not None
@@ -440,9 +440,9 @@ async def test_analysis_context_preparation_failure_stops_before_model_and_keeps
     calls[phase].side_effect = asyncio.CancelledError() if cancelled else OSError('private fixture detail')
     if cancelled:
         with pytest.raises(asyncio.CancelledError):
-            await agent.analyze_with_rag(execution_id='run', module='api')
+            await agent.answer_from_evidence(execution_id='run', module='api')
     else:
-        result = await agent.analyze_with_rag(execution_id='run', module='api')
+        result = await agent.answer_from_evidence(execution_id='run', module='api')
         assert not result['success'] and 'Context preparation failed' in result['error']
         assert 'private fixture detail' not in result['error']
         assert result['fact']['execution_id'] == 'run' and result['fact']['total_requests'] == 42

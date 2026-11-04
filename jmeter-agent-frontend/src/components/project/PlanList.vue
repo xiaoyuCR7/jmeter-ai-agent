@@ -33,10 +33,11 @@
             </el-button>
             <el-button size="small" @click="trialPlan = row.id">{{ L('试跑', 'Trial') }}</el-button>
             <el-button size="small" @click="openEditor(row.id)">{{ L('编辑', 'Edit') }}</el-button>
-            <el-dropdown trigger="click" @command="(cmd: string) => cmd === 'download' ? download(row) : remove(row)">
+            <el-dropdown trigger="click" @command="(cmd: string) => command(cmd, row)">
               <el-button size="small" text><el-icon><MoreFilled /></el-icon></el-button>
               <template #dropdown>
                 <el-dropdown-menu>
+                  <el-dropdown-item command="capacity">{{ L('容量探索', 'Capacity search') }}</el-dropdown-item>
                   <el-dropdown-item command="download">{{ L('下载 JMX', 'Download JMX') }}</el-dropdown-item>
                   <el-dropdown-item command="delete" divided>{{ L('删除', 'Delete') }}</el-dropdown-item>
                 </el-dropdown-menu>
@@ -48,6 +49,8 @@
     </el-table>
     <TrialRunDialog :model-value="!!trialPlan" :plans="plans" :initial-plan-id="trialPlan || undefined"
       @update:model-value="open => { if (!open) trialPlan = null }" />
+    <CapacitySearchDialog :model-value="!!capacityPlan" :plan="capacityPlan"
+      @update:model-value="open => { if (!open) capacityPlan = null }" />
   </section>
 </template>
 
@@ -58,6 +61,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { VideoPlay, MoreFilled } from '@element-plus/icons-vue'
 import { api } from '@/api'
 import TrialRunDialog from '@/components/TrialRunDialog.vue'
+import CapacitySearchDialog from '@/components/CapacitySearchDialog.vue'
 import { useI18n } from '@/composables/useI18n'
 import { formatTime, testTypeText } from '@/utils/format'
 
@@ -72,6 +76,13 @@ const plans = ref<any[]>([])
 const loading = ref(false)
 const running = ref<string | null>(null)
 const trialPlan = ref<string | null>(null)
+const capacityPlan = ref<any | null>(null)
+
+function command(cmd: string, plan: any) {
+  if (cmd === 'capacity') capacityPlan.value = plan
+  else if (cmd === 'download') download(plan)
+  else remove(plan)
+}
 
 async function load() {
   const id = props.projectId

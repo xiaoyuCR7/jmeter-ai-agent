@@ -227,10 +227,12 @@ async def get_report(execution_id: str):
 
 
 @router.post("/executions/{execution_id}/analysis", status_code=202)
-async def reanalyze_execution(execution_id: str, request: Optional[ReanalyzeRequest] = None):
-    """重新生成这次运行的 AI 分析；后台进行，报告页轮询 report_status"""
+async def reanalyze_execution(execution_id: str, request: Optional[ReanalyzeRequest] = None,
+                              lang: Optional[str] = None):
+    """重新生成这次运行的 AI 分析，用页面的语言；后台进行，报告页轮询 report_status"""
     try:
-        execution = await post_run.start_reanalysis(execution_id, request.model if request else None)
+        execution = await post_run.start_reanalysis(execution_id, request.model if request else None,
+                                                     (request.lang if request else None) or lang)
     except LookupError:
         raise HTTPException(status_code=404, detail="Execution not found") from None
     except (ValueError, RuntimeError) as error:
@@ -314,7 +316,8 @@ async def ask_about_execution_stream(execution_id: str, request: RunQuestion, la
             outcome = {}
 
             async def answer():
-                outcome['result'] = await agent.run_analysis(request.question, evidence, context=context)
+                outcome['result'] = await agent.run_analysis(request.question, evidence, context=context,
+                                                             lang=lang)
                 return outcome['result']
 
             async with aclosing(agent.stream(answer)) as stream:

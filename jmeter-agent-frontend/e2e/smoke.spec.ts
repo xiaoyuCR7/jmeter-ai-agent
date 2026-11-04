@@ -281,3 +281,65 @@ test('settings show whether memory is used and a retired lesson can come back', 
   await expect(page.getByRole('button', { name: 'Retire' })).toBeVisible()
   expect(restored).toEqual([{ status: 'active', reason: '' }])
 })
+
+test('a model is added from a provider preset, and a local one needs no key', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('jmeter-agent-lang', 'en'))
+  await mockApi(page)
+  const added: any[] = []
+  const preset = (key: string, label: string, group: string, extra = {}) => ({
+    key, label, label_en: label, group, api_base: `https://${key}.example/v1`, adapter_type: 'openai_compatible',
+    models: [`${key}-model`], key_required: true, base_editable: false, api_version: null, docs: '', note: '',
+    note_en: '', ...extra })
+  await page.route(url => url.pathname.endsWith('/ai/providers'), route => route.fulfill({ json: [
+    preset('deepseek', 'DeepSeek', 'china'), preset('gemini', 'Google Gemini', 'global'),
+    preset('ollama', 'Ollama (local)', 'local', { api_base: 'http://127.0.0.1:11434/v1', key_required: false,
+      base_editable: true, models: ['qwen3'] }),
+  ] }))
+  await page.route(url => url.pathname.endsWith('/ai/model-configs'), route => {
+    if (route.request().method() === 'POST') {
+      added.push(route.request().postDataJSON())
+      return route.fulfill({ json: { success: true } })
+    }
+    return route.fulfill({ json: [] })
+  })
+
+  await page.goto('/settings?tab=models')
+  await page.getByRole('button', { name: 'Add Model' }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.locator('.el-select').first().click()
+  await expect(page.getByRole('option', { name: 'Google Gemini' })).toBeVisible()
+  await page.getByRole('option', { name: 'Ollama (local)' }).click()
+  await expect(dialog.getByPlaceholder('Optional for a server on this machine')).toBeVisible()
+  await expect(dialog.getByPlaceholder('http://127.0.0.1:11434/v1')).toHaveValue('http://127.0.0.1:11434/v1')
+  await dialog.getByRole('button', { name: 'Add' }).click()
+  await expect.poll(() => added.length).toBe(1)
+  expect(added[0]).toMatchObject({ provider: 'ollama', model: 'qwen3', api_key: '', api_base: 'http://127.0.0.1:11434/v1' })
+})
+
+test('a capacity search shows each step and the load the plan takes', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('jmeter-agent-lang', 'en'))
+  await mockApi(page)
+  const search = { id: 's1', plan_id: 'plan1', status: 'finished', max_error_rate: 1, capacity_threads: 20,
+    capacity_throughput: 400, stop_reason: '40 threads: throughput stopped growing', created_at: '2026-10-01T11:00:00',
+    finished_at: '2026-10-01T11:30:00', steps: [
+      { threads: 10, execution_id: 'r1', status: 'passed', throughput: 200, p95: 120, error_rate: 0, requirements: 'pass', note: '' },
+      { threads: 20, execution_id: 'r2', status: 'passed', throughput: 400, p95: 150, error_rate: 0, requirements: 'pass', note: '' },
+      { threads: 40, execution_id: 'r3', status: 'stopped', throughput: 410, p95: 900, error_rate: 0, requirements: 'pass',
+        note: 'throughput stopped growing' }] }
+  const started: any[] = []
+  await page.route(url => url.pathname.endsWith('/test-plans/plan1/capacity-searches'), route => {
+    if (route.request().method() === 'POST') {
+      started.push(route.request().postDataJSON())
+      return route.fulfill({ json: search })
+    }
+    return route.fulfill({ json: [] })
+  })
+
+  await page.goto('/projects/p1/plans')
+  await page.getByRole('row', { name: /Checkout baseline/ }).locator('.el-dropdown .el-button').click()
+  await page.getByRole('menuitem', { name: 'Capacity search' }).click()
+  await page.getByRole('button', { name: 'Start', exact: true }).click()
+  await expect(page.getByText('Takes 20 threads at 400.0 requests/s')).toBeVisible()
+  await expect(page.getByText('throughput stopped growing', { exact: true })).toBeVisible()
+  expect(started[0]).toMatchObject({ factor: 1.5, max_error_rate: 1 })
+})

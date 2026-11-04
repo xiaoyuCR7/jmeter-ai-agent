@@ -44,4 +44,8 @@ def record_openai(response) -> None:
 
 def record_anthropic(response) -> None:
     usage = getattr(response, 'usage', None)
-    record(getattr(usage, 'input_tokens', 0), getattr(usage, 'output_tokens', 0))
+    # input_tokens leaves out what was written to or read from the prompt cache.
+    cached = [getattr(usage, name, 0) for name in ('cache_creation_input_tokens', 'cache_read_input_tokens')]
+    record(getattr(usage, 'input_tokens', 0) + sum(int(value or 0) for value in cached
+                                                   if isinstance(value, (int, float))),
+           getattr(usage, 'output_tokens', 0))

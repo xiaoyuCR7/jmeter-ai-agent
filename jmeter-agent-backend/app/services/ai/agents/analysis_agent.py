@@ -138,8 +138,12 @@ class AnalysisAgent(BaseAgent):
         return dict(execution_id=execution_id, jtl_path=jtl_path, module=plan_id, plan_name=plan.get('name') or plan_id,
                     version='unknown', test_type=test_config.get('test_type', ''), context_scope=scope)
 
-    async def run_analysis(self, task: str, evidence: dict, context: Optional[str] = None) -> AgentResult:
-        """Answer ``task``, one question about a reported run; nothing is archived."""
+    async def run_analysis(self, task: str, evidence: dict, context: Optional[str] = None,
+                           lang: str = 'zh-CN') -> AgentResult:
+        """Answer ``task``, one question about a reported run, in ``lang``; nothing is archived."""
+        from app.core.lang_utils import language_instruction, normalize_lang
+        self.lang = normalize_lang(lang) or 'zh-CN'
+        self.system_prompt += '\n\n' + language_instruction(self.lang)
         started = time.monotonic()
         if not self.tools.list_tools():
             from app.services.storage import store
@@ -157,7 +161,7 @@ class AnalysisAgent(BaseAgent):
                 self.emit('analysis_phase', 'Checking the numbers in the answer', {'phase': 'postprocessing'})
             return answered
 
-        analysis = await self.analyze_with_rag(
+        analysis = await self.answer_from_evidence(
             jtl_path=evidence['jtl_path'], execution_id=evidence['execution_id'],
             module=evidence['module'], version=evidence['version'], test_type=evidence['test_type'],
             user_task=task, report_context=context, _runner=answer, _expected_scope=evidence['context_scope'])
@@ -174,7 +178,7 @@ class AnalysisAgent(BaseAgent):
         result.events, result.duration_seconds = self.events, time.monotonic() - started
         return result
 
-    async def analyze_with_rag(
+    async def answer_from_evidence(
         self,
         jtl_path: Optional[str] = None,
         execution_id: Optional[str] = None,
@@ -192,7 +196,7 @@ class AnalysisAgent(BaseAgent):
         if not module:
             return {
                 "success": False,
-                "error": "module is required for RAG analysis",
+                "error": "module is required for analysis",
             }
 
         exec_ref = execution_id or jtl_path or "当前测试"
@@ -281,7 +285,8 @@ class AnalysisAgent(BaseAgent):
             AIChatMessage(role='system', content=self.system_prompt),
             AIChatMessage(role='user', content=task),
             AIChatMessage(role='assistant', content=answer),
-            AIChatMessage(role='user', content=correction_request(mismatches, '只输出改正后的完整回答。')),
+            AIChatMessage(role='user', content=correction_request(mismatches, '只输出改正后的完整回答。',
+                                                                  getattr(self, 'lang', 'zh-CN'))),
         ]
         try:
             prepared = self.adapter.prepare_chat_messages(messages, response_tokens=CORRECTION_TOKENS)

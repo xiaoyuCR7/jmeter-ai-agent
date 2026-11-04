@@ -104,7 +104,8 @@ def test_every_built_in_tool_has_a_deliberate_risk():
     for tool in get_all_builtin_tools():
         levels.setdefault(tool.risk, set()).add(tool.name)
     assert 'get_execution_status' in levels['read']
-    assert levels['execute'] == {'execute_test', 'execute_distributed', 'import_openapi_spec'}
+    assert levels['execute'] == {'execute_test', 'execute_distributed', 'import_openapi_spec', 'start_capacity_search',
+                                 'start_verification_run'}
     assert levels['write'] == {'update_jmx', 'update_project_env', 'cancel_execution',
                                'save_performance_requirements', 'promote_execution_to_baseline'}
     assert levels['draft'] == {'create_jmx', 'import_jmx', 'create_project'}

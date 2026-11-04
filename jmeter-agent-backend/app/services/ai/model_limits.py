@@ -19,6 +19,7 @@ KNOWN_CONTEXT_WINDOWS = {
     'claude-fable-5-1': 1_000_000, 'claude-opus-5-5': 1_000_000,
     'claude-sonnet-5-5': 1_000_000, 'claude-haiku-5-5': 1_000_000,
     'qwen-plus': 1_000_000, 'qwen-flash': 1_000_000, 'qwen-max': 32_768,
+    'gemini-2.5-pro': 1_048_576, 'gemini-2.5-flash': 1_048_576, 'gemini-2.5-flash-lite': 1_048_576,
 }
 # Field names model-listing APIs use for the input/context size.
 _REPORTED_FIELDS = ('context_window', 'max_input_tokens', 'context_length', 'max_context_length', 'max_model_len')
@@ -34,7 +35,7 @@ def _reported_size(entry: dict) -> Optional[int]:
 
 
 async def _ask_provider(config: dict, transport=None) -> Optional[int]:
-    model, key = config['model'], config['api_key']
+    model, key = config['model'], config.get('api_key') or ''
     async with httpx.AsyncClient(timeout=_TIMEOUT, transport=transport, follow_redirects=False) as client:
         if config.get('adapter_type') == 'anthropic':
             base = (config.get('api_base') or 'https://api.anthropic.com').rstrip('/')
@@ -43,7 +44,7 @@ async def _ask_provider(config: dict, transport=None) -> Optional[int]:
             response.raise_for_status()
             return _reported_size(response.json())
         base = (config.get('api_base') or 'https://api.openai.com/v1').rstrip('/')
-        response = await client.get(f'{base}/models', headers={'Authorization': f'Bearer {key}'})
+        response = await client.get(f'{base}/models', headers={'Authorization': f'Bearer {key}'} if key else {})
         response.raise_for_status()
         entry = next((m for m in response.json().get('data', []) if m.get('id') == model), None)
         return _reported_size(entry) if entry else None

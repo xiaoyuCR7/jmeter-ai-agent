@@ -27,7 +27,35 @@ Preserve the requested JSON fields; use empty lists where there is nothing to sa
 """ + ANALYSIS_RULES
 
 
-def build_analysis_prompt(summary_data: dict, test_config: dict, test_type: str, evidence_text: str = '') -> str:
+_TEXT = {'type': 'string'}
+_TEXTS = {'type': 'array', 'items': _TEXT}
+# What the model fills in, as a tool's input schema for providers that take one (Claude); the others
+# get JSON mode and the same fields in the prompt. Statuses and checks are the application's.
+REPORT_SCHEMA = {
+    'type': 'object',
+    'properties': {
+        'overall_assessment': _TEXT, 'key_findings': {**_TEXTS, 'maxItems': 5}, 'timeline_analysis': _TEXT,
+        'performance_bottlenecks': {**_TEXTS, 'maxItems': 3}, 'error_analysis': _TEXTS,
+        'recommendations': {**_TEXTS, 'maxItems': 3}, 'risk_areas': {**_TEXTS, 'maxItems': 3},
+        'limitations': {**_TEXTS, 'maxItems': 3},
+        'hypotheses': {'type': 'array', 'maxItems': 3, 'items': {
+            'type': 'object', 'required': ['statement', 'category'],
+            'properties': {
+                'statement': _TEXT,
+                'category': {'type': 'string', 'enum': ['bottleneck', 'root_cause', 'recommendation', 'risk']},
+                'testable_prediction': _TEXT, 'replaces': _TEXT,
+                'prediction': {'type': 'object', 'properties': {
+                    'metric': {'type': 'string', 'enum': ['p95', 'p99', 'avg', 'error_rate', 'throughput']},
+                    'label': _TEXT, 'change': {'type': 'string', 'enum': ['decrease', 'increase', 'below', 'above']},
+                    'value': {'type': 'number'}, 'threads': {'type': 'integer'}, 'after': _TEXT}}}}},
+        'conclusion': _TEXT,
+    },
+    'required': ['overall_assessment', 'conclusion'],
+}
+
+
+def build_analysis_prompt(summary_data: dict, test_config: dict, test_type: str, evidence_text: str = '',
+                          lang: str = 'zh-CN') -> str:
     def finite(value):
         return value if isinstance(value, (int, float)) and math.isfinite(value) else None
 
@@ -72,7 +100,8 @@ def build_analysis_prompt(summary_data: dict, test_config: dict, test_type: str,
         'timeline_sampled': len(timeline) < len(segments),
         'errors': error_data, 'error_types_total': len(errors),
     }
-    return ('请基于以下 JSON 数据用中文分析。null 表示未知；抽样时间段不代表完整时间线。'
+    intro = ('Analyze the JSON data below and write the report in English. ' if lang == 'en' else '请基于以下 JSON 数据用中文分析。')
+    return (intro + 'null 表示未知；抽样时间段不代表完整时间线。'
             '只引用已提供指标；根因、容量与资源瓶颈必须区分假设和实测，缺证据时说明需补采的数据。\n'
             + json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
             + (('\n\n以下证据由程序确定性计算（需求判定、基线对比、服务端指标），结论必须与之一致，'
@@ -94,4 +123,5 @@ def build_analysis_prompt(summary_data: dict, test_config: dict, test_type: str,
             '假设“这个接口在 20 线程以上排队”可预测 {"metric":"avg","label":"GET /items","change":"increase","value":30,"threads":40}；'
             '历史假设里仍未验证、这次数据也没有带来新信息的，不要换个说法再写一遍；'
             '这次的数据修正或细化了某条未验证的历史假设时，照写新的一条并加 "replaces":"那条的编号"，旧的会被它取代），'
-            'conclusion（字符串，一两句）。同一事实只在一个字段里写一次。')
+            'conclusion（字符串，一两句）。同一事实只在一个字段里写一次。'
+            + ('\nAll text values must be in English; keep request names exactly as given.' if lang == 'en' else ''))

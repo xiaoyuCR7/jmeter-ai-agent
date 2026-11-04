@@ -139,7 +139,7 @@ async def test_registered_ledger_read_contract_does_not_change_legacy_failure_be
     db.execute.side_effect = OSError('fixture')
     ledger._get_db = AsyncMock(return_value=db)
     monkeypatch.setattr(module.analysis_context, 'fact_ledger', ledger)
-    result = await agent.analyze_with_rag(execution_id=evidence['execution_id'], module=evidence['module'],
+    result = await agent.answer_from_evidence(execution_id=evidence['execution_id'], module=evidence['module'],
                                           user_task='why?')
     assert result['success'] and result['recall'] == {}
     assert agent.adapter.chat_with_tools_calls == 1
@@ -349,7 +349,6 @@ async def test_failed_model_call_is_not_retried_again_by_the_step():
     assert adapter.chat_with_tools.await_count == 1 and 'step_retry' not in event_types(agent)
 
 
-@pytest.mark.asyncio
 def test_document_task_keeps_the_whole_document_and_requirements():
     from app.services.ai.agents.workflow_agent import WorkflowAgent
     task = WorkflowAgent.build_task('x' * 8100 + ' GET /TAIL_ENDPOINT', 'r' * 2100 + ' REQUIREMENT_TAIL')
@@ -519,7 +518,7 @@ class TestReactLoop:
         monkeypatch.setattr(base, '_semaphore', asyncio.Semaphore(1))
         started = []
 
-        async def analyse_now(execution, ai_model):
+        async def analyse_now(execution, ai_model, lang):
             started.append(execution)
             return 'analysis'
         monkeypatch.setattr(post_run, '_analyse_now', analyse_now)
@@ -527,11 +526,32 @@ class TestReactLoop:
         entered, release, _ = pause_steps(agent)
         running = asyncio.create_task(agent.run('task'))
         await entered.wait()
-        analysis = asyncio.create_task(post_run._analyse('run-1', None))
+        analysis = asyncio.create_task(post_run._analyse('run-1', None, 'zh-CN'))
         await asyncio.sleep(0.05)
         assert started == []  # Waits instead of calling the model beside the agent.
         release.set()
         assert (await running).success and await analysis == 'analysis' and started == ['run-1']
+
+    @pytest.mark.asyncio
+    async def test_reports_leave_one_slot_for_interactive_work(self, monkeypatch):
+        from app.services.ai.agent import base
+        monkeypatch.setattr(base, '_semaphore', asyncio.Semaphore(3))
+        monkeypatch.setattr(base, '_background', asyncio.Semaphore(2))
+        hold, entered = asyncio.Event(), []
+
+        async def report(name):
+            async with base.agent_slot(wait_seconds=None, background=True):
+                entered.append(name)
+                await hold.wait()
+        reports = [asyncio.create_task(report(i)) for i in range(3)]
+        await asyncio.sleep(0.05)
+        assert len(entered) == 2  # The third report waits although a slot is free.
+        async with base.agent_slot(wait_seconds=1):
+            entered.append('question')
+        assert 'question' in entered
+        hold.set()
+        await asyncio.gather(*reports)
+        assert len(entered) == 4
 
     @pytest.mark.asyncio
     async def test_react_preserves_native_call_ids_in_observation(self):

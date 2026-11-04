@@ -92,6 +92,35 @@ _REQUIREMENTS_SCHEMA = {
     'required': ['items'],
 }
 
+async def get_execution_gate(execution_id: str) -> dict:
+    from app.services.experiments import gate
+    return await gate(execution_id)
+
+
+async def start_capacity_search(plan_id: str, start_threads: int, max_threads: int, factor: float = 1.5,
+                                max_error_rate: float = 1.0) -> dict:
+    from app.services.experiments import start_capacity_search as start
+    search = await start(plan_id, start_threads=start_threads, max_threads=max_threads, factor=factor,
+                         max_error_rate=max_error_rate)
+    return {'search_id': search.id, 'steps': [step.threads for step in search.steps],
+            'note': 'Runs in the background; poll get_capacity_search with search_id.'}
+
+
+async def get_capacity_search(search_id: str) -> dict:
+    from app.services.experiments import load_search
+    search = load_search(search_id)
+    if search is None:
+        return {'error': f'Capacity search not found: {search_id}'}
+    return search.model_dump(mode='json')
+
+
+async def start_verification_run(hypothesis_id: str) -> dict:
+    from app.services.experiments import start_verification
+    execution = await start_verification(hypothesis_id)
+    return {'execution_id': execution.id, 'status': execution.status.value,
+            'note': 'The hypothesis is judged automatically once this run finishes.'}
+
+
 evidence_tools = [
     Tool(
         name='get_performance_requirements',
@@ -137,5 +166,39 @@ evidence_tools = [
         parameters={'type': 'object', 'properties': {'execution_id': {'type': 'string'}}, 'required': ['execution_id']},
         handler=promote_execution_to_baseline,
         risk='write',
+    ),
+    Tool(
+        name='get_execution_gate',
+        description=('The CI gate of one run: pass, fail or error, with the reasons (failed requirements, regression '
+                     'against the baseline); pending while the run or its results are not finished.'),
+        parameters={'type': 'object', 'properties': {'execution_id': {'type': 'string'}}, 'required': ['execution_id']},
+        handler=get_execution_gate,
+    ),
+    Tool(
+        name='start_capacity_search',
+        description=('Find how much load a test plan takes: run it at rising thread counts (start_threads multiplied by '
+                     'factor up to max_threads) and stop at the first step that fails a requirement, exceeds '
+                     'max_error_rate (%) or stops gaining throughput. The plan file is not changed.'),
+        parameters={'type': 'object', 'properties': {
+            'plan_id': {'type': 'string'}, 'start_threads': {'type': 'integer', 'minimum': 1},
+            'max_threads': {'type': 'integer', 'minimum': 1}, 'factor': {'type': 'number', 'minimum': 1.1, 'maximum': 4},
+            'max_error_rate': {'type': 'number', 'minimum': 0, 'maximum': 100}},
+            'required': ['plan_id', 'start_threads', 'max_threads']},
+        handler=start_capacity_search,
+        risk='execute',
+    ),
+    Tool(
+        name='get_capacity_search',
+        description='Progress and result of a capacity search: the load, throughput, P95, error rate and verdict of each step.',
+        parameters={'type': 'object', 'properties': {'search_id': {'type': 'string'}}, 'required': ['search_id']},
+        handler=get_capacity_search,
+    ),
+    Tool(
+        name='start_verification_run',
+        description=('Rerun the plan of an open hypothesis at the load its prediction names, so the prediction is '
+                     'checked automatically when the run ends.'),
+        parameters={'type': 'object', 'properties': {'hypothesis_id': {'type': 'string'}}, 'required': ['hypothesis_id']},
+        handler=start_verification_run,
+        risk='execute',
     ),
 ]

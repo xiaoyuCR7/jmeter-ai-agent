@@ -349,3 +349,18 @@ async def test_a_report_with_a_wrong_number_is_rewritten_once(monkeypatch, rewri
     assert (result.evidence_status == 'verified') is kept
     assert result.fact_check.get('corrected_from') == (1 if kept else None)
     assert result.usage == {'calls': 1, 'input_tokens': 1000, 'output_tokens': 200}
+
+
+def test_focus_names_the_requests_to_look_at_first():
+    from app.services.run_diagnostics import focus
+    rows = [{'label': 'A', 'count': 100, 'error_rate': 0, 'p95_response_time': 900, 'p99_response_time': 1000,
+             'avg_response_time': 400, 'steady_p95': 300},
+            {'label': 'B', 'count': 100, 'error_rate': 2.5, 'p95_response_time': 200, 'p99_response_time': 2000,
+             'avg_response_time': 100},
+            {'label': 'C', 'count': 100, 'error_rate': 0, 'p95_response_time': 210, 'p99_response_time': 230,
+             'avg_response_time': 180}]
+    items = focus(rows, 300)
+    assert items[0] == {'label': 'B', 'kind': 'errors', 'error_rate': 2.5, 'count': 100}
+    kinds = {(item['label'], item['kind']) for item in items}
+    assert ('A', 'slow') in kinds and ('A', 'slow_outside_steady') in kinds and ('B', 'long_tail') in kinds
+    assert not any(item['label'] == 'C' for item in items)

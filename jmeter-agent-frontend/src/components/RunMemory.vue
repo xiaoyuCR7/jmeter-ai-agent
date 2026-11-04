@@ -20,6 +20,9 @@
       </p>
       <p v-if="hyp.notes" class="detail">{{ hyp.notes }}</p>
       <div v-if="hyp.status === 'untested'" class="actions">
+        <el-button v-if="hyp.checkable" type="primary" text size="small" :loading="busy === hyp.id" @click="verify(hyp)">
+          {{ L('运行验证', 'Run a check') }}
+        </el-button>
         <el-button text size="small" :loading="busy === hyp.id" @click="decide(hyp, 'confirmed')">{{ L('预测成立', 'It held') }}</el-button>
         <el-button text size="small" :loading="busy === hyp.id" @click="decide(hyp, 'refuted')">{{ L('预测不成立', 'It did not hold') }}</el-button>
         <el-button text size="small" :loading="busy === hyp.id" @click="decide(hyp, 'deprecated')">{{ L('作废', 'Discard') }}</el-button>
@@ -51,6 +54,7 @@ import { onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '@/api'
 import { useI18n } from '@/composables/useI18n'
+import { useRouter } from 'vue-router'
 
 const props = defineProps<{ executionId: string; refreshKey?: number }>()
 const emit = defineEmits<{ 'save-lesson': [] }>()
@@ -90,6 +94,30 @@ async function load() {
     ElMessage.error(L('读取经验与假设失败', 'Could not load lessons and hypotheses'))
   } finally {
     loading.value = false
+  }
+}
+
+const router = useRouter()
+
+async function verify(hyp: any) {
+  try {
+    await ElMessageBox.confirm(
+      L(`将按预测的负载重新运行这条假设的测试计划：${hyp.prediction}。运行结束后程序自动判定。`,
+        `This reruns the hypothesis' plan at the load its prediction names: ${hyp.prediction}. The run settles it when it ends.`),
+      L('运行验证', 'Run a check'), { confirmButtonText: L('开始运行', 'Start the run'), type: 'info' })
+  } catch {
+    return
+  }
+  busy.value = hyp.id
+  try {
+    const run = (await api.startVerificationRun(hyp.id)).data
+    ElMessage.success(L('验证运行已开始', 'The check run has started'))
+    router.push(`/executions/${run.id}`)
+  } catch (e: any) {
+    const detail = e.response?.data?.detail
+    ElMessage.error((typeof detail === 'string' ? detail : detail?.message) || L('无法开始验证运行', 'Could not start the check run'))
+  } finally {
+    busy.value = ''
   }
 }
 

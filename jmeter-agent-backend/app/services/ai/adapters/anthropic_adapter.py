@@ -1,5 +1,6 @@
 from typing import AsyncIterator, List, Optional
 import json
+from urllib.parse import urlparse
 
 from anthropic import AsyncAnthropic
 
@@ -8,8 +9,16 @@ from app.models.schemas import AIChatMessage
 from app.services.ai import usage
 
 
+REPORT_TOOL = 'write_report'
+
+
 class AnthropicAdapter(BaseAIAdapter):
-    """Anthropic Claude适配器 — supports native tool use."""
+    """Anthropic Claude适配器 — supports native tool use.
+
+    The system prompt and the first user message (a run's facts and evidence, the same for every
+    question about it) are marked for prompt caching. ``json_mode`` with a ``json_schema`` makes
+    the model fill in a tool with that schema, so a report is always one well-formed object.
+    """
 
     @staticmethod
     def _convert_messages(messages):
@@ -41,30 +50,45 @@ class AnthropicAdapter(BaseAIAdapter):
         if api_base:
             kwargs["base_url"] = api_base
         self.client = AsyncAnthropic(**kwargs)
+        # Compatible endpoints of other vendors may refuse cache markers; Anthropic's own takes them.
+        host = urlparse(api_base or 'https://api.anthropic.com').hostname or ''
+        self.prompt_caching = host == 'anthropic.com' or host.endswith('.anthropic.com')
+
+    def _request(self, messages: List[AIChatMessage]) -> dict:
+        """System prompt and messages, with cache breakpoints where the reusable prefix ends."""
+        system_msg, chat_messages = self._convert_messages(messages)
+        if not self.prompt_caching:
+            return {'system': system_msg or None, 'messages': chat_messages}
+        system = [{'type': 'text', 'text': system_msg, 'cache_control': {'type': 'ephemeral'}}] if system_msg else None
+        if chat_messages and chat_messages[0]['role'] == 'user' and len(chat_messages) > 1:
+            first = chat_messages[0]['content'] = [dict(block) for block in chat_messages[0]['content']]
+            if first and first[-1].get('type') == 'text':
+                first[-1]['cache_control'] = {'type': 'ephemeral'}
+        return {'system': system, 'messages': chat_messages}
 
     @managed_request
     async def chat(self, messages: List[AIChatMessage], **kwargs) -> str:
-        system_msg, chat_messages = self._convert_messages(messages)
-
         client = self.client.with_options(max_retries=kwargs['max_retries']) if 'max_retries' in kwargs else self.client
-        response = await client.messages.create(
-            model=self.model,
-            system=system_msg or None,
-            messages=chat_messages,
-            max_tokens=kwargs.get("max_tokens", 8000),
-            temperature=kwargs.get("temperature", 0.2),
-        )
+        request = dict(model=self.model, max_tokens=kwargs.get("max_tokens", 8000),
+                       temperature=kwargs.get("temperature", 0.2), **self._request(messages))
+        schema = kwargs.get('json_schema') if kwargs.get('json_mode') else None
+        if schema:
+            request.update(tools=[{'name': REPORT_TOOL, 'description': 'Record the answer as structured data.',
+                                   'input_schema': schema}],
+                           tool_choice={'type': 'tool', 'name': REPORT_TOOL})
+        response = await client.messages.create(**request)
         usage.record_anthropic(response)
+        if schema:
+            answer = next((block.input for block in response.content if block.type == 'tool_use'), None)
+            if isinstance(answer, dict):
+                return json.dumps(answer, ensure_ascii=False)
         return "".join(block.text for block in response.content if block.type == "text")
 
     @managed_stream
     async def chat_stream(self, messages: List[AIChatMessage], **kwargs) -> AsyncIterator[str]:
-        system_msg, chat_messages = self._convert_messages(messages)
-
         async with self.client.messages.stream(
             model=self.model,
-            system=system_msg or None,
-            messages=chat_messages,
+            **self._request(messages),
             max_tokens=kwargs.get("max_tokens", 8000),
             temperature=kwargs.get("temperature", 0.2),
         ) as stream:
@@ -82,9 +106,6 @@ class AnthropicAdapter(BaseAIAdapter):
         **kwargs
     ) -> ToolCallResponse:
         """Native Anthropic tool use."""
-        # Separate system message
-        system_msg, chat_messages = self._convert_messages(messages)
-
         # Build Anthropic tool format
         anthropic_tools = []
         for t in tools:
@@ -97,8 +118,7 @@ class AnthropicAdapter(BaseAIAdapter):
 
         response = await self.client.messages.create(
             model=self.model,
-            system=system_msg or None,
-            messages=chat_messages,
+            **self._request(messages),
             tools=anthropic_tools,
             max_tokens=kwargs.get("max_tokens", 8000),
             temperature=kwargs.get("temperature", 0.2),

@@ -58,7 +58,7 @@ async def test_a_question_streams_its_progress_then_the_saved_answer(monkeypatch
     from app.services.ai.agent.types import AgentResult
 
     class Agent(BaseAgent):
-        async def run_analysis(self, question, evidence, context=None):
+        async def run_analysis(self, question, evidence, context=None, lang=None):
             self.emit('analysis_phase', 'x', {'phase': 'preparation'})
             self.emit('tool_call', 'x', {'tool': 'find_samples'})
             self.emit('analysis_phase', 'x', {'phase': 'postprocessing'})

@@ -99,3 +99,51 @@ def test_hypothesis_extractor():
     statements = {h.statement for h in hyps}
     assert any("连接池" in s for s in statements)
     assert any("锁竞争" in s for s in statements)
+
+
+def scoped_fact():
+    from app.models.schemas import FactSheet
+    return FactSheet(execution_id='x', total_requests=1000, avg_response_time=300, max_response_time=2000,
+                     error_rate=1.0, throughput=100, percentiles={'p50': 200, 'p95': 500, 'p99': 900},
+                     per_label={'GET /items': {'count': 600, 'p95_response_time': 1200, 'avg_response_time': 10},
+                                'POST /login': {'count': 400, 'p95_response_time': 300, 'avg_response_time': 250}})
+
+
+def test_a_number_given_for_one_request_is_checked_against_that_request():
+    fact = scoped_fact()
+    assert FactValidator().validate('GET /items 的 P95 为 1200ms', fact).mismatches == []
+    wrong = FactValidator().validate('POST /login 的 P95 为 1200ms', fact).mismatches
+    assert wrong and wrong[0]['scope'] == 'POST /login' and wrong[0]['actual'] == 300
+
+
+def test_overall_numbers_are_not_matched_against_a_single_request():
+    fact = scoped_fact()
+    assert FactValidator().validate('整体 P95 为 500ms', fact).mismatches == []
+    assert FactValidator().validate('整体 P95 为 1200ms', fact).mismatches
+
+
+def test_numbers_of_other_runs_count_only_where_the_sentence_compares():
+    fact = scoped_fact()
+    assert FactValidator().validate('P95 从 650ms 升到 500ms', fact, [650.0]).mismatches == []
+    assert FactValidator().validate('P95 为 650ms', fact, [650.0]).mismatches
+
+
+def test_small_response_times_get_a_small_tolerance():
+    fact = scoped_fact()
+    assert FactValidator().validate('GET /items 平均响应时间 12ms', fact).mismatches == []
+    assert FactValidator().validate('GET /items 平均响应时间 55ms', fact).mismatches
+
+
+def test_english_claims_are_checked():
+    fact = scoped_fact()
+    good = 'Overall average response time was 300 ms, throughput 100 req/s and the error rate 1%.'
+    result = FactValidator().validate(good, fact)
+    assert {c.metric_name for c in result.claims} == {'avg_response_time', 'throughput', 'error_rate'}
+    assert result.mismatches == []
+    assert FactValidator().validate('The error rate was 12%.', fact).mismatches
+    assert FactValidator().validate('Throughput reached 400 requests/sec.', fact).mismatches
+    assert FactValidator().validate('POST /login has a P95 of 1.2 seconds.', fact).mismatches
+
+
+def test_claims_without_a_scope_are_counted():
+    assert FactValidator().validate('P95 为 1200ms', scoped_fact()).unbound_claims == 1

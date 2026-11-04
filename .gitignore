@@ -10,7 +10,8 @@
 /licenses/
 # JMeter 官方文档随发行版一起忽略，仅保留本项目自己的文档
 /docs/*
-!/docs/repairs/
+!/docs/ARCHITECTURE.md
+!/docs/archive/
 
 # ============================================================
 # 运行时产物（测试计划 / 报告 / 备份 / 向量库）
@@ -18,6 +19,7 @@
 /backups/
 /jmeter-agent-backend/test_plans/
 /jmeter-agent-backend/reports/
+/jmeter-agent-backend/capacity_searches/
 rag_lancedb/
 rag_lancedb.migrated/
 *.db.migrated

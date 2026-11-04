@@ -31,9 +31,12 @@ class AIModelConfig(BaseModel):
     id: str = Field(..., description="模型唯一标识，如 openai, deepseek, my-model")
     name: str = Field(..., description="显示名称")
     model: str = Field(..., description="实际模型 ID，如 gpt-4o, deepseek-chat")
-    api_key: str = Field(..., description="API Key")
+    api_key: str = Field("", description="API Key；本机服务（Ollama 等）可以不填")
     api_base: Optional[str] = Field(None, description="API Base URL")
-    adapter_type: str = Field("openai_compatible", description="适配器类型: openai_compatible / anthropic")
+    adapter_type: Literal["openai_compatible", "anthropic", "azure_openai"] = Field(
+        "openai_compatible", description="适配器类型: openai_compatible / anthropic / azure_openai")
+    provider: Optional[str] = Field(None, max_length=40, description="设置页选择的服务商，如 deepseek、gemini、ollama")
+    api_version: Optional[str] = Field(None, max_length=40, description="Azure OpenAI 的 API 版本")
     context_window: Optional[int] = Field(None, ge=4096, le=2_000_000,
                                           description="模型上下文窗口(tokens)；不填则用全局保守默认值")
     is_builtin: bool = Field(False, description="是否为内置模型")
@@ -436,10 +439,12 @@ class ReportAnalysis(BaseModel):
     # Requirement verdict when the analysis was written, so the report can flag it once requirements change.
     requirements_verdict: Optional[Dict[str, Any]] = None
     follow_ups: List[Dict[str, Any]] = Field(default_factory=list, description="用户对这份分析的追问和回答")
+    language: str = Field("zh-CN", description="分析所用的语言：zh-CN 或 en")
 
 
 class ReanalyzeRequest(BaseModel):
     model: Optional[str] = Field(None, description="使用的 AI 模型ID")
+    lang: Optional[str] = Field(None, description="分析语言 zh-CN / en；不填用 REPORT_LANGUAGE")
 
 
 class RunQuestion(BaseModel):
@@ -604,6 +609,7 @@ class ValidationResult(BaseModel):
     claims: List[MetricClaim] = Field(default_factory=list, description="提取到的声明")
     mismatches: List[Dict[str, Any]] = Field(default_factory=list, description="不匹配项")
     missing_fields: List[str] = Field(default_factory=list, description="无法回验的字段")
+    unbound_claims: int = Field(0, description="没有写明接口或整体、只能对照任意范围的声明数")
     corrected_summary: Optional[str] = Field(None, description="修正后的分析摘要")
 
 

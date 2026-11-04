@@ -589,3 +589,49 @@ async def test_a_failed_postprocess_still_gets_the_post_run_step(env):
                                  postprocess=AsyncMock(side_effect=ValueError('requirements unreadable')))
     post_run.assert_awaited_once()
     assert result.report_status == 'failed' and result.report_error == 'requirements unreadable'
+
+
+class BlockingExecutor:
+    """Runs until cancelled, like JMeter with no end in sight."""
+    def __init__(self):
+        self._running_processes, self.started = {}, asyncio.Event()
+
+    async def execute(self, jmx_path, execution_id, **kwargs):
+        self._running_processes[execution_id] = {'task': asyncio.current_task()}
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            self._running_processes.pop(execution_id, None)
+
+    async def cancel(self, execution_id):
+        task = self._running_processes[execution_id]['task']
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return True
+
+
+@pytest.mark.asyncio
+async def test_a_run_stopped_by_the_guard_says_why(env):
+    lifecycle, _ = service()
+    executor = BlockingExecutor()
+    execution = await lifecycle.submit(str(env.path), 'guarded', executor=executor)
+    await executor.started.wait()
+    await lifecycle._guard_stop(execution.id, '运行守护停止了这次运行')
+    finished = await lifecycle.wait(execution.id)
+    assert finished.status == Status.CANCELLED and finished.error_message == '运行守护停止了这次运行'
+    await lifecycle.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_run_can_use_another_thread_count_without_changing_the_plan(env):
+    lifecycle, _ = service()
+    env.path.write_bytes(b'<?xml version="1.0"?><jmeterTestPlan><hashTree><ThreadGroup testname="g">'
+                         b'<stringProp name="ThreadGroup.num_threads">10</stringProp></ThreadGroup><hashTree/>'
+                         b'</hashTree></jmeterTestPlan>')
+    original = env.path.read_bytes()
+    prepared = await lifecycle.prepare(str(env.path), 'scaled', threads=40, purpose={'kind': 'verification'})
+    assert b'>40<' in Path(prepared.jmx_path).read_bytes() and env.path.read_bytes() == original
+    assert prepared.context_snapshot['test_config']['concurrent_users'] == 40
+    assert prepared.context_snapshot['purpose'] == {'kind': 'verification'}
+    await lifecycle.shutdown()

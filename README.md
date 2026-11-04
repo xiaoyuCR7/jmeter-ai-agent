@@ -55,7 +55,10 @@ flowchart LR
 | **Start from a document** | One wizard for a requirements/API document or an OpenAPI URL; produces the project, test plans and a requirements draft. |
 | **Baselines that stay put** | One click on a report sets it as the baseline. The baseline keeps a metrics snapshot, so deleting old runs does not break comparisons. |
 | **Server-side evidence** | Prometheus presets for host (node_exporter), JVM + HikariCP and MySQL; collected per run window and cached. |
-| **Honest AI analysis** | Fact sheet and number validation. Reports compare with earlier runs of the plan, other loads and the same requests in other plans, check earlier predictions automatically, and cite lessons your team saved. DeepSeek, OpenAI, Claude, Qwen or any OpenAI-compatible endpoint. |
+| **Honest AI analysis** | Fact sheet and number validation: each number is checked against the request it names, or the whole run, in Chinese and English reports alike. Reports compare with earlier runs of the plan, other loads and the same requests in other plans, check earlier predictions automatically, and cite lessons your team saved. Reports follow the UI language, or `REPORT_LANGUAGE`. |
+| **Most model providers** | 25 presets: OpenAI, Claude, Gemini, Azure OpenAI, xAI Grok, Mistral, Cohere, Groq, OpenRouter, Together, DeepSeek, Qwen, Kimi, Zhipu GLM, Doubao, ERNIE, Hunyuan, MiniMax, StepFun, SiliconFlow, plus local Ollama, LM Studio, vLLM and any OpenAI- or Anthropic-compatible API. Parameters reasoning models refuse are adapted automatically. |
+| **Verification and capacity** | A hypothesis a program can check gets a **Run a check** button: the plan reruns at the load its prediction names and the run settles it. **Capacity search** raises the load step by step and stops at the first step that fails a requirement, errors too much or stops gaining throughput. |
+| **Run guard and CI gate** | A run whose recent requests nearly all fail is stopped, with the reason recorded. `scripts/ci_gate.py` runs a plan and exits non-zero when it fails a requirement or regresses against the baseline. |
 | **MCP built in** | Streamable HTTP endpoint with evidence tools (`get_execution_evidence`, `extract_performance_requirements`, `promote_execution_to_baseline`, …). Writes need your confirmation in the UI. |
 | **Solid JMeter plumbing** | Streaming JTL parser with exact percentiles and flat memory use, queued runs when the load generator is busy, live progress over WebSocket, and a one-user trial run that shows each response and offers extractor fixes proven by it. |
 | **Private by default** | No accounts and no login; the server refuses to bind to anything but loopback, and Host/Origin checks block other sites in your browser. |
@@ -109,9 +112,10 @@ cd jmeter-agent-backend && pip install -r requirements.txt && python -m app.main
 cd jmeter-agent-frontend && npm install && npm run dev                             # open the link the backend prints
 ```
 
-**3. Add a model** in **Settings → AI models**: pick DeepSeek, Qwen, OpenAI, Claude or any OpenAI-compatible endpoint and paste
-an API key. Leave **Context window** empty and the app asks the provider for the model's real size (DeepSeek and Claude report
-it; documented sizes cover the rest). Then click **Start from a document**.
+**3. Add a model** in **Settings → AI models**: pick one of 25 providers (China, international and local) and paste an API key.
+Local servers such as Ollama and LM Studio need none; Azure OpenAI takes its resource endpoint, an API version and the
+deployment name as the model. Leave **Context window** empty and the app asks the provider for the model's real size,
+falling back to the documented size. Then click **Start from a document**.
 
 API docs are served at http://127.0.0.1:8000/api/docs.
 
@@ -131,6 +135,19 @@ never stops a load test; poll `get_execution_status` for the result. Tools that 
 minutes for your approval in the JMeter Agent window, so keep it open. If the client cancels or disconnects first, the
 request and its pending approval are dropped.
 
+## CI
+
+On the machine that runs JMeter Agent (a self-hosted runner):
+
+```bash
+python jmeter-agent-backend/scripts/ci_gate.py --plan <test-plan-id>
+```
+
+It starts the plan, polls `GET /api/v1/executions/{id}/gate` and exits `0` when requirements and the baseline pass,
+`1` when a requirement fails or the run regressed against the baseline, and `2` when the run did not complete or timed out.
+The token comes from `--token`, `JMETER_AGENT_TOKEN` or `.local_access_token`. A plan with scripts is refused once with the
+`sha256` to approve; pass it with `--approved-sha256` once you trust the plan.
+
 ## Configuration
 
 Common settings in `jmeter-agent-backend/.env`:
@@ -147,6 +164,11 @@ Common settings in `jmeter-agent-backend/.env`:
 | `RESOURCE_CPU_THRESHOLD` / `RESOURCE_MEMORY_THRESHOLD` | Queue new runs above this load-generator usage (%) | `80` / `85` |
 | `DEFAULT_AI_MODEL` | Model ID used when a request names none | first enabled model |
 | `AGENT_CONTEXT_TOKEN_BUDGET` | Token budget for a model whose context window is unknown | `16384` |
+| `AGENT_MAX_CONCURRENT` | AI tasks at once; reports written after runs use at most N-1, leaving one for questions | `3` |
+| `REPORT_LANGUAGE` | Language of reports written after a run, `zh-CN` or `en`; empty follows `I18N_DEFAULT_LANG`. Rewrites and questions follow the page | empty |
+| `RUN_GUARD_ENABLED` | Stop a run whose recent requests nearly all fail | `true` |
+| `RUN_GUARD_ERROR_RATE` / `RUN_GUARD_WINDOW_SECONDS` | Error rate (%) and window (s) that stop a run; two checks in a row must exceed it | `90` / `30` |
+| `RUN_GUARD_MIN_SAMPLES` / `RUN_GUARD_GRACE_SECONDS` | Fewer requests than this in the window decide nothing; nor does the start of the run | `50` / `30` |
 
 Model API keys are not read from `.env`; add models in the UI. They are stored in `jmeter-agent-backend/ai_models_config.json`,
 which git ignores.
@@ -264,6 +286,8 @@ jmeter-ai-agent/
 </details>
 
 ## Development
+
+How the code is divided and where AI is and is not used: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (Chinese).
 
 ```bash
 cd jmeter-agent-backend && pip install -r requirements-dev.txt && pytest tests

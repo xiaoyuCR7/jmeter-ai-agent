@@ -7,12 +7,37 @@ import openai
 import anthropic
 
 from app.services.ai.adapters.factory import AIAdapterFactory
-from app.services.ai.prompts.test_analyzer import TEST_ANALYZER_SYSTEM_PROMPT, build_analysis_prompt
+from app.core.lang_utils import language_instruction
+from app.services.ai.prompts.test_analyzer import REPORT_SCHEMA, TEST_ANALYZER_SYSTEM_PROMPT, build_analysis_prompt
 from app.services.ai.memory.fact_ledger import FactLedger
 from app.services.ai.memory.validators import fact_validator
 from app.models.schemas import DetailedTestSummary, ReportAnalysis
 
 logger = logging.getLogger(__name__)
+
+# What the report says when the model could not write it, in the report's language.
+FALLBACK = {
+    'zh-CN': {'over_budget': '分析输入与输出预留超过上下文预算，未发送模型请求',
+              'unusable': 'AI分析输出未通过结构校验，未采纳为结论',
+              'failed': 'AI分析失败（{attempts}次尝试后）: {error}',
+              'conclusion': 'AI分析不可用，请参考原始指标数据人工判断',
+              'shrink': '请缩小分析输入或核对模型上下文预算；无需重新执行压测',
+              'format': '请检查AI模型输出格式；无需重新执行压测',
+              'config': '请检查AI模型配置和网络连接；无需重新执行压测'},
+    'en': {'over_budget': 'The analysis input and reserved output exceed the context budget; the model was not called',
+           'unusable': 'The model output did not pass the structure check and was not used',
+           'failed': 'AI analysis failed after {attempts} attempts: {error}',
+           'conclusion': 'AI analysis is unavailable; judge from the measured metrics',
+           'shrink': 'Reduce the input or check the model context window; the test need not be rerun',
+           'format': 'Check the model output format; the test need not be rerun',
+           'config': 'Check the AI model settings and network access; the test need not be rerun'},
+}
+
+
+def _unavailable(lang: str, status: str, assessment: str, advice: str, **values) -> ReportAnalysis:
+    text = FALLBACK['en' if lang == 'en' else 'zh-CN']
+    return ReportAnalysis(analysis_status=status, overall_assessment=text[assessment].format(**values),
+                          conclusion=text['conclusion'], recommendations=[text[advice]], language=lang)
 
 # Timeout for LLM analysis call — prevents hanging on slow/unresponsive models
 AI_ANALYSIS_TIMEOUT_SECONDS = 120
@@ -49,12 +74,13 @@ class TestAnalyzer:
         self._exchange: list = []  # The prompt and the model's reply, for one correction round.
 
     async def analyze(self, summary_data: dict, test_config: dict, test_type: str,
-                      evidence_text: str = '') -> ReportAnalysis:
+                      evidence_text: str = '', lang: str = 'zh-CN') -> ReportAnalysis:
         """分析测试报告；evidence_text 是确定性证据（需求判定、基线对比、服务端指标）"""
-        prompt = build_analysis_prompt(summary_data, test_config, test_type, evidence_text)
+        self.lang = lang
+        prompt = build_analysis_prompt(summary_data, test_config, test_type, evidence_text, lang)
 
         messages = [
-            {"role": "system", "content": TEST_ANALYZER_SYSTEM_PROMPT},
+            {"role": "system", "content": TEST_ANALYZER_SYSTEM_PROMPT + "\n\n" + language_instruction(lang)},
             {"role": "user", "content": prompt}
         ]
 
@@ -64,10 +90,7 @@ class TestAnalyzer:
         try:
             chat_messages = self.adapter.prepare_chat_messages(chat_messages, response_tokens=AI_ANALYSIS_MAX_TOKENS)
         except ValueError:
-            return ReportAnalysis(analysis_status="failed",
-                overall_assessment="分析输入与输出预留超过上下文预算，未发送模型请求",
-                conclusion="AI分析不可用，请参考原始指标数据人工判断",
-                recommendations=["请缩小分析输入或核对模型上下文预算；无需重新执行压测"])
+            return _unavailable(lang, 'failed', 'over_budget', 'shrink')
 
         # Call LLM with timeout + retry for transient failures
         last_error = None
@@ -75,7 +98,7 @@ class TestAnalyzer:
             try:
                 response = await asyncio.wait_for(
                     self.adapter.chat(chat_messages, temperature=0.3, max_tokens=AI_ANALYSIS_MAX_TOKENS, max_retries=0,
-                                      json_mode=True),
+                                      json_mode=True, json_schema=REPORT_SCHEMA),
                     timeout=AI_ANALYSIS_TIMEOUT_SECONDS,
                 )
                 try:
@@ -87,10 +110,7 @@ class TestAnalyzer:
                         logger.warning("AI analysis attempt %d/%d returned unusable output",
                                        attempt + 1, AI_ANALYSIS_MAX_RETRIES + 1)
                         continue
-                    return ReportAnalysis(analysis_status="invalid",
-                        overall_assessment="AI分析输出未通过结构校验，未采纳为结论",
-                        conclusion="AI分析不可用，请参考原始指标数据人工判断",
-                        recommendations=["请检查AI模型输出格式；无需重新执行压测"])
+                    return _unavailable(lang, 'invalid', 'unusable', 'format')
             except asyncio.TimeoutError:
                 last_error = f"LLM analysis timed out after {AI_ANALYSIS_TIMEOUT_SECONDS}s"
                 logger.warning("AI analysis attempt %d/%d: %s",
@@ -110,20 +130,7 @@ class TestAnalyzer:
                 await asyncio.sleep(2 ** attempt)
 
         # All retries exhausted — return fallback
-        return ReportAnalysis(
-            analysis_status="failed",
-            overall_assessment=f"AI分析失败（{attempt + 1}次尝试后）: {last_error}",
-            key_findings=[],
-            specific_issues=[],
-            timeline_analysis="",
-            resource_bottlenecks=[],
-            performance_bottlenecks=[],
-            error_analysis=[],
-            recommendations=["请检查AI模型配置和网络连接；无需重新执行压测"],
-            improvement_plan=[],
-            risk_areas=[],
-            conclusion="AI分析不可用，请参考原始指标数据人工判断"
-        )
+        return _unavailable(lang, 'failed', 'failed', 'config', attempts=attempt + 1, error=last_error)
 
     async def correct_numbers(self, mismatches: list[dict]) -> Optional[ReportAnalysis]:
         """The last analysis rewritten with its mismatched numbers fixed or removed; None if that fails."""
@@ -132,12 +139,12 @@ class TestAnalyzer:
         if not self._exchange:
             return None
         messages = [*self._exchange, AIChatMessage(role='user', content=correction_request(
-            mismatches, '输出改正后的完整 JSON，字段和结构与上次相同。'))]
+            mismatches, '输出改正后的完整 JSON，字段和结构与上次相同。', getattr(self, 'lang', 'zh-CN')))]
         try:
             messages = self.adapter.prepare_chat_messages(messages, response_tokens=AI_ANALYSIS_MAX_TOKENS)
             response = await asyncio.wait_for(
                 self.adapter.chat(messages, temperature=0.0, max_tokens=AI_ANALYSIS_MAX_TOKENS, max_retries=0,
-                                  json_mode=True),
+                                  json_mode=True, json_schema=REPORT_SCHEMA),
                 timeout=AI_ANALYSIS_TIMEOUT_SECONDS)
             return self._parse_response(response)
         except Exception as error:
@@ -188,6 +195,7 @@ class TestAnalyzer:
         for name, limit in FIELD_LIMITS.items():
             if isinstance(data.get(name), list):
                 data[name] = data[name][:limit]
+        data['language'] = getattr(self, 'lang', 'zh-CN')
         result = ReportAnalysis.model_validate(data)
         if not result.overall_assessment.strip() or not result.conclusion.strip():
             raise ValueError('Analysis assessment and conclusion are required')
