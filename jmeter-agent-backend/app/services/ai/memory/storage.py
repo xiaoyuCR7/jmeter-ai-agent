@@ -79,7 +79,7 @@ class MemoryDatabase:
             try:
                 await self._db_conn.close()
             except Exception:
-                pass
+                logger.debug("Closing the memory database failed", exc_info=True)
             self._db_conn = None
 
     async def _adopt_legacy(self, db) -> None:

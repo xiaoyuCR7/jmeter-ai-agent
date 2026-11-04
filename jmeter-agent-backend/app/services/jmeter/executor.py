@@ -38,6 +38,7 @@ logger = logging.getLogger(__name__)
 CONTAINER_LABEL = 'jmeter-agent'  # every run container carries it, so orphans can be found
 DOCKER_ENVIRONMENT = {'DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_CONFIG', 'DOCKER_CERT_PATH', 'DOCKER_TLS_VERIFY'}
 OUTPUT_CHECK_SECONDS = 5.0
+PROGRESS_TICK_SECONDS = 5.0
 
 
 def _is_pid_running(pid: Optional[int]) -> bool:
@@ -480,26 +481,23 @@ class JMeterExecutor:
             pass  # flag file is best-effort; caller handles JTL checks independently
     
     async def _monitor_progress(self, execution_id: str, flag_file: str,
-                                callback: Callable[[int], None]):
-        """监控进度"""
-        progress = 0
-        last_progress = -1
+                                callback: Callable[[Optional[int]], None]):
+        """Tick every few seconds while JMeter runs; the caller turns elapsed time into a percentage.
+
+        The executor cannot know how far a run has got. It used to add 5% a tick and stop calling once
+        that guess reached 95, which also froze the caller's real, clock-based progress after 95 s.
+        """
         while not os.path.exists(flag_file):
-            await asyncio.sleep(5)
-            progress = min(progress + 5, 95)
-            if progress == last_progress:
-                continue
-            last_progress = progress
+            await asyncio.sleep(PROGRESS_TICK_SECONDS)
             try:
-                callback(progress)
+                callback(None)
             except Exception:
-                pass
-        # Final push so subscribers see 100% immediately
+                logger.debug("Progress callback failed for %s", execution_id, exc_info=True)
         try:
             callback(100)
         except Exception:
-            pass
-    
+            logger.debug("Final progress callback failed for %s", execution_id, exc_info=True)
+
     def _kill_process(self, execution_id: str) -> bool:
         """Terminate the complete owned tree before dropping its registry entry."""
         entry = self._running_processes.get(execution_id)

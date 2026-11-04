@@ -57,10 +57,10 @@ export default defineConfig({
     minify: 'terser',
     rollupOptions: {
       output: {
+        // Only libraries every page uses get a chunk of their own. Naming whole packages here
+        // (element-plus, echarts) put all of each in the first download, tree shaking undone.
         manualChunks: {
           'vue-core': ['vue', 'vue-router', 'pinia'],
-          'element-plus': ['element-plus'],
-          'echarts': ['echarts', 'vue-echarts'],
           'markdown': ['markdown-it', 'highlight.js'],
         },
       },

@@ -103,10 +103,10 @@ class LiveStats:
     def elapsed_seconds(self) -> float:
         return time.monotonic() - self.started
 
-    def progress(self, fallback: int) -> int:
-        """Elapsed time against the planned duration; the caller's guess when the run ends by loop count."""
+    def progress(self) -> Optional[int]:
+        """Elapsed time against the planned duration; unknown (None) when the run ends by loop count."""
         if not self.planned_seconds:
-            return fallback
+            return None
         return max(1, min(99, int(100 * self.elapsed_seconds() / self.planned_seconds)))
 
     def snapshot(self) -> dict:

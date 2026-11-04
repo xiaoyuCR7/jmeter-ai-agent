@@ -82,11 +82,11 @@ def test_only_the_last_hour_of_buckets_is_kept():
 def test_progress_follows_the_clock_when_the_plan_has_a_duration(monkeypatch):
     stats = LiveStats(planned_seconds=200)
     monkeypatch.setattr(time, 'monotonic', lambda: stats.started + 50)
-    assert stats.progress(fallback=5) == 25
+    assert stats.progress() == 25
     assert stats.snapshot()['remaining_seconds'] == 150
     monkeypatch.setattr(time, 'monotonic', lambda: stats.started + 500)
-    assert stats.progress(fallback=5) == 99  # Never 100 before JMeter has actually ended.
-    assert LiveStats().progress(fallback=35) == 35
+    assert stats.progress() == 99  # Never 100 before JMeter has actually ended.
+    assert LiveStats().progress() is None
 
 
 @pytest.mark.asyncio
@@ -126,3 +126,19 @@ async def test_the_live_endpoint_says_when_there_is_nothing_live(monkeypatch):
     assert live['available'] is True and live['totals']['requests'] == 1 and live['planned_threads'] == 10
     with pytest.raises(Exception):
         await execution_routes.get_execution_live('missing')
+
+
+@pytest.mark.asyncio
+async def test_the_executor_keeps_ticking_for_as_long_as_jmeter_runs(tmp_path, monkeypatch):
+    """It once stopped calling after its own 5%-a-tick guess reached 95, freezing real progress after 95 s."""
+    import asyncio
+    from app.services.jmeter import executor as module
+    monkeypatch.setattr(module, 'PROGRESS_TICK_SECONDS', 0.001)
+    flag, ticks = tmp_path / '_done.flag', []
+
+    def callback(pct):
+        ticks.append(pct)
+        if len(ticks) == 40:
+            flag.write_text('COMPLETED')
+    await asyncio.wait_for(module.JMeterExecutor.__new__(module.JMeterExecutor)._monitor_progress('x', str(flag), callback), 5)
+    assert ticks[:40] == [None] * 40 and ticks[-1] == 100

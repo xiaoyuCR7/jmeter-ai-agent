@@ -27,6 +27,21 @@ def run(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_seconds_count_from_the_earliest_sample_not_the_first_row(tmp_path, monkeypatch):
+    """A slow request ends, and is written, after quicker ones that started later."""
+    from app.core.config import settings
+    monkeypatch.setattr(settings, 'REPORTS_DIR_DEFAULT', str(tmp_path))
+    rows = ['3000,120,GET /a,200,OK,true,,5,100,2', '1000,2500,GET /slow,200,OK,true,,5,100,2']
+    (tmp_path / 'result.jtl').write_text(HEADER + '\n'.join(rows) + '\n', encoding='utf-8')
+    execution = SimpleNamespace(id='r', project_id='p', test_plan_id='plan', report_dir=str(tmp_path),
+                                log_path=None, jmx_path='plan.jmx')
+    tools = {tool.name: tool.handler for tool in run_tools(execution)}
+    found = await tools['find_samples']()
+    assert [(s['label'], s['second']) for s in found['samples']] == [('GET /a', 2.0), ('GET /slow', 0.0)]
+    assert (await tools['find_samples'](to_second=1))['matched'] == 1
+
+
+@pytest.mark.asyncio
 async def test_samples_can_be_filtered_by_request_failure_speed_and_time(run):
     failed = await run['find_samples'](failed_only=True)
     assert failed['matched'] == 1 and failed['samples'][0]['message'] == 'boom' and failed['samples'][0]['code'] == '500'

@@ -19,32 +19,39 @@ def _jtl(execution) -> str:
     return safe_path(os.path.join(execution.report_dir or '', 'result.jtl'), [settings.REPORTS_DIR])
 
 
-def _samples(jtl_path: str, label, failed_only, min_elapsed_ms, from_second, to_second, limit) -> dict:
-    matched, total, first = [], 0, None
+def _rows(jtl_path: str):
+    """(row, timeStamp, elapsed) for each readable sample."""
     with open(jtl_path, encoding='utf-8', errors='replace', newline='') as file:
         for row in csv.DictReader(file):
             try:
-                stamp, elapsed = int(row.get('timeStamp') or 0), int(row.get('elapsed') or 0)
+                yield row, int(row.get('timeStamp') or 0), int(row.get('elapsed') or 0)
             except ValueError:
                 continue
-            first = stamp if first is None else first
-            second = (stamp - first) / 1000
-            if ((label and row.get('label') != label) or (failed_only and row.get('success') == 'true')
-                    or (min_elapsed_ms is not None and elapsed < min_elapsed_ms)
-                    or (from_second is not None and second < from_second)
-                    or (to_second is not None and second > to_second)):
-                continue
-            total += 1
-            if len(matched) < limit:
-                matched.append({
-                    'second': round(second, 1), 'label': row.get('label'), 'elapsed_ms': elapsed,
-                    'connect_ms': row.get('Connect'), 'latency_ms': row.get('Latency'),
-                    'code': row.get('responseCode'), 'success': row.get('success') == 'true',
-                    'message': (row.get('failureMessage') or row.get('responseMessage') or '')[:200],
-                    'threads': row.get('allThreads'),
-                })
+
+
+def _samples(jtl_path: str, label, failed_only, min_elapsed_ms, from_second, to_second, limit) -> dict:
+    # Threads write rows as their samples end, so the file is not in start order: count from the
+    # earliest sample, not the first row, or "second 0" moves and early samples get negative seconds.
+    first = min((stamp for _, stamp, _ in _rows(jtl_path)), default=0)
+    matched, total = [], 0
+    for row, stamp, elapsed in _rows(jtl_path):
+        second = (stamp - first) / 1000
+        if ((label and row.get('label') != label) or (failed_only and row.get('success') == 'true')
+                or (min_elapsed_ms is not None and elapsed < min_elapsed_ms)
+                or (from_second is not None and second < from_second)
+                or (to_second is not None and second > to_second)):
+            continue
+        total += 1
+        if len(matched) < limit:
+            matched.append({
+                'second': round(second, 1), 'label': row.get('label'), 'elapsed_ms': elapsed,
+                'connect_ms': row.get('Connect'), 'latency_ms': row.get('Latency'),
+                'code': row.get('responseCode'), 'success': row.get('success') == 'true',
+                'message': (row.get('failureMessage') or row.get('responseMessage') or '')[:200],
+                'threads': row.get('allThreads'),
+            })
     return {'matched': total, 'shown': len(matched), 'samples': matched,
-            'note': 'seconds count from the first sample; the first rows that match are shown'}
+            'note': 'seconds count from the earliest sample; the first rows that match are shown'}
 
 
 def run_tools(execution) -> list[Tool]:

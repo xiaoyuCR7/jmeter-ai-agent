@@ -29,7 +29,7 @@
         <el-table-column :label="L('状态', 'Status')" width="96">
           <template #default="{ row }">
             <StatusTag :status="row.status" />
-            <el-progress v-if="row.status === 'running'" :percentage="row.progress || 0" :stroke-width="4" :show-text="false" />
+            <el-progress v-if="row.status === 'running' && row.progress != null" :percentage="row.progress" :stroke-width="4" :show-text="false" />
             <el-tooltip v-if="row.status === 'failed' && row.error_message" :content="row.error_message" placement="top">
               <div class="sub error">{{ row.error_message }}</div>
             </el-tooltip>

@@ -387,7 +387,8 @@ class ExecutionLifecycle:
             live = live_stats.start(execution_id, *_planned_load(execution.jmx_path))
 
             def progress(pct):
-                pct = pct if pct >= 100 else live.progress(pct)  # Real elapsed time when the plan has a duration.
+                # Real elapsed time when the plan has a duration; otherwise nobody knows, so no number.
+                pct = 100 if pct == 100 else live.progress()
                 execution.progress = pct
                 cached = store.get_execution(execution_id)
                 if cached:

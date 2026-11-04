@@ -3,6 +3,9 @@ from pydantic import Field, field_validator
 from typing import Optional, List, Dict, Any, Literal
 import os
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 # 路径配置文件
 PATHS_CONFIG_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "paths_config.json")
@@ -14,8 +17,9 @@ def load_paths_config() -> Dict[str, str]:
         try:
             with open(PATHS_CONFIG_FILE, 'r', encoding='utf-8') as f:
                 return json.load(f)
-        except Exception:
-            pass
+        except Exception as error:
+            # Not silent: the app would quietly fall back to default folders and the user's choice is lost.
+            logger.warning("Ignoring unreadable %s: %s", PATHS_CONFIG_FILE, error)
     return {}
 
 
@@ -179,8 +183,8 @@ def load_user_model_configs() -> List[Dict[str, Any]]:
         try:
             with open(settings.AI_MODELS_CONFIG_FILE, 'r', encoding='utf-8') as f:
                 return json.load(f)
-        except Exception:
-            pass
+        except Exception as error:
+            logger.warning("Ignoring unreadable %s: %s", settings.AI_MODELS_CONFIG_FILE, error)
     return []
 
 
