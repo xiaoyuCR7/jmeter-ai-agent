@@ -57,9 +57,9 @@ async def get_execution_evidence(execution_id: str) -> dict:
 
 
 async def promote_execution_to_baseline(execution_id: str) -> dict:
-    from app.api.baseline_routes import promote_execution_to_baseline as promote
+    from app.services.baseline_compare import promote_execution
     validate_id(execution_id)
-    return await promote(execution_id)
+    return await promote_execution(execution_id)
 
 
 # Spelled out so the model uses the real field names; with a bare "object" it once sent

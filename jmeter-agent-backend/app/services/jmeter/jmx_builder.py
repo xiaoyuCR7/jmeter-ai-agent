@@ -3,10 +3,7 @@ import xml.etree.ElementTree as ET
 from xml.dom import minidom
 from typing import Any, Dict
 
-from app.services.jmeter.jmx_parser import ROOT_ATTRS_KEY, SOURCE_KEY
-
-THREAD_GROUP_CLASSES = {"ThreadGroup", "SetupThreadGroup", "PostThreadGroup"}
-HTTP_SAMPLER_CLASSES = {"HTTPSamplerProxy", "HTTPSampler"}
+from app.services.jmeter.jmx_parser import HTTP_SAMPLER_CLASSES, ROOT_ATTRS_KEY, SOURCE_KEY, THREAD_GROUP_CLASSES
 
 LISTENER_TYPE_LABELS = {
     "ViewResultsFullVisualizer": "View Results Tree",

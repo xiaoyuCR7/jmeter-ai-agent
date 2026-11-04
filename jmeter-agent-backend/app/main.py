@@ -6,62 +6,52 @@ warnings.filterwarnings(
     category=UserWarning,
 )
 
-import sys
-import os
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
+import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager, AsyncExitStack
-from fastapi import FastAPI, HTTPException
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+from app.api import routes, shared
+from app.api.mcp_routes import init_mcp_server
+from app.core import local_access
+from app.core.config import settings, validate_deployment_security
+from app.core.errors import ServiceError
+from app.middleware.local_guard import (
+    LocalAccessMiddleware, OriginGuardMiddleware, ReportSandboxMiddleware, TrustedHostMiddleware,
+)
+from app.models.db import init_db
+from app.services import experiments, notifications, post_run
+from app.services.ai.adapters.factory import AIAdapterFactory
+from app.services.ai.memory import fact_ledger, hypothesis_ledger
+from app.services.execution_lifecycle import execution_lifecycle
+from app.services.jmeter import environment as run_environment, resource_monitor
+from app.services.storage import store
 
 logger = logging.getLogger(__name__)
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
 
-from app.core.config import settings
-from app.api import routes, shared
+frontend_dist = os.path.join(os.path.dirname(settings.BASE_DIR), "jmeter-agent-frontend", "dist")
+
+
+async def _stop_monitoring():
+    if resource_monitor._monitor is not None:
+        await resource_monitor._monitor.stop_monitoring()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期管理 - 替代 on_startup/on_shutdown"""
-    from app.core.config import validate_deployment_security
     validate_deployment_security()
-    from app.core import local_access
     # On the console only: this link is a credential and must stay out of log files.
     print(f'Open JMeter Agent: {local_access.access_url()}', flush=True)
     if os.path.exists(frontend_dist):
         print(f'Built UI: {local_access.access_url(f"http://localhost:{settings.PORT}")}', flush=True)
-    # 启动时执行
-    logger.info("Initializing database...")
-    from app.models.db import init_db
     await init_db()
-    logger.info("Database initialized.")
-
-    # Sync in-memory cache from persisted DB data
-    logger.info("Syncing in-memory store from database...")
-    from app.services.storage import store
     await store.sync_from_dbstore()
-    logger.info("Store synced from database.")
-
-    if "*" in settings.CORS_ORIGINS:
-        raise RuntimeError("CORS_ORIGINS must list trusted origins, not '*'")
-
     await shared.ensure_default_project()
-
-    import asyncio as _asyncio
-    from app.api.mcp_routes import init_mcp_server
-    from app.services.execution_lifecycle import execution_lifecycle
-    from app.services import notifications, post_run
-    from app.services.ai.adapters.factory import AIAdapterFactory
-    from app.services.ai.memory import fact_ledger, hypothesis_ledger
-    from app.services.jmeter import resource_monitor
-
-    async def stop_monitoring():
-        if resource_monitor._monitor is not None:
-            await resource_monitor._monitor.stop_monitoring()
 
     async with AsyncExitStack() as cleanup:
         # LIFO cleanup remains guaranteed if startup, serving, or one cleanup fails.
@@ -69,7 +59,7 @@ async def lifespan(app: FastAPI):
         # Pushed early so they close late. An open connection's thread would keep the process from exiting.
         cleanup.push_async_callback(fact_ledger.close)
         cleanup.push_async_callback(hypothesis_ledger.close)
-        cleanup.push_async_callback(stop_monitoring)
+        cleanup.push_async_callback(_stop_monitoring)
         execution_lifecycle.start()
         notifications.register(execution_lifecycle)
         execution_lifecycle.set_post_run(post_run.finish_run)
@@ -79,31 +69,30 @@ async def lifespan(app: FastAPI):
         cleanup.callback(notifications.unregister, execution_lifecycle)
         cleanup.push_async_callback(execution_lifecycle.shutdown)
         cleanup.push_async_callback(post_run.stop_reanalyses)
-        from app.services import experiments
         cleanup.push_async_callback(experiments.stop_searches)
         await post_run.recover_interrupted()
-        await _asyncio.to_thread(experiments.recover_searches)
+        await asyncio.to_thread(experiments.recover_searches)
         # A run cut off by a restart never masked the secrets its copy of the plan carried.
-        from app.services.jmeter import environment as run_environment
         for execution in list(store.executions.values()):
-            await _asyncio.to_thread(run_environment.scrub, execution.jmx_path)
+            await asyncio.to_thread(run_environment.scrub, execution.jmx_path)
         # Older runs join project history in the background; reading their plans can take a while.
-        backfill = _asyncio.create_task(post_run.backfill_memory())
+        backfill = asyncio.create_task(post_run.backfill_memory())
+
         async def stop_backfill():
             backfill.cancel()
-            await _asyncio.gather(backfill, return_exceptions=True)
+            await asyncio.gather(backfill, return_exceptions=True)
         cleanup.push_async_callback(stop_backfill)
 
         await init_mcp_server()
 
         try:
             from app.services.jmeter.executor import get_executor, remove_orphan_containers
-            await _asyncio.to_thread(remove_orphan_containers)
+            await asyncio.to_thread(remove_orphan_containers)
             executor = get_executor()
             if executor.jmeter_path:
-                logger.info(f"JMeter executable found at: {executor.jmeter_path}")
+                logger.info("JMeter executable found at: %s", executor.jmeter_path)
         except Exception as e:
-            logger.warning(f"JMeter health check failed on startup: {e}")
+            logger.warning("JMeter health check failed on startup: %s", e)
 
         yield
 
@@ -117,15 +106,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
+@app.exception_handler(ServiceError)
+async def service_error(_request: Request, error: ServiceError):
+    return JSONResponse(status_code=error.status_code, content={"detail": error.detail})
+
+
 # Local single-user tool: no accounts. The access token proves a caller is the user; Origin
 # checks still stop other websites in the same browser from driving the local API.
-from app.middleware.local_guard import (
-    LocalAccessMiddleware, OriginGuardMiddleware, ReportSandboxMiddleware, TrustedHostMiddleware,
-)
 app.add_middleware(LocalAccessMiddleware)
 app.add_middleware(ReportSandboxMiddleware)
 app.add_middleware(OriginGuardMiddleware)
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
@@ -133,41 +124,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 # Validate Host before deriving same-origin from it (DNS rebinding).
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.ALLOWED_HOSTS)
 
-# Health check (must be before catch-all)
+
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
 
-# API Routes
+
 app.include_router(routes.router, prefix="/api/v1")
 
-# Baseline routes (separate module)
-from app.api.baseline_routes import router as baseline_router
-app.include_router(baseline_router, prefix="/api/v1")
 
-from app.api.requirement_routes import router as requirement_router
-app.include_router(requirement_router, prefix="/api/v1")
-
-from app.api.analysis_routes import router as analysis_router
-app.include_router(analysis_router, prefix="/api/v1")
-
-# Test data routes (separate module)
-from app.api.data_routes import router as data_router
-app.include_router(data_router, prefix="/api/v1")
-
-# MCP Server routes
-from app.api.mcp_routes import router as mcp_router
-app.include_router(mcp_router, prefix="/api/v1")
-
-# Hypotheses, lessons and the memory overview
-from app.api.memory_routes import router as memory_router
-app.include_router(memory_router, prefix="/api/v1")
-
-# Static files for reports
 class ReportFiles(StaticFiles):
     """Follow the reports folder, which can be changed in settings while the app runs."""
     def lookup_path(self, path):
@@ -178,34 +146,27 @@ class ReportFiles(StaticFiles):
 os.makedirs(settings.REPORTS_DIR, exist_ok=True)
 app.mount("/reports", ReportFiles(directory=settings.REPORTS_DIR), name="reports")
 
-# Frontend static files
-frontend_dist = os.path.join(os.path.dirname(settings.BASE_DIR), "jmeter-agent-frontend", "dist")
 if os.path.exists(frontend_dist):
     app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dist, "assets")), name="assets")
 
-@app.get("/vite.svg")
-async def vite_svg():
-    svg_path = os.path.join(frontend_dist, "vite.svg")
-    if os.path.exists(svg_path):
-        return FileResponse(svg_path)
-    return {"detail": "Not found"}
 
 @app.get("/")
 async def root():
     index_path = os.path.join(frontend_dist, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path)
-    return {
-        "name": settings.APP_NAME,
-        "version": settings.APP_VERSION,
-        "docs": "/api/docs",
-    }
+    return {"name": settings.APP_NAME, "version": settings.APP_VERSION, "docs": "/api/docs"}
+
 
 @app.get("/{path:path}")
 async def catch_all(path: str):
-    # Skip API and reports paths - return proper 404
-    if path.startswith("api/") or path.startswith("reports/") or path == "health" or path == "vite.svg":
+    """A file at the top of the built UI (logo.svg) as itself; any other page route gets the app."""
+    if path.startswith(("api/", "reports/")) or path == "health":
         raise HTTPException(status_code=404, detail="Not found")
+    if path and "/" not in path and "\\" not in path:
+        candidate = os.path.join(frontend_dist, path)
+        if os.path.isfile(candidate):
+            return FileResponse(candidate)
     index_path = os.path.join(frontend_dist, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path)

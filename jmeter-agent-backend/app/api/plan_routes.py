@@ -5,6 +5,7 @@ import asyncio
 from datetime import datetime
 from typing import Optional
 
+from app.core.errors import ServiceError
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 from app.models.schemas import (
@@ -162,7 +163,7 @@ async def generate_test_plan(request: GenerateTestPlanRequest, project_id: str =
 
         await _persist_test_plan(info)
         return info
-    except HTTPException:
+    except (HTTPException, ServiceError):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -233,6 +234,8 @@ async def update_jmx_tree(plan_id: str, request: UpdateJMXTreeRequest):
     except Exception as e:
         if os.path.exists(temp_path):
             os.remove(temp_path)
+        if isinstance(e, ServiceError):
+            raise
         raise HTTPException(status_code=500, detail=f"Failed to update JMX: {str(e)}")
 
 

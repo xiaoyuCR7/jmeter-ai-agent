@@ -7,6 +7,7 @@ import uuid
 import shutil
 import tempfile
 from typing import Optional, List
+from app.core.errors import ServiceError
 from fastapi import APIRouter, HTTPException, UploadFile, File, Query, Depends
 from fastapi.responses import FileResponse
 
@@ -183,7 +184,7 @@ async def list_data_files(
                 if os.path.isdir(item_path):
                     try:
                         search_dirs.append(_data_path(item_path))
-                    except HTTPException as error:
+                    except (HTTPException, ServiceError) as error:
                         if error.status_code not in (403, 404):
                             raise
                         continue
@@ -196,7 +197,7 @@ async def list_data_files(
             if fname.endswith(".csv"):
                 try:
                     fpath = _data_path(os.path.join(search_dir, fname))
-                except HTTPException as error:
+                except (HTTPException, ServiceError) as error:
                     if error.status_code not in (403, 404):
                         raise
                     continue

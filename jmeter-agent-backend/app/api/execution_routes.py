@@ -7,6 +7,7 @@ from dataclasses import asdict
 from datetime import datetime
 from typing import Optional
 
+from app.core.errors import ServiceError
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Query
 from fastapi.responses import FileResponse
 from fastapi.responses import StreamingResponse
@@ -352,7 +353,7 @@ async def ask_about_execution_stream(execution_id: str, request: RunQuestion, la
             else:
                 try:
                     payload = {'step': 'answer', 'answer': await _save_answer(execution_id, request.question, result, used)}
-                except HTTPException as error:
+                except (HTTPException, ServiceError) as error:
                     payload = {'step': 'error', 'message': error.detail}
             yield f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
 

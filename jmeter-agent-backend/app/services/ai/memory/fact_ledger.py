@@ -13,7 +13,7 @@ import hashlib
 import asyncio
 from datetime import datetime
 from typing import Optional
-from fastapi import HTTPException
+from app.core.errors import ServiceError
 
 from app.services.ai.memory.storage import MemoryDatabase
 from app.models.schemas import FactSheet, DetailedTestSummary
@@ -164,7 +164,7 @@ class FactLedger(MemoryDatabase):
                 )
                 await db.commit()
                 return True
-            except HTTPException:
+            except ServiceError:
                 raise
             except (Exception, asyncio.CancelledError) as e:
                 logger.error('Failed to save fact sheet for %s: %s', values['execution_id'], e)
@@ -192,7 +192,7 @@ class FactLedger(MemoryDatabase):
                     if not row:
                         return None
                     return await self._verified_row(row)
-                except HTTPException:
+                except ServiceError:
                     raise
                 except Exception as e:
                     if strict:
@@ -239,7 +239,7 @@ class FactLedger(MemoryDatabase):
                                 if len(verified) == limit:
                                     break
                     return verified
-                except HTTPException:
+                except ServiceError:
                     raise
                 except Exception as e:
                     if strict:

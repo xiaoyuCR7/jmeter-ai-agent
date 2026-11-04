@@ -17,7 +17,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import Optional
-from fastapi import HTTPException
+from app.core.errors import ServiceError
 
 from app.services.ai.memory.storage import MemoryDatabase
 from app.models.schemas import (
@@ -148,7 +148,7 @@ class HypothesisLedger(MemoryDatabase):
                     'SELECT source_execution_id FROM hypotheses WHERE hypothesis_id = ?', (hypothesis_id,))
                 existing = await cursor.fetchone()
                 if existing and existing[0] != values[1]:
-                    raise HTTPException(403, 'Hypothesis source identity cannot be changed')
+                    raise ServiceError(403, 'Hypothesis source identity cannot be changed')
                 await db.execute(
                     """INSERT INTO hypotheses
                        (hypothesis_id, source_execution_id, module, version, test_type,
@@ -231,7 +231,7 @@ class HypothesisLedger(MemoryDatabase):
                 return cursor.rowcount == 1
             except HypothesisUpdateConflict:
                 raise
-            except HTTPException:
+            except ServiceError:
                 raise
             except (Exception, asyncio.CancelledError) as e:
                 logger.error(f"Failed to update hypothesis {hypothesis_id}: {e}")
@@ -264,7 +264,7 @@ class HypothesisLedger(MemoryDatabase):
                             raise
                         logger.warning('Skipping malformed hypothesis row: %s', type(error).__name__)
                         return None
-                except HTTPException:
+                except ServiceError:
                     raise
                 except Exception as e:
                     if strict:
@@ -316,7 +316,7 @@ class HypothesisLedger(MemoryDatabase):
                             if len(hypotheses) == limit:
                                 break
                     return hypotheses
-                except HTTPException:
+                except ServiceError:
                     raise
                 except Exception as e:
                     if strict:

@@ -183,3 +183,42 @@ def format_for_prompt(evidence: Optional[dict]) -> str:
         lines += _format_one('与上一次执行', evidence['previous'])
     lines.append('若存在退化，请说明退化出现在哪些接口、与服务端指标是否吻合，以及最可能的变更原因。')
     return '\n'.join(lines)
+
+
+DEFAULT_THRESHOLDS = {"p99_max": 2000, "error_rate_max": 0.01, "avg_rt_max": 500}
+
+
+async def create_baseline(project_id: str, name: str, test_plan_id: Optional[str] = None,
+                          execution_id: Optional[str] = None, description: str = "",
+                          thresholds: Optional[dict] = None, metrics_snapshot: Optional[dict] = None) -> dict:
+    """Save a baseline; from a run, it keeps that run's numbers so it survives deleting the run."""
+    from app.core.errors import ServiceError
+    from app.services.db_store import db_store
+    from app.services.storage import store
+    if execution_id and not metrics_snapshot:
+        execution = store.executions.get(execution_id)
+        if execution is None or execution.project_id != project_id:
+            raise ServiceError(404, "Execution not found in this project")
+        if execution.summary is None or not execution.summary.total_requests:
+            raise ServiceError(409, "Execution has no usable parsed report")
+        metrics_snapshot = snapshot_of(execution.summary)
+    return await db_store.create_baseline({
+        "project_id": project_id, "test_plan_id": test_plan_id, "name": name, "description": description,
+        "execution_id": execution_id, "thresholds": thresholds or dict(DEFAULT_THRESHOLDS),
+        "metrics_snapshot": metrics_snapshot or {},
+    })
+
+
+async def promote_execution(execution_id: str) -> dict:
+    """Make this run the baseline of its test plan, named after the plan and when it started."""
+    from app.core.errors import ServiceError
+    from app.services.storage import store
+    execution = store.executions.get(execution_id)
+    if execution is None:
+        raise ServiceError(404, "Execution not found")
+    plan = store.test_plans.get(execution.test_plan_id)
+    started = execution.start_time.strftime('%Y-%m-%d %H:%M') if execution.start_time else execution_id
+    return await create_baseline(
+        project_id=execution.project_id, name=f"{plan.name if plan else execution.test_plan_id} @ {started}",
+        test_plan_id=execution.test_plan_id or None, execution_id=execution_id,
+        description="Promoted from a test report")

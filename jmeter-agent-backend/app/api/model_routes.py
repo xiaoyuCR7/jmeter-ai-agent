@@ -1,6 +1,7 @@
 """AI model settings: the models people added, their context windows and a connection test."""
 import asyncio
 
+from app.core.errors import ServiceError
 from fastapi import APIRouter, HTTPException
 from app.models.schemas import AIChatMessage, AIModelConfig
 from app.core.config import (
@@ -109,7 +110,7 @@ async def test_model_config(model_id: str):
             AIChatMessage(role="user", content="Hello, please reply with a short greeting.")
         ], max_tokens=32, temperature=0, max_retries=0), timeout=HEALTH_CHECK_TIMEOUT_SECONDS)
         return {"success": True, "message": "连接成功", "response": response}
-    except HTTPException:
+    except (HTTPException, ServiceError):
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"连接失败: {type(e).__name__}")

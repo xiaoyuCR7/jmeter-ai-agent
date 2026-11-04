@@ -14,7 +14,7 @@ import re
 import uuid
 from datetime import datetime
 from pathlib import Path
-from fastapi import HTTPException
+from app.core.errors import ServiceError
 
 from app.core.config import settings
 from app.models.schemas import (
@@ -209,7 +209,7 @@ class ExecutionLifecycle:
         path = await self._validate_source(plan.jmx_path)
         owner = _directory_project(path)
         if owner is not None and owner != plan.project_id:
-            raise HTTPException(409, 'Plan project does not match source file directory')
+            raise ServiceError(409, 'Plan project does not match source file directory')
         plan = plan.model_copy(update={'jmx_path': str(path)}, deep=True)
         if not await db_store.get_project(plan.project_id):
             cached_project = store.get_project(plan.project_id)
@@ -254,7 +254,7 @@ class ExecutionLifecycle:
         owner = _directory_project(path)
         if owner is not None:
             if project_id not in (None, 'default', owner):
-                raise HTTPException(409, 'Requested project differs from source file directory')
+                raise ServiceError(409, 'Requested project differs from source file directory')
             project_id = owner
         async with self._registration_lock:
             plans = await db_store.list_test_plans(limit=100000)

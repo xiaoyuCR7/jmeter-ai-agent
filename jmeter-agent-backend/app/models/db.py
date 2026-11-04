@@ -3,7 +3,7 @@
 from uuid import uuid4
 from sqlalchemy import (
     Column, String, Integer, Float, Boolean, DateTime, Text,
-    ForeignKey, JSON, create_engine, event, inspect, select, insert,
+    ForeignKey, JSON, create_engine, event, inspect,
 )
 from sqlalchemy.orm import DeclarativeBase, relationship, Session
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
@@ -14,14 +14,6 @@ from app.core.time import utc_now_naive
 
 class Base(DeclarativeBase):
     pass
-
-
-class BusinessDataRevisionModel(Base):
-    """Single monotonic invalidation token for the three legacy business caches."""
-    __tablename__ = 'business_data_revision'
-
-    id = Column(Integer, primary_key=True)
-    revision = Column(Integer, nullable=False)
 
 
 # ── Project ──────────────────────────────────────────────
@@ -154,7 +146,7 @@ OBSOLETE_TABLES = (
     "analysis_receipt_owners", "analysis_receipts", "resource_leases", "mcp_session_messages",
     "mcp_session_routes", "ws_event_deliveries", "ws_worker_subscriptions", "coordination_operations",
     "process_owners", "coordination_protocol", "project_access_audits", "project_members",
-    "project_access_policies", "user_access_revisions", "api_tokens", "users",
+    "project_access_policies", "user_access_revisions", "api_tokens", "users", "business_data_revision",
 )
 
 _engine = None
@@ -220,8 +212,6 @@ async def init_db():
                     if name not in existing:
                         connection.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
         await conn.run_sync(migrate)
-        if await conn.scalar(select(BusinessDataRevisionModel.id).where(BusinessDataRevisionModel.id == 1)) is None:
-            await conn.execute(insert(BusinessDataRevisionModel).values(id=1, revision=0))
 
 
 async def get_db() -> AsyncSession:

@@ -64,7 +64,8 @@ jmeter-agent-frontend/src/       Vue 3 + Element Plus
 
 ## 存储
 
-- 业务数据（项目、计划、执行、环境、基线）存在 SQLAlchemy async + SQLite 里。`storage.store` 是它在内存里的读缓存，所有写入都先经过 `db_store`。
+- 业务数据（项目、计划、执行、环境、基线）存在 SQLAlchemy async + SQLite 里。`storage.store` 是它在内存里的读缓存，启动时加载一次，所有写入都先经过 `db_store`。
+- 服务层（`app/services`）不依赖 Web 层：拒绝请求时抛 `app.core.errors.ServiceError(状态码, 说明)`，由 `main.py` 统一转成 HTTP 响应；agent 工具和 MCP 看到的是说明文字。所有路由都在 `app/api/routes.py` 里注册。
 - 记忆数据和业务数据在同一个 SQLite 文件里，但各自用独立的表和连接：
   - 事实和假设用 aiosqlite；
   - 经验（`experience.py`）的读写量很小，用同步 sqlite3，在线程里执行。

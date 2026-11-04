@@ -3,9 +3,8 @@
 import logging
 from typing import Optional, List, Dict, Any
 
-from fastapi import HTTPException
+from app.core.errors import ServiceError
 from sqlalchemy import select, delete, update, func
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.db import (
@@ -17,25 +16,6 @@ from app.core.time import utc_now_naive
 logger = logging.getLogger(__name__)
 
 
-async def _bump_business_revision(session):
-    """Advance in the caller's commit; cache invalidation cannot lead the data."""
-    from app.models.db import BusinessDataRevisionModel
-    changed = await session.execute(update(BusinessDataRevisionModel).where(
-        BusinessDataRevisionModel.id == 1).values(
-            revision=BusinessDataRevisionModel.revision + 1))
-    if changed.rowcount != 1:
-        try:
-            async with session.begin_nested():
-                session.add(BusinessDataRevisionModel(id=1, revision=1))
-                await session.flush()
-        except IntegrityError:
-            changed = await session.execute(update(BusinessDataRevisionModel).where(
-                BusinessDataRevisionModel.id == 1).values(
-                    revision=BusinessDataRevisionModel.revision + 1))
-            if changed.rowcount != 1:
-                raise RuntimeError('Business revision initialization raced without an authority row')
-
-
 def _project_conditions(column, project_id=None):
     return [column == project_id] if project_id is not None else []
 
@@ -43,7 +23,7 @@ def _project_conditions(column, project_id=None):
 def _immutable_identity(row, updates):
     for key in ('id', 'project_id'):
         if key in updates and updates[key] != getattr(row, key, None):
-            raise HTTPException(422, 'Resource identity and project cannot be changed')
+            raise ServiceError(422, 'Resource identity and project cannot be changed')
 
 
 async def _source(session, model, resource_id, project_id):
@@ -51,9 +31,9 @@ async def _source(session, model, resource_id, project_id):
         return None
     record = await session.get(model, resource_id)
     if record is None:
-        raise HTTPException(404, 'Source resource not found')
+        raise ServiceError(404, 'Source resource not found')
     if record.project_id != project_id:
-        raise HTTPException(422, 'Source resource project mismatch')
+        raise ServiceError(422, 'Source resource project mismatch')
     return record
 
 
@@ -66,14 +46,14 @@ async def _check_plan_children(session, plan_ids, project_id):
             model.test_plan_id.in_(plan_ids), model.project_id != project_id,
         ).limit(1))
         if foreign.first() is not None:
-            raise HTTPException(409, 'Inconsistent resource ownership requires repair')
+            raise ServiceError(409, 'Inconsistent resource ownership requires repair')
 
 
 async def _versioned_update(session, model, row, updates, expected_version, *, touch_updated=False):
     """Atomically reject an object loaded before a newer committed write."""
     expected = updates.get('storage_version', row.version) if expected_version is None else expected_version
     if type(expected) is not int or expected < 1:
-        raise HTTPException(409, 'Business record version is stale')
+        raise ServiceError(409, 'Business record version is stale')
     values = {key: val for key, val in updates.items()
               if key != 'storage_version' and hasattr(row, key) and key != 'version'}
     if touch_updated:
@@ -83,7 +63,7 @@ async def _versioned_update(session, model, row, updates, expected_version, *, t
         model.id == row.id, model.version == expected).values(**values).execution_options(
             synchronize_session=False))
     if changed.rowcount != 1:
-        raise HTTPException(409, 'Business record changed; refresh and retry')
+        raise ServiceError(409, 'Business record changed; refresh and retry')
     session.expire(row)
     await session.refresh(row)
 
@@ -109,7 +89,6 @@ class DBStore:
                 created_at=project_data.get("created_at", utc_now_naive()),
             )
             s.add(p)
-            await _bump_business_revision(s)
             await s.commit()
             return self._project_to_dict(p)
 
@@ -120,7 +99,6 @@ class DBStore:
                 return None
             _immutable_identity(p, updates)
             await _versioned_update(s, ProjectModel, p, updates, expected_version, touch_updated=True)
-            await _bump_business_revision(s)
             await s.commit()
             return self._project_to_dict(p)
 
@@ -134,7 +112,6 @@ class DBStore:
             # Standalone executions are not ORM children of the project.
             await s.execute(delete(ExecutionModel).where(ExecutionModel.project_id == p.id))
             await s.delete(p)
-            await _bump_business_revision(s)
             await s.commit()
             return True
 
@@ -168,7 +145,7 @@ class DBStore:
         project_id = plan_data.get('project_id', 'default')
         async with await self._session() as s:
             if await s.get(ProjectModel, project_id) is None:
-                raise HTTPException(404, 'Project not found')
+                raise ServiceError(404, 'Project not found')
             tp = TestPlanModel(
                 id=plan_data["id"],
                 project_id=plan_data.get("project_id", "default"),
@@ -182,7 +159,6 @@ class DBStore:
                 created_at=plan_data.get("created_at", utc_now_naive()),
             )
             s.add(tp)
-            await _bump_business_revision(s)
             await s.commit()
             return self._plan_to_dict(tp)
 
@@ -193,7 +169,6 @@ class DBStore:
                 return None
             _immutable_identity(tp, updates)
             await _versioned_update(s, TestPlanModel, tp, updates, expected_version, touch_updated=True)
-            await _bump_business_revision(s)
             await s.commit()
             return self._plan_to_dict(tp)
 
@@ -204,7 +179,6 @@ class DBStore:
                 return False
             await _check_plan_children(s, [tp.id], tp.project_id)
             await s.delete(tp)
-            await _bump_business_revision(s)
             await s.commit()
             return True
 
@@ -239,7 +213,7 @@ class DBStore:
         project_id = exec_data.get('project_id', 'default')
         async with await self._session() as s:
             if await s.get(ProjectModel, project_id) is None:
-                raise HTTPException(404, 'Project not found')
+                raise ServiceError(404, 'Project not found')
             await _source(s, TestPlanModel, exec_data.get('test_plan_id'), project_id)
             e = ExecutionModel(
                 id=exec_data["id"],
@@ -263,7 +237,6 @@ class DBStore:
                 report_error=exec_data.get("report_error"),
             )
             s.add(e)
-            await _bump_business_revision(s)
             await s.commit()
             return self._exec_to_dict(e)
 
@@ -275,7 +248,6 @@ class DBStore:
             _immutable_identity(e, updates)
             await _source(s, TestPlanModel, updates.get('test_plan_id', e.test_plan_id), e.project_id)
             await _versioned_update(s, ExecutionModel, e, updates, expected_version)
-            await _bump_business_revision(s)
             await s.commit()
             return self._exec_to_dict(e)
 
@@ -316,11 +288,11 @@ class DBStore:
         project_id = data['project_id']
         async with await self._session() as s:
             if await s.get(ProjectModel, project_id) is None:
-                raise HTTPException(404, 'Project not found')
+                raise ServiceError(404, 'Project not found')
             plan = await _source(s, TestPlanModel, data.get('test_plan_id'), project_id)
             execution = await _source(s, ExecutionModel, data.get('execution_id'), project_id)
             if plan is not None and execution is not None and execution.test_plan_id != plan.id:
-                raise HTTPException(422, 'Source execution and test plan mismatch')
+                raise ServiceError(422, 'Source execution and test plan mismatch')
             b = BaselineModel(
                 project_id=data["project_id"],
                 test_plan_id=data.get("test_plan_id"),

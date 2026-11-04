@@ -140,6 +140,8 @@ def validate_deployment_security():
     """There is no authentication, so the API must never listen beyond loopback."""
     if settings.HOST not in ('127.0.0.1', 'localhost', '::1'):
         raise RuntimeError('No-login local mode: HOST must be a loopback address (127.0.0.1 / ::1)')
+    if "*" in settings.CORS_ORIGINS:
+        raise RuntimeError("CORS_ORIGINS must list trusted origins, not '*'")
 
 
 def safe_path(user_path: str, allowed_dirs: list[str] = None) -> str:

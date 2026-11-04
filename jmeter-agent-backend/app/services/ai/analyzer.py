@@ -10,8 +10,8 @@ from app.services.ai.adapters.factory import AIAdapterFactory
 from app.core.lang_utils import language_instruction
 from app.services.ai.prompts.test_analyzer import REPORT_SCHEMA, TEST_ANALYZER_SYSTEM_PROMPT, build_analysis_prompt
 from app.services.ai.memory.fact_ledger import FactLedger
-from app.services.ai.memory.validators import fact_validator
-from app.models.schemas import DetailedTestSummary, ReportAnalysis
+from app.services.ai.memory.validators import correction_request, fact_validator
+from app.models.schemas import AIChatMessage, DetailedTestSummary, ReportAnalysis
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +69,8 @@ def check_numbers(analysis: ReportAnalysis, summary: DetailedTestSummary, execut
 class TestAnalyzer:
     """AI测试报告分析器"""
 
+    lang = 'zh-CN'  # The language of the report being written; analyze() sets it.
+
     def __init__(self, model_type: Optional[str] = None):
         self.adapter = AIAdapterFactory.create(model_type)
         self._exchange: list = []  # The prompt and the model's reply, for one correction round.
@@ -79,14 +81,10 @@ class TestAnalyzer:
         self.lang = lang
         prompt = build_analysis_prompt(summary_data, test_config, test_type, evidence_text, lang)
 
-        messages = [
-            {"role": "system", "content": TEST_ANALYZER_SYSTEM_PROMPT + "\n\n" + language_instruction(lang)},
-            {"role": "user", "content": prompt}
+        chat_messages = [
+            AIChatMessage(role="system", content=TEST_ANALYZER_SYSTEM_PROMPT + "\n\n" + language_instruction(lang)),
+            AIChatMessage(role="user", content=prompt),
         ]
-
-        # Convert to AIChatMessage format
-        from app.models.schemas import AIChatMessage
-        chat_messages = [AIChatMessage(role=m["role"], content=m["content"]) for m in messages]
         try:
             chat_messages = self.adapter.prepare_chat_messages(chat_messages, response_tokens=AI_ANALYSIS_MAX_TOKENS)
         except ValueError:
@@ -134,12 +132,10 @@ class TestAnalyzer:
 
     async def correct_numbers(self, mismatches: list[dict]) -> Optional[ReportAnalysis]:
         """The last analysis rewritten with its mismatched numbers fixed or removed; None if that fails."""
-        from app.models.schemas import AIChatMessage
-        from app.services.ai.memory.validators import correction_request
         if not self._exchange:
             return None
         messages = [*self._exchange, AIChatMessage(role='user', content=correction_request(
-            mismatches, '输出改正后的完整 JSON，字段和结构与上次相同。', getattr(self, 'lang', 'zh-CN')))]
+            mismatches, '输出改正后的完整 JSON，字段和结构与上次相同。', self.lang))]
         try:
             messages = self.adapter.prepare_chat_messages(messages, response_tokens=AI_ANALYSIS_MAX_TOKENS)
             response = await asyncio.wait_for(
@@ -195,7 +191,7 @@ class TestAnalyzer:
         for name, limit in FIELD_LIMITS.items():
             if isinstance(data.get(name), list):
                 data[name] = data[name][:limit]
-        data['language'] = getattr(self, 'lang', 'zh-CN')
+        data['language'] = self.lang
         result = ReportAnalysis.model_validate(data)
         if not result.overall_assessment.strip() or not result.conclusion.strip():
             raise ValueError('Analysis assessment and conclusion are required')
