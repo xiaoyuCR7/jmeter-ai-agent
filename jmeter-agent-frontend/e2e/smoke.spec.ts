@@ -92,7 +92,7 @@ test('document to report', async ({ page }) => {
   await page.getByRole('row', { name: /Checkout baseline/ }).click()
   await expect(page).toHaveURL(/\/executions\/run1$/)
   await expect(page.getByText('All requirements met')).toBeVisible()
-  await expect(page.getByText('Compared with baseline「September release」')).toBeVisible()
+  await expect(page.getByText('Compared with baseline "September release"')).toBeVisible()
   await expect(page.locator('.kpi-delta.bad')).toHaveText(/▲ \+25%/)
   await expect(page.locator('.kpi-delta.good')).toHaveText(/▲ \+5\.3%/)
 
