@@ -13,6 +13,7 @@ from app.core.config import settings, safe_path
 from app.services.ai.agent.tool_registry import Tool
 
 MAX_SAMPLES = 30
+MAX_BUCKETS = 60
 
 
 def _jtl(execution) -> str:
@@ -29,10 +30,20 @@ def _rows(jtl_path: str):
                 continue
 
 
-def _samples(jtl_path: str, label, failed_only, min_elapsed_ms, from_second, to_second, limit) -> dict:
+def _samples(jtl_path: str, label, failed_only, min_elapsed_ms, from_second, to_second, limit,
+             bucket_seconds: Optional[float] = None) -> dict:
     # Threads write rows as their samples end, so the file is not in start order: count from the
     # earliest sample, not the first row, or "second 0" moves and early samples get negative seconds.
-    first = min((stamp for _, stamp, _ in _rows(jtl_path)), default=0)
+    first = last = None
+    for _, stamp, _ in _rows(jtl_path):
+        first = stamp if first is None else min(first, stamp)
+        last = stamp if last is None else max(last, stamp)
+    first, last = first or 0, last or 0
+    width = None
+    if bucket_seconds:
+        # Wide enough that the whole run fits in MAX_BUCKETS rows.
+        width = max(float(bucket_seconds), (last - first) / 1000 / MAX_BUCKETS, 0.1)
+    buckets: dict[int, dict] = {}
     matched, total = [], 0
     for row, stamp, elapsed in _rows(jtl_path):
         second = (stamp - first) / 1000
@@ -42,6 +53,14 @@ def _samples(jtl_path: str, label, failed_only, min_elapsed_ms, from_second, to_
                 or (to_second is not None and second > to_second)):
             continue
         total += 1
+        if width:
+            bucket = buckets.setdefault(int(second // width), {'count': 0, 'failed': 0, 'elapsed': 0, 'threads': 0})
+            bucket['count'] += 1
+            bucket['failed'] += row.get('success') != 'true'
+            bucket['elapsed'] += elapsed
+            threads = row.get('allThreads') or ''
+            bucket['threads'] = max(bucket['threads'], int(threads) if threads.isdigit() else 0)
+            continue
         if len(matched) < limit:
             matched.append({
                 'second': round(second, 1), 'label': row.get('label'), 'elapsed_ms': elapsed,
@@ -50,6 +69,12 @@ def _samples(jtl_path: str, label, failed_only, min_elapsed_ms, from_second, to_
                 'message': (row.get('failureMessage') or row.get('responseMessage') or '')[:200],
                 'threads': row.get('allThreads'),
             })
+    if width:
+        return {'matched': total, 'bucket_seconds': round(width, 1), 'buckets': [
+            {'from_second': round(index * width, 1), 'count': b['count'], 'failed': b['failed'],
+             'avg_ms': round(b['elapsed'] / b['count']), 'max_threads': b['threads']}
+            for index, b in sorted(buckets.items())],
+            'note': 'seconds count from the earliest sample; each row counts the matching samples in one window'}
     return {'matched': total, 'shown': len(matched), 'samples': matched,
             'note': 'seconds count from the earliest sample; the first rows that match are shown'}
 
@@ -60,10 +85,11 @@ def run_tools(execution) -> list[Tool]:
 
     async def find_samples(label: Optional[str] = None, failed_only: bool = False,
                            min_elapsed_ms: Optional[int] = None, from_second: Optional[float] = None,
-                           to_second: Optional[float] = None, limit: int = 20) -> dict:
+                           to_second: Optional[float] = None, limit: int = 20,
+                           bucket_seconds: Optional[float] = None) -> dict:
         limit = max(1, min(int(limit), MAX_SAMPLES))
         return await asyncio.to_thread(_samples, _jtl(execution), label, failed_only, min_elapsed_ms,
-                                       from_second, to_second, limit)
+                                       from_second, to_second, limit, bucket_seconds)
 
     async def read_run_log(lines: int = 100) -> dict:
         from app.services.ai.agent.tools.jmeter import read_test_log
@@ -104,10 +130,13 @@ def run_tools(execution) -> list[Tool]:
     return [
         tool('find_samples', 'Individual samples of this run, filtered: by request label, failures only, '
              'slower than a threshold, or a time window in seconds from the start. Shows status code, failure '
-             'message, connect and latency.', find_samples, {
+             'message, connect and latency. With bucket_seconds, counts the matching samples per time window '
+             '(count, failed, avg_ms, max_threads) instead: one call shows when failures or slow requests happened.',
+             find_samples, {
                  'label': {'type': 'string'}, 'failed_only': {'type': 'boolean'},
                  'min_elapsed_ms': {'type': 'integer'}, 'from_second': {'type': 'number'},
-                 'to_second': {'type': 'number'}, 'limit': {'type': 'integer', 'description': f'At most {MAX_SAMPLES}'}}),
+                 'to_second': {'type': 'number'}, 'limit': {'type': 'integer', 'description': f'At most {MAX_SAMPLES}'},
+                 'bucket_seconds': {'type': 'number', 'description': f'Window width; at most {MAX_BUCKETS} windows'}}),
         tool('read_run_log', "The end of this run's JMeter log", read_run_log,
              {'lines': {'type': 'integer', 'description': 'At most 500'}}),
         tool('describe_plan', 'The test plan this run executed: thread groups, requests, timers, assertions', describe_plan),

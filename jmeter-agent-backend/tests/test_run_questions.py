@@ -53,6 +53,19 @@ async def test_samples_can_be_filtered_by_request_failure_speed_and_time(run):
 
 
 @pytest.mark.asyncio
+async def test_one_call_counts_the_samples_in_every_time_window(run):
+    """"When did the failures happen?" takes one call, not one per window."""
+    counted = await run['find_samples'](bucket_seconds=5)
+    assert counted['matched'] == 4 and 'samples' not in counted
+    assert counted['buckets'] == [{'from_second': 0.0, 'count': 3, 'failed': 1, 'avg_ms': 383, 'max_threads': 4},
+                                  {'from_second': 5.0, 'count': 1, 'failed': 0, 'avg_ms': 950, 'max_threads': 4}]
+    assert [b['count'] for b in (await run['find_samples'](failed_only=True, bucket_seconds=5))['buckets']] == [1]
+    # Windows too narrow for the run are widened so it fits in MAX_BUCKETS rows.
+    narrow = await run['find_samples'](bucket_seconds=0.01)
+    assert narrow['bucket_seconds'] == 0.1 and len(narrow['buckets']) <= 60
+
+
+@pytest.mark.asyncio
 async def test_a_run_without_a_log_says_so(run):
     assert 'no JMeter log' in (await run['read_run_log']())['error']
 

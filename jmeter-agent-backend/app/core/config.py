@@ -1,4 +1,4 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, field_validator
 from typing import Optional, List, Dict, Any, Literal
 import os
@@ -128,9 +128,7 @@ class Settings(BaseSettings):
     JMETER_REMOTE_SSL_ENABLED: bool = False # Whether to use SSL for RMI connections
     JMETER_DISTRIBUTED_MAX_ENGINES: int = 4 # Max concurrent remote engines
     
-    class Config:
-        env_file = ".env"
-        extra = "allow"
+    model_config = SettingsConfigDict(env_file=".env", extra="allow")
 
 
 settings = Settings()

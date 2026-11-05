@@ -40,7 +40,8 @@ ANALYSIS_SYSTEM_PROMPT = ANALYSIS_RULES + """
 - 数字只用事实表和证据块里的。需要更细的数据时，用只读工具去查，不要估算。
 - 原因、瓶颈和建议都是解释：标【假设】，并写明能证伪它的数据或实验。
 - 回答要短，直接回应问题。不要复述整份报告，也不要按报告的章节来写。
-- 工具只看这一次运行：find_samples 查单个样本（按接口、失败、耗时阈值或时间段），read_run_log 看 JMeter 日志，
+- 工具只看这一次运行：find_samples 查单个样本（按接口、失败、耗时阈值或时间段），
+  要看失败或慢请求在什么时候出现时，传 bucket_seconds 一次拿到每个时间窗口的计数，不要一段一段地查；read_run_log 看 JMeter 日志，
   describe_plan 看执行的计划，detect_anomalies 找时间线上的突变；和早先的运行比较时先 list_runs，再 compare_with_run。"""
 
 

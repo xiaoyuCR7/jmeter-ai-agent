@@ -6,7 +6,6 @@ came from, so a verdict can always be traced back to the source text.
 """
 import json
 import logging
-import os
 import re
 import xml.etree.ElementTree as ET
 from datetime import datetime
@@ -271,10 +270,16 @@ def _route_keys(transaction: str) -> set[str]:
     return {f'{method.upper()} {path}'} if method else {path}
 
 
+def _plan_bytes(jmx_path: str) -> bytes:
+    # Cache by content, not mtime: a plan rewritten within one clock tick keeps its mtime.
+    with open(jmx_path, 'rb') as handle:
+        return handle.read()
+
+
 @lru_cache(maxsize=64)
-def _sampler_routes_cached(jmx_path: str, mtime_ns: int) -> dict[str, frozenset[str]]:
+def _sampler_routes_cached(content: bytes) -> dict[str, frozenset[str]]:
     routes: dict[str, set[str]] = {}
-    for element in ET.parse(jmx_path).iter():
+    for element in ET.fromstring(content).iter():
         if element.get('testclass') not in ('HTTPSamplerProxy', 'HTTPSampler'):
             continue
         props = {prop.get('name'): (prop.text or '') for prop in element if prop.tag == 'stringProp'}
@@ -296,7 +301,7 @@ def sampler_routes(jmx_path: Optional[str]) -> dict[str, frozenset[str]]:
     if not jmx_path:
         return {}
     try:
-        return _sampler_routes_cached(jmx_path, os.stat(jmx_path).st_mtime_ns)
+        return _sampler_routes_cached(_plan_bytes(jmx_path))
     except (OSError, ET.ParseError) as error:
         logger.warning('Cannot read sampler routes from %s: %s', jmx_path, error)
         return {}
@@ -386,7 +391,7 @@ def throughput_cap(jmx_path: Optional[str]) -> Optional[float]:
     if not jmx_path:
         return None
     try:
-        return _throughput_cap_cached(jmx_path, os.stat(jmx_path).st_mtime_ns)
+        return _throughput_cap_cached(_plan_bytes(jmx_path))
     except OSError:
         return None
 
@@ -398,10 +403,10 @@ def evaluate_run(requirements: Optional['PerformanceRequirements'], summary: Det
 
 
 @lru_cache(maxsize=64)
-def _throughput_cap_cached(jmx_path: str, mtime_ns: int) -> Optional[float]:
+def _throughput_cap_cached(content: bytes) -> Optional[float]:
     try:
-        root = ET.parse(jmx_path).getroot()
-    except (OSError, ET.ParseError):
+        root = ET.fromstring(content)
+    except ET.ParseError:
         return None
     threads = 0
     for group in root.iter():
