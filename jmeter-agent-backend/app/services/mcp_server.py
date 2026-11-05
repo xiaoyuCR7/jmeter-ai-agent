@@ -93,11 +93,14 @@ class MCPServer:
 
     # ── Registration ────────────────────────────────────
 
-    def register_tool(self, name: str, description: str, schema: dict, handler: Callable, risk='read'):
+    def register_tool(self, name: str, description: str, schema: dict, handler: Callable, risk='read',
+                      preview: Optional[Callable] = None):
         from app.services.ai.agent.tool_registry import Tool
         if name in self._tools:
             return
-        definition = Tool(name, description, schema, handler, risk=risk)
+        # The preview is what the confirmation shows (values replaced, scripts a run executes); without it
+        # an outside assistant's runs were also asked about their scripts a second time.
+        definition = Tool(name, description, schema, handler, risk=risk, preview=preview)
         self._tool_registry.register(definition)
         self._tools[name] = MCPTool(
             name=name, description=description, inputSchema=definition.parameters, risk=risk,
@@ -123,6 +126,7 @@ class MCPServer:
                 schema=tool.parameters if hasattr(tool, 'parameters') else {},
                 handler=tool.handler,
                 risk=tool.risk,
+                preview=tool.preview,
             )
 
     def register_all_resources(self):

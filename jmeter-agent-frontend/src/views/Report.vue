@@ -14,7 +14,7 @@
           </div>
           <p v-if="report.environment" class="run-env">
             <el-tag size="small" :type="report.environment.kind === 'production' ? 'danger' : 'info'">
-              {{ L('环境', 'Environment') }}：{{ report.environment.name }}
+              {{ L('环境', 'Environment') }}{{ L('：', ': ') }}{{ report.environment.name }}
             </el-tag>
             <span v-if="report.environment.base_url">{{ report.environment.base_url }}</span>
             <span v-if="report.environment.note" class="env-note">{{ report.environment.note }}</span>
@@ -45,7 +45,7 @@
 
       <section class="kpi-block">
         <div v-if="reference" class="kpi-caption">
-          <span>{{ reference.kind === 'baseline' ? L('对比基线', 'Compared with baseline') : L('对比上一次执行', 'Compared with the previous run') }}「{{ reference.data.name }}」</span>
+          <span>{{ reference.kind === 'baseline' ? L('对比基线', 'Compared with baseline') : L('对比上一次执行', 'Compared with the previous run') }}{{ L(`「${reference.data.name}」`, ` "${reference.data.name}"`) }}</span>
           <span class="hint">{{ L(`变化超过 ${reference.data.threshold_pct ?? 20}% 且变差记为退化`, `A change worse than ${reference.data.threshold_pct ?? 20}% counts as a regression`) }}</span>
         </div>
         <div class="kpis">
@@ -296,8 +296,8 @@ const historyLines = computed(() => {
   }
   const tone = (v: string) => (v === 'regression' ? 'bad' : v === 'improvement' ? 'good' : '')
   return [
-    ...(history?.baseline ? [{ text: `${L('对比基线', 'vs baseline')}：${text[history.baseline.verdict]}`, tone: tone(history.baseline.verdict) }] : []),
-    ...(history?.previous ? [{ text: `${L('对比上一次', 'vs previous')}：${text[history.previous.verdict]}`, tone: tone(history.previous.verdict) }] : []),
+    ...(history?.baseline ? [{ text: `${L('对比基线', 'vs baseline')}${L('：', ': ')}${text[history.baseline.verdict]}`, tone: tone(history.baseline.verdict) }] : []),
+    ...(history?.previous ? [{ text: `${L('对比上一次', 'vs previous')}${L('：', ': ')}${text[history.previous.verdict]}`, tone: tone(history.previous.verdict) }] : []),
   ]
 })
 

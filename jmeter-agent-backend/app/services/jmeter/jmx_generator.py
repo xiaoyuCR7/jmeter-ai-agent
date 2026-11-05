@@ -38,10 +38,13 @@ class LoadGroup:
     duration_seconds: int
 
 
-def _steps(prefix: str, users: int, step_users: int, step_seconds: int) -> list[LoadGroup]:
-    """Each step is a thread group starting later and ending with the others, which needs no plugin."""
+def _steps(prefix: str, users: int, step_users: int, step_seconds: int, duration: int = 0) -> list[LoadGroup]:
+    """Each step is a thread group starting later and ending with the others, which needs no plugin.
+
+    The steps climb to the full load; a longer ``duration`` holds it there until the test's end.
+    """
     count = max(math.ceil(users / max(step_users, 1)), 1)
-    total = count * step_seconds
+    total = max(count * step_seconds, duration)
     return [LoadGroup(f"{prefix} step {index + 1}", min(step_users, users - index * step_users),
                       max(step_seconds // 6, 1), index * step_seconds, total - index * step_seconds)
             for index in range(count)]
@@ -54,7 +57,9 @@ def load_shape(config: TestConfig) -> list[LoadGroup]:
     duration = config.duration_seconds or 0
     kind = config.test_type
     if kind == TestType.RAMP_UP:
-        return _steps("RAMP_UP", users, config.step_users or 10, config.step_duration or 60)
+        # Held to a duration someone set ("ramp up in 10 s, hold 60 s"); the 300 s default stretches nothing.
+        held = duration if 'duration_seconds' in config.model_fields_set else 0
+        return _steps("RAMP_UP", users, config.step_users or 10, config.step_duration or 60, held)
     if kind == TestType.STRESS and duration:
         steps = min(STRESS_STEPS, users)
         return _steps("STRESS", users, math.ceil(users / steps), max(duration // steps, 1))

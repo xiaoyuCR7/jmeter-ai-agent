@@ -10,7 +10,8 @@ LOAD = {'concurrency': 30, 'ramp_up_seconds': 10, 'duration_seconds': 60, 'targe
 
 def test_a_rate_limit_at_the_required_tps_is_raised_above_it():
     plan, notes, refusal = workflow_agent.paced({'concurrent_users': 30, 'target_rps': 50}, LOAD)
-    assert refusal is None and plan['target_rps'] == 60 and 'raised to 60' in notes[0]
+    assert refusal is None and plan['target_rps'] == 60 and '提高到 60' in notes[0]
+    assert 'raised to 60' in workflow_agent.paced({'concurrent_users': 30, 'target_rps': 50}, LOAD, en=True)[1][0]
     assert workflow_agent.paced({'concurrent_users': 30, 'target_rps': 80}, LOAD)[0]['target_rps'] == 80
 
 
@@ -48,3 +49,15 @@ def test_documented_responses_reach_the_model_so_it_extracts_real_fields():
     endpoints = {item['path']: item for item in endpoints_from_document(json.dumps(spec))['endpoints']}
     assert endpoints['/login']['response'] == {'status': 200, 'json': {'token': 'string'}}
     assert endpoints['/items']['response']['json'] == {'items': [{'id': 1}], 'total': 1}
+
+
+def test_the_plan_summary_gives_short_tests_in_seconds():
+    """A 30 s plan read "0.5 分钟"."""
+    from unittest.mock import MagicMock
+    draft = workflow_agent._Draft()
+    draft.project_id, draft.project_name = 'p1', 'Shop'
+    draft.plans = [{'test_name': 'A', 'test_type': 'baseline', 'concurrent_users': 10, 'duration_seconds': 30, 'endpoints_count': 4},
+                   {'test_name': 'B', 'test_type': 'baseline', 'concurrent_users': 10, 'duration_seconds': 600, 'endpoints_count': 4}]
+    text = workflow_agent.WorkflowAgent(MagicMock())._summary(draft, [], [])
+    assert '10 并发，30 秒' in text and '10 并发，10 分钟' in text
+    assert '0.5' not in text

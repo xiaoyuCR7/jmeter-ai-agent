@@ -121,12 +121,15 @@ class JMeterExecutor:
         
         raise FileNotFoundError(f"JMeter executable not found. Checked: {candidates}")
     
-    # A trial run records each response in an XML result; the HTML dashboard needs CSV, so it has none.
+    # A trial run records each request and response in an XML result; the HTML dashboard needs CSV,
+    # so it has none. JMeter ignores unknown names silently: these are its exact spellings.
     TRIAL_PROPERTIES = (
         "-Jjmeter.save.saveservice.output_format=xml",
         "-Jjmeter.save.saveservice.response_data=true",
         "-Jjmeter.save.saveservice.url=true",
-        "-Jjmeter.save.saveservice.response_headers=true",
+        "-Jjmeter.save.saveservice.responseHeaders=true",
+        "-Jjmeter.save.saveservice.requestHeaders=true",
+        "-Jjmeter.save.saveservice.samplerData=true",  # The method and the body sent.
     )
 
     def _build_command(self, jmx_path: str, report_dir: str, trial: bool = False) -> tuple:

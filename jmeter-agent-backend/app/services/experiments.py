@@ -60,7 +60,7 @@ PLATEAU_SHARE = 0.2
 class CapacityStep(BaseModel):
     threads: int
     execution_id: Optional[str] = None
-    status: str = 'pending'  # pending, running, passed, stopped, failed
+    status: str = 'pending'  # pending, running, passed, stopped, failed, skipped (never run: the search ended first)
     throughput: Optional[float] = None
     p95: Optional[float] = None
     error_rate: Optional[float] = None
@@ -129,9 +129,19 @@ def load_search(search_id: str) -> Optional[CapacitySearch]:
     path = os.path.join(_searches_dir(), f'{search_id}.json')
     try:
         with open(path, encoding='utf-8') as stream:
-            return CapacitySearch.model_validate_json(stream.read())
+            search = CapacitySearch.model_validate_json(stream.read())
     except (OSError, ValueError):
         return None
+    if search.status != 'running':
+        _mark_unrun(search)  # Searches saved before "skipped" existed still read "waiting".
+    return search
+
+
+def _mark_unrun(search: CapacitySearch) -> None:
+    """An ended search leaves its higher loads unrun: "waiting" read as if they still would."""
+    for step in search.steps:
+        if step.status == 'pending' and not step.execution_id:
+            step.status = 'skipped'
 
 
 def list_searches(plan_id: str) -> list[CapacitySearch]:
@@ -231,6 +241,7 @@ async def _search(search: CapacitySearch, plan, first, approved_sha256, confirm_
         logger.exception('Capacity search %s failed', search.id)
         search.status, search.stop_reason = 'failed', str(error)
     finally:
+        _mark_unrun(search)
         search.finished_at = datetime.now()
         _save(search)
         _running.pop(search.id, None)

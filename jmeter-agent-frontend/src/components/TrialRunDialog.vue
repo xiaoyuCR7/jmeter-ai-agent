@@ -31,6 +31,12 @@
             <div class="detail">
               <div class="url">{{ row.method }} {{ row.url }}</div>
               <div v-for="failure in row.failures" :key="failure" class="failure">{{ failure }}</div>
+              <!-- What was sent: an unresolved ${token} or NOT_FOUND in a header is the usual cause of a 401. -->
+              <template v-if="row.request_headers || row.request">
+                <div class="part">{{ L('发送的请求', 'Request sent') }}</div>
+                <pre>{{ [row.request_headers, row.request].filter(Boolean).join('\n\n') }}</pre>
+                <div class="part">{{ L('响应', 'Response') }}{{ row.content_type ? ` · ${row.content_type}` : '' }}</div>
+              </template>
               <pre>{{ row.response || L('（没有响应内容）', '(empty response)') }}{{ row.response_truncated ? '\n…' : '' }}</pre>
             </div>
           </template>
@@ -167,6 +173,7 @@ async function apply(fix: TrialFix) {
   padding: 4px 16px;
   .url { font-family: var(--app-font-mono, monospace); font-size: 12px; word-break: break-all; }
   .failure { color: var(--el-color-danger); font-size: 12px; margin-top: 4px; }
+  .part { margin-top: 8px; font-size: 12px; color: var(--app-text-muted); }
   pre { margin: 8px 0 0; max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-all;
         font-size: 12px; background: var(--app-surface-muted, var(--el-fill-color-light)); padding: 8px; border-radius: 4px; }
 }

@@ -300,6 +300,8 @@ a {
 .el-dialog {
   --el-dialog-border-radius: var(--app-radius-xl);
   border: 1px solid var(--app-border);
+  /* Dialogs set fixed widths (up to 860px); in a narrower window the trial's columns ran off the edge. */
+  max-width: calc(100vw - 32px);
 }
 
 .el-dialog__title {

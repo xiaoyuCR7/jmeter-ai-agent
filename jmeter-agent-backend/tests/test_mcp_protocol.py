@@ -352,3 +352,13 @@ async def test_oversized_message_is_rejected_without_dispatch(server):
         assert server._sessions[sid].queue.empty()
     finally:
         await stream.aclose()
+
+
+def test_outside_assistants_see_the_same_previews_in_their_confirmations():
+    """A run asked for through MCP lists its scripts once, and an edit shows the values it replaces."""
+    from app.services.ai.agent.tools import get_all_builtin_tools
+    server = MCPServer()
+    server.register_all_agent_tools()
+    with_preview = {tool.name for tool in get_all_builtin_tools() if tool.preview is not None}
+    assert {'execute_test', 'update_jmx', 'set_json_extractor'} <= with_preview
+    assert all(server._tool_registry.get(name).preview is not None for name in with_preview)

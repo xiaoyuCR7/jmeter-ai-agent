@@ -108,11 +108,12 @@ def _plan_schema() -> dict:
 TPS_HEADROOM = 1.2  # A rate limit this far above the required TPS lets the requirement pass or fail on its own.
 
 
-def paced(plan: dict, load: Optional[dict]) -> tuple[dict, list[str], Optional[str]]:
+def paced(plan: dict, load: Optional[dict], en: bool = False) -> tuple[dict, list[str], Optional[str]]:
     """The plan with a pace that can reach the required TPS: (plan, notes, refusal).
 
     A plan capped at exactly 50 rps, with a second of think time per request, was judged against
-    "吞吐量不低于 50 TPS": it could never pass, and the report blamed the server.
+    "吞吐量不低于 50 TPS": it could never pass, and the report blamed the server. Notes reach the
+    user in the plan summary, so they are in the user's language; the refusal is for the model.
     """
     target = (load or {}).get('target_tps')
     if not target or not isinstance(plan, dict):
@@ -127,8 +128,10 @@ def paced(plan: dict, load: Optional[dict]) -> tuple[dict, list[str], Optional[s
                              'user asked for a pace) or raise concurrent_users')
     floor = int(target * TPS_HEADROOM + 0.999)
     if plan.get('target_rps') and plan['target_rps'] < floor:
-        notes.append(f"target_rps {plan['target_rps']} raised to {floor}: a limit at the required "
-                     f'{target:g} TPS could never be exceeded')
+        notes.append(_texts(en)(
+            f"限速上限从 {plan['target_rps']} 提高到 {floor} 请求/秒：上限等于要求的 {target:g} TPS 时，吞吐永远超不过它",
+            f"target_rps {plan['target_rps']} raised to {floor}: a limit at the required "
+            f'{target:g} TPS could never be exceeded'))
         plan['target_rps'] = floor
     return plan, notes, None
 
@@ -157,7 +160,7 @@ def unmatched_requirements(requirements, plans: list[dict]) -> list[str]:
     return missing
 
 
-def save_plans_tool(draft: _Draft, load: Optional[dict] = None) -> Tool:
+def save_plans_tool(draft: _Draft, load: Optional[dict] = None, en: bool = False) -> Tool:
     from app.services.ai.agent.tools.jmx import create_jmx
     from app.services.ai.agent.tools.project import create_project
 
@@ -172,7 +175,7 @@ def save_plans_tool(draft: _Draft, load: Optional[dict] = None) -> Tool:
         gate = asyncio.Semaphore(PARALLEL_PLAN_CHECKS)
 
         async def save(plan: dict) -> dict:
-            plan, notes, refusal = paced(plan, load)
+            plan, notes, refusal = paced(plan, load, en)
             if refusal:
                 return {'error': refusal}
             async with gate:
@@ -309,7 +312,7 @@ give; fill it in from its parameters. "auth" is the documented authentication.
 
         draft = _Draft()
         tools = ToolRegistry(source='start-from-document')
-        tools.register(save_plans_tool(draft, load))
+        tools.register(save_plans_tool(draft, load, self.en))
         messages = [AIChatMessage(role='system', content=self.system_prompt),
                     AIChatMessage(role='user', pinned=True, content=self.build_task(document, goal, load or None, parsed))]
 
@@ -383,11 +386,14 @@ give; fill it in from its parameters. "auth" is the documented authentication.
         lines = [t(f'已创建项目「{draft.project_name}」（{draft.project_id}），{len(draft.plans)} 个测试计划：',
                    f'Created project "{draft.project_name}" ({draft.project_id}) with {len(draft.plans)} test plans:')]
         for plan in draft.plans:
-            minutes = round((plan.get('duration_seconds') or 0) / 60, 1)
+            seconds = plan.get('duration_seconds') or 0
+            # "30 秒", not "0.5 分钟"; minutes once a test runs two or more.
+            length = (t(f'{seconds} 秒', f'{seconds} s') if seconds < 120
+                      else t(f'{round(seconds / 60, 1):g} 分钟', f'{round(seconds / 60, 1):g} min'))
             lines.append(t(
-                f"- {plan['test_name']}：{plan['test_type']}，{plan['concurrent_users']} 并发，{minutes} 分钟，"
+                f"- {plan['test_name']}：{plan['test_type']}，{plan['concurrent_users']} 并发，{length}，"
                 f"{plan['endpoints_count']} 个请求",
-                f"- {plan['test_name']}: {plan['test_type']}, {plan['concurrent_users']} users, {minutes} min, "
+                f"- {plan['test_name']}: {plan['test_type']}, {plan['concurrent_users']} users, {length}, "
                 f"{plan['endpoints_count']} requests"))
             for warning in plan.get('warnings') or []:
                 lines.append(t(f'  注意：{warning}', f'  Note: {warning}'))

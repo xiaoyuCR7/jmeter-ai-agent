@@ -93,6 +93,12 @@ def trial_copy(content: bytes) -> bytes:
     for element in root.iter():
         if element.tag.endswith('Timer'):
             element.set('enabled', 'false')
+        # A failed login stopped the user, and the trial showed nothing of the requests after it:
+        # each request runs once whatever came before, so one trial shows every one that fails.
+        elif element.tag == 'ResultAction':
+            element.set('enabled', 'false')
+        elif _is_group(element):
+            _set(element, 'stringProp', 'ThreadGroup.on_sample_error', 'continue')
         # Every request once: a share of iterations, or one child picked at random, would skip some.
         elif element.tag == 'ThroughputController':
             _set(element, 'intProp', 'ThroughputController.style', '1')
@@ -182,8 +188,23 @@ def _masked(text: str, secrets: list[str]) -> str:
     return text
 
 
+REQUEST_CHARS = 1000
+# Credentials the plan resolved at run time (a token from the login) are masked like the environment's
+# secrets. What an extraction that failed leaves stays: ${name} unresolved, or the extractor's default.
+_CREDENTIAL_HEADER = re.compile(r'(?im)^((?:authorization|proxy-authorization|cookie|x-api-key|api-key|x-auth-token)'
+                                r':[ \t]*(?:(?:bearer|basic|token)[ \t]+)?)(.*)$')
+_NOT_A_SECRET = re.compile(r'^\s*(?:|NOT_FOUND|.*\$\{.*)\s*$')
+
+
+def _request_headers(headers: str, secrets: list[str]) -> str:
+    def mask(match):
+        value = match.group(2)
+        return match.group(0) if _NOT_A_SECRET.match(value) else match.group(1) + SECRET_MASK
+    return _masked(_CREDENTIAL_HEADER.sub(mask, headers.strip()), secrets)
+
+
 def read_samples(path: str, secrets: list[str]) -> list[dict]:
-    """The top-level samples of an XML result, each with the start of its response."""
+    """The top-level samples of an XML result, each with what was sent and the start of its response."""
     root = ET.parse(path).getroot()
     samples = []
     for sample in root:
@@ -194,9 +215,12 @@ def read_samples(path: str, secrets: list[str]) -> list[dict]:
                     if (failure.findtext('failure') or failure.findtext('error') or '') == 'true']
         headers = sample.findtext('responseHeader') or ''
         content_type = re.search(r'(?im)^content-type:\s*([^\r\n;]+)', headers)
+        sent = sample.findtext('queryString') or ''
         samples.append({
             'label': sample.get('lb', ''), 'method': sample.findtext('method') or '',
             'url': _masked(sample.findtext('java.net.URL') or '', secrets),
+            'request_headers': _request_headers(sample.findtext('requestHeader') or '', secrets),
+            'request': _masked(sent[:REQUEST_CHARS], secrets) + ('…' if len(sent) > REQUEST_CHARS else ''),
             'code': sample.get('rc', ''), 'message': sample.get('rm', ''),
             'success': sample.get('s') == 'true', 'elapsed_ms': int(sample.get('t') or 0),
             'failures': [_masked(text, secrets) for text in failures if text],
@@ -402,15 +426,24 @@ def with_json_extractor(content: bytes, sampler: str, variable: str, expression:
             holder = ET.Element('hashTree')
             parent.insert(index + 1, holder)
         if replace:
+            old_paths = set()
             for child, _ in list(_pairs(holder)):
                 kind = child.tag
                 if kind == 'JSONPostProcessor' and _prop_text(child, 'JSONPostProcessor.referenceNames') == variable:
+                    old_paths.add(_prop_text(child, 'JSONPostProcessor.jsonPathExprs'))
                     _set(child, 'stringProp', 'JSONPostProcessor.jsonPathExprs', expression)
                     done = True
                 elif kind in ('RegexExtractor', 'BoundaryExtractor') and _prop_text(child, f'{kind}.refname') == variable:
                     # Same place, so extractors after it and the requests using the variable still follow it.
                     holder[list(holder).index(child)] = _extractor(variable, expression)
                     done = True
+            # Generated plans check that the value is there ("Check: $.token") with the extractor's path:
+            # the same wrong path, which kept the request failing after the extractor was fixed.
+            for child, _ in list(_pairs(holder)):
+                if child.tag == 'JSONPathAssertion' and _prop_text(child, 'JSON_PATH') in old_paths:
+                    _set(child, 'stringProp', 'JSON_PATH', expression)
+                    if (child.get('testname') or '').startswith('Check: '):
+                        child.set('testname', f'Check: {expression}')
         else:
             holder.append(_extractor(variable, expression))
             holder.append(ET.Element('hashTree'))

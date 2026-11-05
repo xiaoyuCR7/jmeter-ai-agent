@@ -35,6 +35,29 @@ async def test_a_file_of_the_built_ui_is_served_as_itself_and_page_routes_get_th
 
 
 @pytest.mark.asyncio
+async def test_after_an_upgrade_the_app_page_is_checked_and_an_old_page_reloads_itself(client, tmp_path):
+    """A page cached from before an upgrade asked for a script the new build no longer had: the app opened blank."""
+    from app import main
+    (tmp_path / 'assets').mkdir()
+    (tmp_path / 'assets' / 'index-new.js').write_text('app()', encoding='utf-8')
+    ui = main.FastAPI()
+    ui.mount('/assets', main.UIAssets(directory=str(tmp_path / 'assets')))
+    assets = httpx.AsyncClient(transport=httpx.ASGITransport(app=ui), base_url='http://localhost')
+    async with client, assets:
+        page = await client.get('/settings')
+        current = await assets.get('/assets/index-new.js')
+        old = await assets.get('/assets/index-old.js')
+        missing_style = await assets.get('/assets/index-old.css')
+    assert page.headers['cache-control'] == 'no-cache'
+    assert current.text == 'app()'
+    assert old.status_code == 200 and 'location.reload()' in old.text and old.headers['cache-control'] == 'no-store'
+    assert 'sessionStorage' in old.text  # Once per page, so a broken build cannot reload forever.
+    # In a running app it fails like the missing file, so the router opens the page in the new build.
+    assert 'if(window.__jmeterAgentBooted)throw' in old.text
+    assert missing_style.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_a_service_refusal_keeps_its_status_and_message(client):
     async with client:
         response = await client.get('/api/v1/refused')

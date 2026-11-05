@@ -170,6 +170,10 @@ async def record_hypotheses(execution: TestExecutionInfo, fact):
         if hyp.module == fact.module and hyp.prediction:
             open_claims.setdefault((hyp.category, prediction.signature(hyp.prediction)), []).append(hyp)
     replaced = set()
+    # A re-analysis rewrites this run's report: what its earlier report proposed and no run has settled
+    # gives way to the new one, or the ledger keeps two reports' claims about one run.
+    earlier_own = {hyp.hypothesis_id: hyp for hyp in await hypothesis_ledger.list_for_project(
+        fact.project_id, status=HypothesisStatus.UNTESTED, limit=200) if hyp.source_execution_id == execution.id}
     for item in (execution.ai_analysis.hypotheses if execution.ai_analysis else []):
         statement = str(item.get('statement') or '').strip()
         if not statement:
@@ -181,6 +185,7 @@ async def record_hypotheses(execution: TestExecutionInfo, fact):
         # Without a checkable prediction it waits for a person to decide it on the report page.
         expected = prediction.normalize(item.get('prediction'), labels)
         hypothesis_id = hashlib.sha256(json.dumps([execution.id, statement], ensure_ascii=False).encode()).hexdigest()
+        earlier_own.pop(hypothesis_id, None)  # Said again in the same words: it stays.
         await hypothesis_ledger.add(Hypothesis(
             hypothesis_id=hypothesis_id,
             source_execution_id=execution.id, module=fact.module, version=fact.version, test_type=fact.test_type,
@@ -201,6 +206,13 @@ async def record_hypotheses(execution: TestExecutionInfo, fact):
                     expected_status=HypothesisStatus.UNTESTED)
             except HypothesisUpdateConflict:
                 pass  # A run or a person settled it meanwhile; that answer stands.
+    for old in earlier_own.values():
+        try:
+            await hypothesis_ledger.update_status(
+                old.hypothesis_id, HypothesisStatus.DEPRECATED,
+                notes='这次运行的报告重新生成了，以新报告为准', expected_status=HypothesisStatus.UNTESTED)
+        except HypothesisUpdateConflict:
+            pass
 
 
 async def _write_analysis(execution: TestExecutionInfo, ai_model, lang=None):

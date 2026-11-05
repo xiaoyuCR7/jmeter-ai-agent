@@ -79,7 +79,7 @@
       </p>
       <div v-for="c in comparisons" :key="c.kind" class="comparison">
         <div class="comparison-title">
-          <span>{{ c.kind === 'baseline' ? L('对比基线', 'vs baseline') : L('对比上一次', 'vs previous run') }}「{{ c.data.name }}」</span>
+          <span>{{ c.kind === 'baseline' ? L('对比基线', 'vs baseline') : L('对比上一次', 'vs previous run') }}{{ L(`「${c.data.name}」`, ` "${c.data.name}"`) }}</span>
           <el-tag :type="historyType(c.data.verdict)" size="small">{{ historyText(c.data.verdict) }}</el-tag>
         </div>
         <p v-for="note in c.data.notes || []" :key="note.kind" class="comparison-note">{{ noteText(note) }}</p>

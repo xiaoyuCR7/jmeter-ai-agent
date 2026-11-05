@@ -12,7 +12,7 @@ export interface CapacitySearchInput {
 export interface CapacityStep {
   threads: number
   execution_id: string | null
-  status: 'pending' | 'running' | 'passed' | 'stopped' | 'failed'
+  status: 'pending' | 'running' | 'passed' | 'stopped' | 'failed' | 'skipped'
   throughput: number | null
   p95: number | null
   error_rate: number | null
@@ -227,6 +227,8 @@ export interface TrialSample {
   label: string
   method: string
   url: string
+  request_headers?: string  // Credentials masked; ${var} and NOT_FOUND kept.
+  request?: string
   code: string
   message: string
   success: boolean

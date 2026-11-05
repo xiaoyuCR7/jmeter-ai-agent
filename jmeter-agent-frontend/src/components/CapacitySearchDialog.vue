@@ -101,7 +101,7 @@ const STATUS: Record<string, [string, string, any]> = {
 }
 const STEP: Record<string, [string, string, any]> = {
   pending: ['等待', 'Waiting', 'info'], running: ['运行中', 'Running', 'warning'], passed: ['通过', 'Passed', 'success'],
-  stopped: ['停止点', 'Stop', 'danger'], failed: ['失败', 'Failed', 'danger'],
+  stopped: ['停止点', 'Stop', 'danger'], failed: ['失败', 'Failed', 'danger'], skipped: ['未运行', 'Not run', 'info'],
 }
 const statusText = (status: string) => STATUS[status] ? L(STATUS[status][0], STATUS[status][1]) : status
 const statusType = (status: string) => STATUS[status]?.[2] ?? 'info'

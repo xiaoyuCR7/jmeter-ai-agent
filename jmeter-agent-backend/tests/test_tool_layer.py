@@ -184,3 +184,21 @@ async def test_a_load_change_is_confirmed_next_to_the_current_values():
     created = await _plan()
     preview = await jmx_tools.update_preview({'jmx_path': created['jmx_path'], 'think_time_ms': 0, 'concurrent_users': 40})
     assert preview == {'current': {'concurrent_users': 5, 'think_time_ms': 1000}}
+
+
+@pytest.mark.asyncio
+async def test_think_time_can_be_added_to_a_plan_made_without_it():
+    """Plans made for a target rate have no timer; "add 500 ms think time" was skipped yet reported updated."""
+    from app.services.jmeter.jmx_lint import check
+    created = await jmx_tools.create_jmx('Paced', [ENDPOINT], 'http://127.0.0.1:9', concurrent_users=5,
+                                         duration_seconds=60, think_time_ms=0)
+    assert 'Timer' not in open(created['jmx_path'], encoding='utf-8').read()
+    preview = await jmx_tools.update_preview({'jmx_path': created['jmx_path'], 'think_time_ms': 500})
+    assert preview == {'current': {'think_time_ms': 0}}
+    assert (await jmx_tools.update_jmx(created['jmx_path'], think_time_ms=0))['applied'] == {'think_time_ms': 0}
+    result = await jmx_tools.update_jmx(created['jmx_path'], think_time_ms=500)
+    assert result['applied'] == {'think_time_ms': 500} and result['skipped'] == []
+    after = open(created['jmx_path'], encoding='utf-8').read()
+    assert 'UniformRandomTimer' in after and 'ConstantTimer.delay">375<' in after and 'RandomTimer.range">250.0<' in after
+    assert check(after)[0] == []
+    assert (await jmx_tools.update_preview({'jmx_path': created['jmx_path'], 'think_time_ms': 0}))['current'] == {'think_time_ms': 500}

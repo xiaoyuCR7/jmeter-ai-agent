@@ -86,7 +86,8 @@ async def test_a_capacity_search_stops_where_throughput_stops_growing(plan, monk
     done = await finish(search)
     assert [s.threads for s in done.steps] == [10, 20, 40, 80, 100]
     assert done.status == 'finished' and done.capacity_threads == 40 and done.capacity_throughput == 400
-    assert [s.status for s in done.steps] == ['passed', 'passed', 'passed', 'stopped', 'pending']
+    # The load after the stop never ran, and does not read as waiting to.
+    assert [s.status for s in done.steps] == ['passed', 'passed', 'passed', 'stopped', 'skipped']
     assert '吞吐量' in done.stop_reason
     assert fake.runs['run-1'].kwargs['purpose'] == {'kind': 'capacity', 'search_id': search.id, 'step': 1}
     assert experiments.list_searches('plan-1')[0].id == search.id
@@ -233,3 +234,13 @@ def test_the_ci_script_exits_with_the_gate(monkeypatch, capsys):
     assert ci_gate.main(['--plan', 'plan-1', '--token', 't']) == 1
     assert calls[0] == ('POST', '/test-plans/plan-1/execute') and calls[-1] == ('GET', '/executions/run-1/gate')
     assert 'FAIL: Performance requirements failed' in capsys.readouterr().err
+
+
+def test_a_search_saved_before_unrun_steps_were_marked_reads_them_as_not_run(tmp_path, monkeypatch):
+    """Records from before the fix showed loads a finished search never reached as "waiting"."""
+    monkeypatch.setattr(experiments, '_searches_dir', lambda: str(tmp_path))
+    old = experiments.CapacitySearch(id='old1', plan_id='plan-1', project_id='p', status='finished', max_error_rate=1,
+                                     steps=[experiments.CapacityStep(threads=10, execution_id='r', status='stopped'),
+                                            experiments.CapacityStep(threads=20)])
+    (tmp_path / 'old1.json').write_text(old.model_dump_json(), encoding='utf-8')
+    assert [s.status for s in experiments.load_search('old1').steps] == ['stopped', 'skipped']

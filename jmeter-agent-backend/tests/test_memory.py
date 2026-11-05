@@ -188,6 +188,22 @@ async def test_a_restated_prediction_replaces_the_open_one_of_the_same_plan(memo
 
 
 @pytest.mark.asyncio
+async def test_a_rewritten_report_replaces_what_the_earlier_one_proposed(memory, monkeypatch):
+    """Re-analysing a run kept both reports' hypotheses about it open side by side."""
+    from app.services.ai import memory as ledgers
+    monkeypatch.setattr(ledgers, 'hypothesis_ledger', memory.hypotheses)
+    await record_report('run', [{'statement': '下单失败是系统性的', 'category': 'root_cause'},
+                                {'statement': '搜索在排队', 'category': 'bottleneck'}])
+    await record_report('run', [{'statement': '下单失败是系统性的', 'category': 'root_cause'},
+                                {'statement': '搜索是固定开销', 'category': 'bottleneck'}])
+    status = {hyp.statement: hyp for hyp in await memory.hypotheses.list_for_project('p')}
+    assert status['下单失败是系统性的'].status == HypothesisStatus.UNTESTED  # Restated in the same words.
+    assert status['搜索是固定开销'].status == HypothesisStatus.UNTESTED
+    assert status['搜索在排队'].status == HypothesisStatus.DEPRECATED
+    assert '重新生成' in status['搜索在排队'].verification_notes
+
+
+@pytest.mark.asyncio
 async def test_a_report_retires_the_open_hypothesis_it_says_it_restates(memory, monkeypatch):
     from app.services.ai import memory as ledgers
     monkeypatch.setattr(ledgers, 'hypothesis_ledger', memory.hypotheses)

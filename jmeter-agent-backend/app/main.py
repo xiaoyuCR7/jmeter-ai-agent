@@ -13,8 +13,9 @@ from contextlib import asynccontextmanager, AsyncExitStack
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api import routes, shared
 from app.api.mcp_routes import init_mcp_server
@@ -146,15 +147,43 @@ class ReportFiles(StaticFiles):
 os.makedirs(settings.REPORTS_DIR, exist_ok=True)
 app.mount("/reports", ReportFiles(directory=settings.REPORTS_DIR), name="reports")
 
+# A page the browser cached before an upgrade asks for a script the new build no longer has. Instead of
+# a blank page, that script reloads the page once; a reload always checks the page with the server.
+# A running app that asks for a replaced page chunk gets an import error instead, which its router turns
+# into opening that page in the new build (main.ts).
+_RELOAD_ONCE = (
+    "if(window.__jmeterAgentBooted)throw new Error('Failed to fetch dynamically imported module: replaced by an upgrade');"
+    "try{if(sessionStorage.getItem('jmeter-agent-stale')!==location.pathname){"
+    "sessionStorage.setItem('jmeter-agent-stale',location.pathname);location.reload()}}"
+    "catch(e){}"
+)
+
+
+class UIAssets(StaticFiles):
+    async def get_response(self, path, scope):
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as error:
+            if error.status_code != 404 or not path.endswith('.js'):
+                raise
+            return Response(_RELOAD_ONCE, media_type='text/javascript', headers={'Cache-Control': 'no-store'})
+
+
 if os.path.exists(frontend_dist):
-    app.mount("/assets", StaticFiles(directory=os.path.join(frontend_dist, "assets")), name="assets")
+    app.mount("/assets", UIAssets(directory=os.path.join(frontend_dist, "assets")), name="assets")
+
+
+def _app_page(index_path: str) -> FileResponse:
+    # Checked with the server every time: an index.html the browser kept from before an upgrade asked
+    # for chunks the new build no longer has, and the app opened blank.
+    return FileResponse(index_path, headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/")
 async def root():
     index_path = os.path.join(frontend_dist, "index.html")
     if os.path.exists(index_path):
-        return FileResponse(index_path)
+        return _app_page(index_path)
     return {"name": settings.APP_NAME, "version": settings.APP_VERSION, "docs": "/api/docs"}
 
 
@@ -169,7 +198,7 @@ async def catch_all(path: str):
             return FileResponse(candidate)
     index_path = os.path.join(frontend_dist, "index.html")
     if os.path.exists(index_path):
-        return FileResponse(index_path)
+        return _app_page(index_path)
     raise HTTPException(status_code=404, detail="Not found")
 
 

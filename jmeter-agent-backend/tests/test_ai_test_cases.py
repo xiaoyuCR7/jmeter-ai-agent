@@ -148,7 +148,16 @@ def shape(**config):
 def test_each_test_type_has_its_own_load_shape():
     assert [(g.users, g.delay_seconds, g.duration_seconds) for g in shape(
         test_type='ramp_up', concurrent_users=30, step_users=10, step_duration=60)] == [
-        (10, 0, 180), (10, 60, 120), (10, 120, 60)]
+        (10, 0, 180), (10, 60, 120), (10, 120, 60)]  # The 300 s default duration stretches nothing.
+    # A duration someone set holds the full load to the end, never shorter than the climb.
+    assert [g.duration_seconds for g in shape(test_type='ramp_up', concurrent_users=30, step_users=10,
+                                              step_duration=60, duration_seconds=300)] == [300, 240, 180]
+    assert [g.duration_seconds for g in shape(test_type='ramp_up', concurrent_users=30, step_users=10,
+                                              step_duration=60, duration_seconds=60)] == [180, 120, 60]
+    # "Ramp up in 10 s, hold 60 s": the steps climb, then the full load stays until the end.
+    assert [(g.users, g.delay_seconds, g.duration_seconds) for g in shape(
+        test_type='ramp_up', concurrent_users=30, step_users=15, step_duration=5, duration_seconds=60)] == [
+        (15, 0, 60), (15, 5, 55)]
     stress = shape(test_type='stress', concurrent_users=100, duration_seconds=300)
     assert [g.users for g in stress] == [20] * 5 and sum(g.users for g in stress) == 100
     assert stress[0].duration_seconds == 300 and stress[-1].delay_seconds == 240

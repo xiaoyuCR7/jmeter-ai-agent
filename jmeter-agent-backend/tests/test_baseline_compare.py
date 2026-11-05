@@ -118,3 +118,13 @@ async def test_plan_baseline_wins_over_project_baseline_and_self_is_noted(env):
 
 def test_prompt_without_history_says_so():
     assert '没有可对比' in bc.format_for_prompt({'baseline': None, 'previous': None})
+
+
+def test_noise_between_two_runs_is_stable_not_an_improvement():
+    """P95 236 → 237 and errors 2.84 → 2.59 % read "性能提升"; a change counts only past the regression bar."""
+    from app.services.jmeter.regression_engine import RegressionEngine
+    engine = RegressionEngine()
+    assert engine.compare(summary(p95=236, err=2.84, tps=90), summary(p95=237, err=2.59, tps=90.8)).overall_verdict == 'stable'
+    assert engine.compare(summary(p95=500, err=0.5), summary(p95=300, err=0.5)).overall_verdict == 'improvement'
+    # Errors falling by 1.5 points is a gain, however the percentages fall.
+    assert engine.compare(summary(err=3.0), summary(err=1.5)).overall_verdict == 'improvement'

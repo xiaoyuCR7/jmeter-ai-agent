@@ -183,7 +183,10 @@ class RegressionEngine:
             deltas.append(delta)
             if is_regression:
                 regressions.append(delta)
-            elif direction == DeltaDirection.BETTER and direction_rule != "informational":
+            elif direction == DeltaDirection.BETTER and direction_rule != "informational" and (
+                    delta_pct is None or abs(delta_pct) > self.regression_threshold_pct) and (
+                    metric_name != "error_rate" or abs(delta_abs) >= self.ERROR_RATE_MIN_POINTS):
+                # The same bar as a regression: P95 236 → 237 with errors 2.84 → 2.59 read "improved".
                 improvements.append(delta)
 
         # Overall verdict

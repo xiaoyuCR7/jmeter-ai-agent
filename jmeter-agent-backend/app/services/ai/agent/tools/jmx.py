@@ -234,6 +234,8 @@ async def update_preview(args: dict) -> Optional[dict]:
                                              + float(values.get('RandomTimer.range') or 0) / 2)
         except ValueError:
             pass
+    elif group is not None:
+        current['think_time_ms'] = 0  # No timer: requests follow each other at once.
     asked = [key for key in ('concurrent_users', 'ramp_up_seconds', 'duration_seconds', 'think_time_ms')
              if args.get(key) is not None]
     return {'current': {key: current.get(key) for key in asked}} if asked else None
@@ -424,7 +426,17 @@ async def update_jmx(
                         else:
                             tprops["ConstantTimer.delay"] = str(think_time_ms)
                         timer_found = True
-            if timer_found:
+            if not timer_found and think_time_ms > 0:
+                # A plan made for a target rate has no timer; a timer on each thread group delays every
+                # request in it, with the spread new plans get.
+                low, spread = round(think_time_ms * 0.75), think_time_ms * 0.5
+                for tg in thread_groups:
+                    tg.setdefault("children", []).insert(0, {
+                        "testclass": "UniformRandomTimer", "testname": f"Think Time: {low}-{round(low + spread)}ms",
+                        "enabled": True, "children": [],
+                        "properties": {"ConstantTimer.delay": str(low), "RandomTimer.range": str(float(spread))}})
+                timer_found = bool(thread_groups)
+            if timer_found or think_time_ms == 0:  # No timer is already no think time.
                 applied["think_time_ms"] = think_time_ms
             else:
                 skipped.append("think_time_ms")
