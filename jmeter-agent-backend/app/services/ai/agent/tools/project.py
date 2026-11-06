@@ -37,11 +37,13 @@ async def create_project(name: str, description: str = "", base_url: str = "", h
         variables=_as_strings(variables),
     )
 
+    from app.services.execution_lifecycle import default_environments
     project = ProjectInfo(
         id=project_id,
         name=name,
         description=description,
         environment=env,
+        environments=default_environments(env),
         created_at=now,
         updated_at=now,
     )
@@ -55,6 +57,7 @@ async def create_project(name: str, description: str = "", base_url: str = "", h
         "description": description,
         "base_url": base_url,
         "environment_data": env.model_dump(),
+        "environments_data": project.environments.model_dump(context={'reveal_secrets': True}),
         "created_at": now,
     })
 
@@ -123,12 +126,24 @@ async def update_project_env(
             proj.environment.headers = _as_strings(headers)
         if variables is not None:
             proj.environment.variables = _as_strings(variables)
+        # Runs apply the active environment, so that is where the change has to land too.
+        from app.services.execution_lifecycle import active_environment
+        _, active = active_environment(proj)
+        if active is not None:
+            if base_url is not None:
+                active.base_url = base_url
+            if headers is not None:
+                active.headers = {**active.headers, **_as_strings(headers)}
+            if variables is not None:
+                active.variables = {**active.variables, **_as_strings(variables)}
         proj.updated_at = datetime.now()
         from app.services.db_store import db_store as _db
         env_data = proj.environment.model_dump()
         persisted = await _db.update_project(project_id, {
             "base_url": env_data.get("base_url", ""),
             "environment_data": env_data,
+            "environments_data": (proj.environments.model_dump(context={'reveal_secrets': True})
+                                  if proj.environments else None),
             "storage_version": proj.storage_version,
         })
         if persisted is None:

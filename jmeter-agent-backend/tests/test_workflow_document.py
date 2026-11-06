@@ -171,3 +171,28 @@ def test_the_model_gets_one_tool_and_no_rules_for_tools_it_lacks():
     prompt = workflow_agent.WORKFLOW_SYSTEM_PROMPT
     for absent in ('execute_test', 'check_system_resources', 'create_jmx', 'delete'):
         assert absent not in prompt
+
+
+def test_a_path_without_an_example_keeps_the_rest_of_its_request_and_forms_stay_forms():
+    """The tenant header was dropped from every /items/{id} request, and a form login went out as JSON (415)."""
+    tenant = {'name': 'X-Tenant-Id', 'in': 'header', 'required': True, 'schema': {'type': 'string', 'enum': ['acme']}}
+    spec = {**SPEC, 'paths': {
+        '/login': {'post': {'summary': 'Log in', 'parameters': [tenant], 'requestBody': {'content': {
+            'application/x-www-form-urlencoded': {'schema': {'type': 'object', 'properties': {
+                'username': {'type': 'string', 'example': 'alice'}}}}}},
+            'responses': {'200': {'description': 'ok'}}}},
+        '/items/{id}': {'put': {'summary': 'Update', 'parameters': [
+            {'name': 'id', 'in': 'path', 'required': True, 'schema': {'type': 'integer'}}, tenant],
+            'requestBody': {'content': {'application/json': {'example': {'qty': 8}}}},
+            'responses': {'200': {'description': 'ok'}}}}}}
+    spec['info'] = {**spec['info'], 'description': 'code 0 means success'}
+    spec['paths']['/login']['post']['responses']['200']['content'] = {'application/json': {'schema': {
+        'type': 'object', 'properties': {'code': {'type': 'integer', 'description': '0 = success'}}}}}
+    parsed = endpoints_from_document(json.dumps(spec))
+    login, update = parsed['endpoints']
+    assert parsed['description'] == 'code 0 means success'
+    assert login['response']['json'] == {'code': 'integer — 0 = success'}
+    assert login['content_type'] == 'application/x-www-form-urlencoded' and login['body'] == {'username': 'alice'}
+    assert login['headers'] == {'X-Tenant-Id': 'acme'} and 'note' not in login
+    assert update['path'] == '/items/{id}' and update['headers'] == {'X-Tenant-Id': 'acme'}
+    assert update['body'] == {'qty': 8} and 'id' in update['note']

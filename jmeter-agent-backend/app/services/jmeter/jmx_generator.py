@@ -82,6 +82,23 @@ class Scenario(BaseModel):
     csv_data_files: Optional[List[CsvDataFile]] = None
 
 
+_REFERENCE = re.compile(r"\$\{([^${}]*)\}")  # Innermost first: ${__Random(1,${max},)}.
+
+
+def static_label(text: str) -> str:
+    """A sampler name JMeter does not evaluate: ${...} becomes {name}.
+
+    JMeter evaluates a sampler's name on every request, so GET /items/${__Random(1,20,)} reported
+    as twenty labels, none of which history or a requirement could match.
+    """
+    def placeholder(match):
+        return "\0" + (re.match(r"\w*", match.group(1)).group(0) or "value") + "\1"
+    while (changed := _REFERENCE.sub(placeholder, text)) != text:
+        text = changed
+    # An inner reference's name is part of the outer one's arguments, which the outer name drops.
+    return text.replace("\0", "{").replace("\1", "}")
+
+
 def normalize_scenario(endpoints: List[APIEndpoint]) -> List[APIEndpoint]:
     """Make a model's plan comparable and lean.
 
@@ -91,7 +108,7 @@ def normalize_scenario(endpoints: List[APIEndpoint]) -> List[APIEndpoint]:
     used = json.dumps([ep.model_dump(exclude={"extractions"}) for ep in endpoints], ensure_ascii=False)
     names, seen = {}, {}
     for endpoint in endpoints:
-        label = f"{endpoint.method.upper()} {endpoint.path.split('?')[0]}"
+        label = static_label(f"{endpoint.method.upper()} {endpoint.path.split('?')[0]}")
         seen[label] = seen.get(label, 0) + 1
         names[endpoint.name] = label if seen[label] == 1 else f"{label} #{seen[label]}"
     return [endpoint.model_copy(update={
@@ -510,7 +527,7 @@ class JMXGenerator:
         elem = ET.SubElement(parent, "HTTPSamplerProxy")
         elem.set("guiclass", "HttpTestSampleGui")
         elem.set("testclass", "HTTPSamplerProxy")
-        elem.set("testname", endpoint.name)
+        elem.set("testname", static_label(endpoint.name))
         elem.set("enabled", "true")
         
         string_prop = ET.SubElement(elem, "stringProp")

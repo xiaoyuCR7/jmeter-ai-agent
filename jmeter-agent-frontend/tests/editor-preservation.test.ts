@@ -22,7 +22,7 @@ function editor(path = 'src/views/TestCaseEditor.vue') {
   const ast = ts.createSourceFile('setup.ts', script, ts.ScriptTarget.Latest, true)
   const declarations = ast.statements.filter(node => ts.isFunctionDeclaration(node) ||
     (ts.isVariableStatement(node) && node.declarationList.declarations.some(d =>
-      ts.isIdentifier(d.name) && ['headerProps'].includes(d.name.text))))
+      ts.isIdentifier(d.name) && ['headerProps', 'endpointList'].includes(d.name.text))))
   const source = declarations.map(node => node.getText(ast)).join('\n')
   const js = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
   const ref = (value: any) => Vue.ref(value)
@@ -31,7 +31,7 @@ function editor(path = 'src/views/TestCaseEditor.vue') {
     selectedEndpointId: ref(null), selectedEndpoint: ref(null), mainView: ref('edit'), debugTab: ref('params'),
     planId: ref('plan'), planName: ref('Plan'), saving: ref(false), running: ref(false),
     threadGroupConfig: Vue.reactive({ numThreads: 1, rampTime: 1, loops: 1, duration: 0, delay: 0, scheduler: false, onSampleError: 'continue' }),
-    csvDatasetConfig: { filePath: '', variableNames: '', delimiter: ',', encoding: 'UTF-8', ignoreFirstLine: true, recycle: true },
+    csvDatasetConfig: { filePath: '', variableNames: '', delimiter: ',', encoding: 'UTF-8', ignoreFirstLine: false, recycle: true },
     api: { saveTestPlanTree: vi.fn().mockResolvedValue({}), executeTest: vi.fn().mockResolvedValue({}) },
     router: { push: vi.fn() }, ElMessage: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
     t: (key: string, args?: any) => args?.msg || key,
@@ -221,6 +221,29 @@ function find(tree: any, id: string): any {
 }
 
 describe('lossless test case editor', () => {
+  it('lists each request by its own method, name and path', () => {
+    // The list read tree-node fields from parsed requests and showed every one as "unnamed GET /".
+    const e = editor(); e.load(plan())
+    expect(e.endpointList.value.find((item: any) => item.id === 'request')).toMatchObject({ method: 'POST', path: '/before' })
+    expect(e.endpointList.value.map((item: any) => item.path)).toContain('/nested')
+  })
+
+  it('shows and edits the data set a generated plan keeps on the test plan, under JMeter names', () => {
+    // The panel read only the thread group: a generated plan showed an empty path and "skip first line" on.
+    const e = editor(); const original = plan()
+    const group = original.children[0]
+    const csv = group.children.shift()
+    csv.properties = { filename: 'accounts.csv', variableNames: 'username,password', fileEncoding: 'GBK', recycle: 'true' }
+    original.children.unshift(csv)
+    e.load(original)
+    expect(e.csvDatasetConfig).toMatchObject({ filePath: 'accounts.csv', encoding: 'GBK', ignoreFirstLine: false, recycle: true })
+    e.csvDatasetConfig.filePath = 'users.csv'
+    const saved = e.buildTreeFromEndpoints()
+    expect(saved.children[0].properties.filename).toBe('users.csv')
+    expect(saved.children[0].properties).not.toHaveProperty('encoding')
+    expect(find(saved, 'group1').children.some((child: any) => child.testclass === 'CSVDataSet')).toBe(false)
+  })
+
   it('preserves every original property, disabled flag, child, and group on no-op save', () => {
     const e = editor(); const original = plan(); e.load(original)
     expect(e.buildTreeFromEndpoints()).toEqual(original)

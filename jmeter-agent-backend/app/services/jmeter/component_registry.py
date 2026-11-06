@@ -12,7 +12,7 @@ COMPONENT_REGISTRY: Dict[str, Dict[str, Any]] = {
             "ThreadGroup", "SetupThreadGroup", "PostThreadGroup",
             "Arguments", "ResultCollector", "ConfigTestElement", "HeaderManager",
             "CookieManager", "CacheManager", "CSVDataSet", "DNSCacheManager",
-            "AuthManager", "JDBCConnectionConfiguration", "RandomVariableConfig"
+            "AuthManager", "JDBCDataSource", "RandomVariableConfig"
         ],
         "properties": {
             "TestPlan.comments": {"type": "text", "label": "注释"},
@@ -36,8 +36,8 @@ COMPONENT_REGISTRY: Dict[str, Dict[str, Any]] = {
             "HTTPSamplerProxy", "JSR223Sampler", "DebugSampler",
             "ConfigTestElement", "HeaderManager", "CookieManager",
             "CacheManager", "CSVDataSet", "Arguments", "DNSCacheManager",
-            "AuthManager", "JDBCConnectionConfiguration", "RandomVariableConfig",
-            "ResponseAssertion", "JSONAssertion", "JSR223Assertion",
+            "AuthManager", "JDBCDataSource", "RandomVariableConfig",
+            "ResponseAssertion", "JSONPathAssertion", "JSR223Assertion",
             "DurationAssertion", "SizeAssertion",
             "JSONPostProcessor", "RegexExtractor", "BoundaryExtractor", "XPath2Extractor",
             "JSR223PostProcessor",
@@ -45,8 +45,8 @@ COMPONENT_REGISTRY: Dict[str, Dict[str, Any]] = {
             "PoissonRandomTimer", "SyncTimer", "ConstantThroughputTimer",
             "JSR223PreProcessor", "UserParameters",
             "IfController", "LoopController", "WhileController",
-            "TransactionController", "SimpleController", "RandomController",
-            "ThroughputController", "ForEachController",
+            "TransactionController", "GenericController", "RandomController",
+            "ThroughputController", "ForeachController",
             "ResultCollector"
         ],
         "properties": {
@@ -86,7 +86,7 @@ COMPONENT_REGISTRY: Dict[str, Dict[str, Any]] = {
         "category": "sampler",
         "allowed_parents": ["ThreadGroup"],
         "allowed_children": [
-            "ResponseAssertion", "JSONAssertion", "JSR223Assertion",
+            "ResponseAssertion", "JSONPathAssertion", "JSR223Assertion",
             "DurationAssertion", "SizeAssertion",
             "JSONPostProcessor", "RegexExtractor", "BoundaryExtractor", "XPath2Extractor",
             "JSR223PostProcessor",
@@ -432,15 +432,15 @@ COMPONENT_REGISTRY: Dict[str, Dict[str, Any]] = {
             "HTTPSamplerProxy", "JSR223Sampler", "DebugSampler",
             "ConfigTestElement", "HeaderManager", "CookieManager",
             "CacheManager", "CSVDataSet", "Arguments",
-            "ResponseAssertion", "JSONAssertion", "JSR223Assertion",
+            "ResponseAssertion", "JSONPathAssertion", "JSR223Assertion",
             "DurationAssertion", "SizeAssertion",
             "JSONPostProcessor", "RegexExtractor", "BoundaryExtractor", "XPath2Extractor",
             "ConstantTimer", "UniformRandomTimer", "GaussianRandomTimer",
             "PoissonRandomTimer", "SyncTimer", "ConstantThroughputTimer",
             "JSR223PreProcessor", "UserParameters",
             "IfController", "LoopController", "WhileController",
-            "TransactionController", "SimpleController", "RandomController",
-            "ThroughputController", "ForEachController",
+            "TransactionController", "GenericController", "RandomController",
+            "ThroughputController", "ForeachController",
             "ResultCollector"
         ],
         "properties": {
@@ -481,15 +481,15 @@ COMPONENT_REGISTRY: Dict[str, Dict[str, Any]] = {
             "HTTPSamplerProxy", "JSR223Sampler", "DebugSampler",
             "ConfigTestElement", "HeaderManager", "CookieManager",
             "CacheManager", "CSVDataSet", "Arguments",
-            "ResponseAssertion", "JSONAssertion", "JSR223Assertion",
+            "ResponseAssertion", "JSONPathAssertion", "JSR223Assertion",
             "DurationAssertion", "SizeAssertion",
             "JSONPostProcessor", "RegexExtractor", "BoundaryExtractor", "XPath2Extractor",
             "ConstantTimer", "UniformRandomTimer", "GaussianRandomTimer",
             "PoissonRandomTimer", "SyncTimer", "ConstantThroughputTimer",
             "JSR223PreProcessor", "UserParameters",
             "IfController", "LoopController", "WhileController",
-            "TransactionController", "SimpleController", "RandomController",
-            "ThroughputController", "ForEachController",
+            "TransactionController", "GenericController", "RandomController",
+            "ThroughputController", "ForeachController",
             "ResultCollector"
         ],
         "properties": {
@@ -526,9 +526,9 @@ COMPONENT_REGISTRY: Dict[str, Dict[str, Any]] = {
         "label": "JSR223取样器",
         "icon": "📝",
         "category": "sampler",
-        "allowed_parents": ["ThreadGroup", "IfController", "LoopController", "WhileController", "TransactionController", "SimpleController", "RandomController", "ThroughputController", "ForEachController"],
+        "allowed_parents": ["ThreadGroup", "IfController", "LoopController", "WhileController", "TransactionController", "GenericController", "RandomController", "ThroughputController", "ForeachController"],
         "allowed_children": [
-            "ResponseAssertion", "JSONAssertion", "JSR223Assertion",
+            "ResponseAssertion", "JSONPathAssertion", "JSR223Assertion",
             "DurationAssertion", "SizeAssertion",
             "ConstantTimer", "UniformRandomTimer", "GaussianRandomTimer",
             "PoissonRandomTimer", "SyncTimer", "ConstantThroughputTimer",
@@ -558,7 +558,7 @@ COMPONENT_REGISTRY: Dict[str, Dict[str, Any]] = {
         "label": "Debug取样器",
         "icon": "🐛",
         "category": "sampler",
-        "allowed_parents": ["ThreadGroup", "IfController", "LoopController", "WhileController", "TransactionController", "SimpleController", "RandomController", "ThroughputController", "ForEachController"],
+        "allowed_parents": ["ThreadGroup", "IfController", "LoopController", "WhileController", "TransactionController", "GenericController", "RandomController", "ThroughputController", "ForeachController"],
         "allowed_children": [],
         "properties": {
             "displayJMeterVariables": {"type": "switch", "label": "显示JMeter变量"},
@@ -576,134 +576,134 @@ COMPONENT_REGISTRY: Dict[str, Dict[str, Any]] = {
         "label": "If控制器",
         "icon": "🔀",
         "category": "controller",
-        "allowed_parents": ["ThreadGroup", "IfController", "LoopController", "WhileController", "TransactionController", "SimpleController", "RandomController", "ThroughputController", "ForEachController"],
+        "allowed_parents": ["ThreadGroup", "IfController", "LoopController", "WhileController", "TransactionController", "GenericController", "RandomController", "ThroughputController", "ForeachController"],
         "allowed_children": [
             "HTTPSamplerProxy", "JSR223Sampler", "DebugSampler",
             "ConfigTestElement", "HeaderManager", "CookieManager",
             "CacheManager", "CSVDataSet", "Arguments",
-            "ResponseAssertion", "JSONAssertion", "JSR223Assertion",
+            "ResponseAssertion", "JSONPathAssertion", "JSR223Assertion",
             "DurationAssertion", "SizeAssertion",
             "JSONPostProcessor", "RegexExtractor", "BoundaryExtractor", "XPath2Extractor",
             "ConstantTimer", "UniformRandomTimer", "GaussianRandomTimer",
             "PoissonRandomTimer", "SyncTimer", "ConstantThroughputTimer",
             "JSR223PreProcessor", "UserParameters",
             "IfController", "LoopController", "WhileController",
-            "TransactionController", "SimpleController", "RandomController",
-            "ThroughputController", "ForEachController",
+            "TransactionController", "GenericController", "RandomController",
+            "ThroughputController", "ForeachController",
             "ResultCollector"
         ],
         "properties": {
-            "condition": {"type": "text", "label": "条件（使用JSyntax）"},
-            "evaluateAll": {"type": "switch", "label": "对所有子代取样器求值"},
-            "useExpression": {"type": "switch", "label": "将条件解释为变量表达式"},
+            "IfController.condition": {"type": "text", "label": "条件（使用JSyntax）"},
+            "IfController.evaluateAll": {"type": "switch", "label": "对所有子代取样器求值"},
+            "IfController.useExpression": {"type": "switch", "label": "将条件解释为变量表达式"},
         },
         "defaults": {
-            "condition": "",
-            "evaluateAll": False,
-            "useExpression": True,
+            "IfController.condition": "",
+            "IfController.evaluateAll": False,
+            "IfController.useExpression": True,
         },
     },
     "LoopController": {
         "label": "循环控制器",
         "icon": "🔄",
         "category": "controller",
-        "allowed_parents": ["ThreadGroup", "IfController", "LoopController", "WhileController", "TransactionController", "SimpleController", "RandomController", "ThroughputController", "ForEachController"],
+        "allowed_parents": ["ThreadGroup", "IfController", "LoopController", "WhileController", "TransactionController", "GenericController", "RandomController", "ThroughputController", "ForeachController"],
         "allowed_children": [
             "HTTPSamplerProxy", "JSR223Sampler", "DebugSampler",
             "ConfigTestElement", "HeaderManager", "CookieManager",
             "CacheManager", "CSVDataSet", "Arguments",
-            "ResponseAssertion", "JSONAssertion", "JSR223Assertion",
+            "ResponseAssertion", "JSONPathAssertion", "JSR223Assertion",
             "DurationAssertion", "SizeAssertion",
             "JSONPostProcessor", "RegexExtractor", "BoundaryExtractor", "XPath2Extractor",
             "ConstantTimer", "UniformRandomTimer", "GaussianRandomTimer",
             "PoissonRandomTimer", "SyncTimer", "ConstantThroughputTimer",
             "JSR223PreProcessor", "UserParameters",
             "IfController", "LoopController", "WhileController",
-            "TransactionController", "SimpleController", "RandomController",
-            "ThroughputController", "ForEachController",
+            "TransactionController", "GenericController", "RandomController",
+            "ThroughputController", "ForeachController",
             "ResultCollector"
         ],
         "properties": {
-            "loops": {"type": "number", "label": "循环次数（-1=永远）"},
+            "LoopController.loops": {"type": "number", "label": "循环次数（-1=永远）"},
         },
         "defaults": {
-            "loops": 1,
+            "LoopController.loops": 1,
         },
     },
     "WhileController": {
         "label": "While控制器",
         "icon": "🔁",
         "category": "controller",
-        "allowed_parents": ["ThreadGroup", "IfController", "LoopController", "WhileController", "TransactionController", "SimpleController", "RandomController", "ThroughputController", "ForEachController"],
+        "allowed_parents": ["ThreadGroup", "IfController", "LoopController", "WhileController", "TransactionController", "GenericController", "RandomController", "ThroughputController", "ForeachController"],
         "allowed_children": [
             "HTTPSamplerProxy", "JSR223Sampler", "DebugSampler",
             "ConfigTestElement", "HeaderManager", "CookieManager",
             "CacheManager", "CSVDataSet", "Arguments",
-            "ResponseAssertion", "JSONAssertion", "JSR223Assertion",
+            "ResponseAssertion", "JSONPathAssertion", "JSR223Assertion",
             "DurationAssertion", "SizeAssertion",
             "JSONPostProcessor", "RegexExtractor", "BoundaryExtractor", "XPath2Extractor",
             "ConstantTimer", "UniformRandomTimer", "GaussianRandomTimer",
             "PoissonRandomTimer", "SyncTimer", "ConstantThroughputTimer",
             "JSR223PreProcessor", "UserParameters",
             "IfController", "LoopController", "WhileController",
-            "TransactionController", "SimpleController", "RandomController",
-            "ThroughputController", "ForEachController",
+            "TransactionController", "GenericController", "RandomController",
+            "ThroughputController", "ForeachController",
             "ResultCollector"
         ],
         "properties": {
-            "condition": {"type": "text", "label": "条件"},
+            "WhileController.condition": {"type": "text", "label": "条件"},
         },
         "defaults": {
-            "condition": "",
+            "WhileController.condition": "",
         },
     },
     "TransactionController": {
         "label": "事务控制器",
         "icon": "📦",
         "category": "controller",
-        "allowed_parents": ["ThreadGroup", "IfController", "LoopController", "WhileController", "TransactionController", "SimpleController", "RandomController", "ThroughputController", "ForEachController"],
+        "allowed_parents": ["ThreadGroup", "IfController", "LoopController", "WhileController", "TransactionController", "GenericController", "RandomController", "ThroughputController", "ForeachController"],
         "allowed_children": [
             "HTTPSamplerProxy", "JSR223Sampler", "DebugSampler",
             "ConfigTestElement", "HeaderManager", "CookieManager",
             "CacheManager", "CSVDataSet", "Arguments",
-            "ResponseAssertion", "JSONAssertion", "JSR223Assertion",
+            "ResponseAssertion", "JSONPathAssertion", "JSR223Assertion",
             "DurationAssertion", "SizeAssertion",
             "JSONPostProcessor", "RegexExtractor", "BoundaryExtractor", "XPath2Extractor",
             "ConstantTimer", "UniformRandomTimer", "GaussianRandomTimer",
             "PoissonRandomTimer", "SyncTimer", "ConstantThroughputTimer",
             "JSR223PreProcessor", "UserParameters",
             "IfController", "LoopController", "WhileController",
-            "TransactionController", "SimpleController", "RandomController",
-            "ThroughputController", "ForEachController",
+            "TransactionController", "GenericController", "RandomController",
+            "ThroughputController", "ForeachController",
             "ResultCollector"
         ],
         "properties": {
-            "generateParentSample": {"type": "switch", "label": "生成父取样器"},
-            "includeTimers": {"type": "switch", "label": "包含定时器时间"},
+            "TransactionController.parent": {"type": "switch", "label": "生成父取样器"},
+            "TransactionController.includeTimers": {"type": "switch", "label": "包含定时器时间"},
         },
         "defaults": {
-            "generateParentSample": False,
-            "includeTimers": False,
+            "TransactionController.parent": False,
+            "TransactionController.includeTimers": False,
         },
     },
-    "SimpleController": {
+    "GenericController": {
         "label": "简单控制器",
         "icon": "📁",
         "category": "controller",
-        "allowed_parents": ["ThreadGroup", "IfController", "LoopController", "WhileController", "TransactionController", "SimpleController", "RandomController", "ThroughputController", "ForEachController"],
+        "allowed_parents": ["ThreadGroup", "IfController", "LoopController", "WhileController", "TransactionController", "GenericController", "RandomController", "ThroughputController", "ForeachController"],
         "allowed_children": [
             "HTTPSamplerProxy", "JSR223Sampler", "DebugSampler",
             "ConfigTestElement", "HeaderManager", "CookieManager",
             "CacheManager", "CSVDataSet", "Arguments",
-            "ResponseAssertion", "JSONAssertion", "JSR223Assertion",
+            "ResponseAssertion", "JSONPathAssertion", "JSR223Assertion",
             "DurationAssertion", "SizeAssertion",
             "JSONPostProcessor", "RegexExtractor", "BoundaryExtractor", "XPath2Extractor",
             "ConstantTimer", "UniformRandomTimer", "GaussianRandomTimer",
             "PoissonRandomTimer", "SyncTimer", "ConstantThroughputTimer",
             "JSR223PreProcessor", "UserParameters",
             "IfController", "LoopController", "WhileController",
-            "TransactionController", "SimpleController", "RandomController",
-            "ThroughputController", "ForEachController",
+            "TransactionController", "GenericController", "RandomController",
+            "ThroughputController", "ForeachController",
             "ResultCollector"
         ],
         "properties": {},
@@ -713,98 +713,98 @@ COMPONENT_REGISTRY: Dict[str, Dict[str, Any]] = {
         "label": "随机控制器",
         "icon": "🎲",
         "category": "controller",
-        "allowed_parents": ["ThreadGroup", "IfController", "LoopController", "WhileController", "TransactionController", "SimpleController", "RandomController", "ThroughputController", "ForEachController"],
+        "allowed_parents": ["ThreadGroup", "IfController", "LoopController", "WhileController", "TransactionController", "GenericController", "RandomController", "ThroughputController", "ForeachController"],
         "allowed_children": [
             "HTTPSamplerProxy", "JSR223Sampler", "DebugSampler",
             "ConfigTestElement", "HeaderManager", "CookieManager",
             "CacheManager", "CSVDataSet", "Arguments",
-            "ResponseAssertion", "JSONAssertion", "JSR223Assertion",
+            "ResponseAssertion", "JSONPathAssertion", "JSR223Assertion",
             "DurationAssertion", "SizeAssertion",
             "JSONPostProcessor", "RegexExtractor", "BoundaryExtractor", "XPath2Extractor",
             "ConstantTimer", "UniformRandomTimer", "GaussianRandomTimer",
             "PoissonRandomTimer", "SyncTimer", "ConstantThroughputTimer",
             "JSR223PreProcessor", "UserParameters",
             "IfController", "LoopController", "WhileController",
-            "TransactionController", "SimpleController", "RandomController",
-            "ThroughputController", "ForEachController",
+            "TransactionController", "GenericController", "RandomController",
+            "ThroughputController", "ForeachController",
             "ResultCollector"
         ],
         "properties": {
-            "style": {"type": "number", "label": "忽略子控制器块（0=否,1=是）"},
+            "InterleaveControl.style": {"type": "number", "label": "忽略子控制器块（0=否,1=是）"},
         },
         "defaults": {
-            "style": 0,
+            "InterleaveControl.style": 0,
         },
     },
     "ThroughputController": {
         "label": "吞吐量控制器",
         "icon": "📊",
         "category": "controller",
-        "allowed_parents": ["ThreadGroup", "IfController", "LoopController", "WhileController", "TransactionController", "SimpleController", "RandomController", "ThroughputController", "ForEachController"],
+        "allowed_parents": ["ThreadGroup", "IfController", "LoopController", "WhileController", "TransactionController", "GenericController", "RandomController", "ThroughputController", "ForeachController"],
         "allowed_children": [
             "HTTPSamplerProxy", "JSR223Sampler", "DebugSampler",
             "ConfigTestElement", "HeaderManager", "CookieManager",
             "CacheManager", "CSVDataSet", "Arguments",
-            "ResponseAssertion", "JSONAssertion", "JSR223Assertion",
+            "ResponseAssertion", "JSONPathAssertion", "JSR223Assertion",
             "DurationAssertion", "SizeAssertion",
             "JSONPostProcessor", "RegexExtractor", "BoundaryExtractor", "XPath2Extractor",
             "ConstantTimer", "UniformRandomTimer", "GaussianRandomTimer",
             "PoissonRandomTimer", "SyncTimer", "ConstantThroughputTimer",
             "JSR223PreProcessor", "UserParameters",
             "IfController", "LoopController", "WhileController",
-            "TransactionController", "SimpleController", "RandomController",
-            "ThroughputController", "ForEachController",
+            "TransactionController", "GenericController", "RandomController",
+            "ThroughputController", "ForeachController",
             "ResultCollector"
         ],
         "properties": {
-            "style": {"type": "select", "label": "执行风格", "options": [
+            "ThroughputController.style": {"type": "select", "label": "执行风格", "options": [
                 {"value": 0, "label": "Percent Execution"},
                 {"value": 1, "label": "Total executions"},
             ]},
-            "percentThroughput": {"type": "number", "label": "吞吐量百分比"},
-            "throughput": {"type": "number", "label": "吞吐量"},
-            "perThread": {"type": "switch", "label": "每个线程"},
+            "ThroughputController.percentThroughput": {"type": "number", "label": "吞吐量百分比"},
+            "ThroughputController.maxThroughput": {"type": "number", "label": "吞吐量"},
+            "ThroughputController.perThread": {"type": "switch", "label": "每个线程"},
         },
         "defaults": {
-            "style": 1,
-            "percentThroughput": 50.0,
-            "throughput": 100,
-            "perThread": True,
+            "ThroughputController.style": 1,
+            "ThroughputController.percentThroughput": 50.0,
+            "ThroughputController.maxThroughput": 100,
+            "ThroughputController.perThread": True,
         },
     },
-    "ForEachController": {
+    "ForeachController": {
         "label": "ForEach控制器",
         "icon": "🔂",
         "category": "controller",
-        "allowed_parents": ["ThreadGroup", "IfController", "LoopController", "WhileController", "TransactionController", "SimpleController", "RandomController", "ThroughputController", "ForEachController"],
+        "allowed_parents": ["ThreadGroup", "IfController", "LoopController", "WhileController", "TransactionController", "GenericController", "RandomController", "ThroughputController", "ForeachController"],
         "allowed_children": [
             "HTTPSamplerProxy", "JSR223Sampler", "DebugSampler",
             "ConfigTestElement", "HeaderManager", "CookieManager",
             "CacheManager", "CSVDataSet", "Arguments",
-            "ResponseAssertion", "JSONAssertion", "JSR223Assertion",
+            "ResponseAssertion", "JSONPathAssertion", "JSR223Assertion",
             "DurationAssertion", "SizeAssertion",
             "JSONPostProcessor", "RegexExtractor", "BoundaryExtractor", "XPath2Extractor",
             "ConstantTimer", "UniformRandomTimer", "GaussianRandomTimer",
             "PoissonRandomTimer", "SyncTimer", "ConstantThroughputTimer",
             "JSR223PreProcessor", "UserParameters",
             "IfController", "LoopController", "WhileController",
-            "TransactionController", "SimpleController", "RandomController",
-            "ThroughputController", "ForEachController",
+            "TransactionController", "GenericController", "RandomController",
+            "ThroughputController", "ForeachController",
             "ResultCollector"
         ],
         "properties": {
-            "inputVal": {"type": "text", "label": "输入变量前缀"},
-            "returnVal": {"type": "text", "label": "输出变量名"},
-            "useSeparator": {"type": "switch", "label": "使用分隔符"},
-            "startIndex": {"type": "number", "label": "开始循环字段（0=从头）"},
-            "endIndex": {"type": "number", "label": "结束循环字段（0=到尾）"},
+            "ForeachController.inputVal": {"type": "text", "label": "输入变量前缀"},
+            "ForeachController.returnVal": {"type": "text", "label": "输出变量名"},
+            "ForeachController.useSeparator": {"type": "switch", "label": "使用分隔符"},
+            "ForeachController.startIndex": {"type": "number", "label": "开始循环字段（0=从头）"},
+            "ForeachController.endIndex": {"type": "number", "label": "结束循环字段（0=到尾）"},
         },
         "defaults": {
-            "inputVal": "",
-            "returnVal": "",
-            "useSeparator": True,
-            "startIndex": 0,
-            "endIndex": 0,
+            "ForeachController.inputVal": "",
+            "ForeachController.returnVal": "",
+            "ForeachController.useSeparator": True,
+            "ForeachController.startIndex": 0,
+            "ForeachController.endIndex": 0,
         },
     },
     # ===== Pre Processors =====
@@ -812,7 +812,7 @@ COMPONENT_REGISTRY: Dict[str, Dict[str, Any]] = {
         "label": "JSR223前置处理器",
         "icon": "⚡",
         "category": "pre_processor",
-        "allowed_parents": ["ThreadGroup", "HTTPSamplerProxy", "JSR223Sampler", "DebugSampler", "IfController", "LoopController", "WhileController", "TransactionController", "SimpleController", "RandomController", "ThroughputController", "ForEachController"],
+        "allowed_parents": ["ThreadGroup", "HTTPSamplerProxy", "JSR223Sampler", "DebugSampler", "IfController", "LoopController", "WhileController", "TransactionController", "GenericController", "RandomController", "ThroughputController", "ForeachController"],
         "allowed_children": [],
         "properties": {
             "scriptLanguage": {"type": "select", "label": "脚本语言", "options": [
@@ -838,7 +838,7 @@ COMPONENT_REGISTRY: Dict[str, Dict[str, Any]] = {
         "label": "用户参数",
         "icon": "👤",
         "category": "pre_processor",
-        "allowed_parents": ["ThreadGroup", "HTTPSamplerProxy", "JSR223Sampler", "DebugSampler", "IfController", "LoopController", "WhileController", "TransactionController", "SimpleController", "RandomController", "ThroughputController", "ForEachController"],
+        "allowed_parents": ["ThreadGroup", "HTTPSamplerProxy", "JSR223Sampler", "DebugSampler", "IfController", "LoopController", "WhileController", "TransactionController", "GenericController", "RandomController", "ThroughputController", "ForeachController"],
         "allowed_children": [],
         "properties": {
             "UserParameters.per_iteration": {"type": "switch", "label": "每次迭代更新一次"},
@@ -853,7 +853,7 @@ COMPONENT_REGISTRY: Dict[str, Dict[str, Any]] = {
         "label": "JSR223后置处理器",
         "icon": "🔧",
         "category": "post_processor",
-        "allowed_parents": ["ThreadGroup", "HTTPSamplerProxy", "JSR223Sampler", "DebugSampler", "IfController", "LoopController", "WhileController", "TransactionController", "SimpleController", "RandomController", "ThroughputController", "ForEachController"],
+        "allowed_parents": ["ThreadGroup", "HTTPSamplerProxy", "JSR223Sampler", "DebugSampler", "IfController", "LoopController", "WhileController", "TransactionController", "GenericController", "RandomController", "ThroughputController", "ForeachController"],
         "allowed_children": [],
         "properties": {
             "scriptLanguage": {"type": "select", "label": "脚本语言", "options": [
@@ -884,20 +884,20 @@ COMPONENT_REGISTRY: Dict[str, Dict[str, Any]] = {
         "properties": {
             "XPathExtractor2.refname": {"type": "text", "label": "引用名称"},
             "XPathExtractor2.xpathQuery": {"type": "text", "label": "XPath查询"},
-            "XPathExtractor2.match_number": {"type": "text", "label": "匹配数字（0=随机）"},
+            "XPathExtractor2.matchNumber": {"type": "text", "label": "匹配数字（0=随机）"},
             "XPathExtractor2.default": {"type": "text", "label": "默认值"},
             "XPathExtractor2.namespaces": {"type": "text", "label": "命名空间"},
         },
         "defaults": {
             "XPathExtractor2.refname": "",
             "XPathExtractor2.xpathQuery": "",
-            "XPathExtractor2.match_number": "1",
+            "XPathExtractor2.matchNumber": "1",
             "XPathExtractor2.default": "",
             "XPathExtractor2.namespaces": "",
         },
     },
     # ===== Assertions =====
-    "JSONAssertion": {
+    "JSONPathAssertion": {
         "label": "JSON断言",
         "icon": "📋",
         "category": "assertion",
@@ -906,7 +906,7 @@ COMPONENT_REGISTRY: Dict[str, Dict[str, Any]] = {
         "properties": {
             "JSON_PATH": {"type": "text", "label": "JSON Path"},
             "EXPECTED_VALUE": {"type": "text", "label": "预期值"},
-            "JSONVALIDATION": {"type": "switch", "label": "验证JSON路径"},
+            "JSONVALIDATION": {"type": "switch", "label": "比较预期值（关闭时只检查路径存在）"},
             "EXPECT_NULL": {"type": "switch", "label": "预期为Null"},
             "INVERT": {"type": "switch", "label": "反转断言（Not）"},
             "ISREGEX": {"type": "switch", "label": "使用正则匹配"},
@@ -986,22 +986,22 @@ COMPONENT_REGISTRY: Dict[str, Dict[str, Any]] = {
         "label": "高斯随机定时器",
         "icon": "📈",
         "category": "timer",
-        "allowed_parents": ["ThreadGroup", "HTTPSamplerProxy", "JSR223Sampler", "DebugSampler", "IfController", "LoopController", "WhileController", "TransactionController", "SimpleController", "RandomController", "ThroughputController", "ForEachController"],
+        "allowed_parents": ["ThreadGroup", "HTTPSamplerProxy", "JSR223Sampler", "DebugSampler", "IfController", "LoopController", "WhileController", "TransactionController", "GenericController", "RandomController", "ThroughputController", "ForeachController"],
         "allowed_children": [],
         "properties": {
             "ConstantTimer.delay": {"type": "number", "label": "固定延迟偏移（毫秒）"},
-            "RandomTimer.deviation": {"type": "number", "label": "偏差（毫秒）"},
+            "RandomTimer.range": {"type": "number", "label": "偏差（毫秒）"},
         },
         "defaults": {
             "ConstantTimer.delay": 100,
-            "RandomTimer.deviation": 100,
+            "RandomTimer.range": 100,
         },
     },
     "PoissonRandomTimer": {
         "label": "泊松随机定时器",
         "icon": "📉",
         "category": "timer",
-        "allowed_parents": ["ThreadGroup", "HTTPSamplerProxy", "JSR223Sampler", "DebugSampler", "IfController", "LoopController", "WhileController", "TransactionController", "SimpleController", "RandomController", "ThroughputController", "ForEachController"],
+        "allowed_parents": ["ThreadGroup", "HTTPSamplerProxy", "JSR223Sampler", "DebugSampler", "IfController", "LoopController", "WhileController", "TransactionController", "GenericController", "RandomController", "ThroughputController", "ForeachController"],
         "allowed_children": [],
         "properties": {
             "ConstantTimer.delay": {"type": "number", "label": "固定延迟偏移（毫秒）"},
@@ -1016,7 +1016,7 @@ COMPONENT_REGISTRY: Dict[str, Dict[str, Any]] = {
         "label": "同步定时器（集合点）",
         "icon": "🎯",
         "category": "timer",
-        "allowed_parents": ["ThreadGroup", "HTTPSamplerProxy", "JSR223Sampler", "DebugSampler", "IfController", "LoopController", "WhileController", "TransactionController", "SimpleController", "RandomController", "ThroughputController", "ForEachController"],
+        "allowed_parents": ["ThreadGroup", "HTTPSamplerProxy", "JSR223Sampler", "DebugSampler", "IfController", "LoopController", "WhileController", "TransactionController", "GenericController", "RandomController", "ThroughputController", "ForeachController"],
         "allowed_children": [],
         "properties": {
             "groupSize": {"type": "number", "label": "模拟用户组的数量（0=等于线程数）"},
@@ -1031,7 +1031,7 @@ COMPONENT_REGISTRY: Dict[str, Dict[str, Any]] = {
         "label": "固定吞吐量定时器",
         "icon": "⚙️",
         "category": "timer",
-        "allowed_parents": ["ThreadGroup", "HTTPSamplerProxy", "JSR223Sampler", "DebugSampler", "IfController", "LoopController", "WhileController", "TransactionController", "SimpleController", "RandomController", "ThroughputController", "ForEachController"],
+        "allowed_parents": ["ThreadGroup", "HTTPSamplerProxy", "JSR223Sampler", "DebugSampler", "IfController", "LoopController", "WhileController", "TransactionController", "GenericController", "RandomController", "ThroughputController", "ForeachController"],
         "allowed_children": [],
         "properties": {
             "calcMode": {"type": "select", "label": "计算吞吐量基于", "options": [
@@ -1049,11 +1049,11 @@ COMPONENT_REGISTRY: Dict[str, Dict[str, Any]] = {
         },
     },
     # ===== Config Elements =====
-    "JDBCConnectionConfiguration": {
+    "JDBCDataSource": {
         "label": "JDBC连接配置",
         "icon": "🗄️",
         "category": "config",
-        "allowed_parents": ["TestPlan", "ThreadGroup", "IfController", "LoopController", "WhileController", "TransactionController", "SimpleController", "RandomController", "ThroughputController", "ForEachController"],
+        "allowed_parents": ["TestPlan", "ThreadGroup", "IfController", "LoopController", "WhileController", "TransactionController", "GenericController", "RandomController", "ThroughputController", "ForeachController"],
         "allowed_children": [],
         "properties": {
             "dataSource": {"type": "text", "label": "变量名称"},
@@ -1101,13 +1101,13 @@ COMPONENT_REGISTRY: Dict[str, Dict[str, Any]] = {
         "allowed_parents": ["TestPlan", "ThreadGroup"],
         "allowed_children": [],
         "properties": {
-            "clearEachIteration": {"type": "switch", "label": "每次迭代清除缓存"},
-            "isCustomResolver": {"type": "switch", "label": "使用自定义DNS解析器"},
+            "DNSCacheManager.clearEachIteration": {"type": "switch", "label": "每次迭代清除缓存"},
+            "DNSCacheManager.isCustomResolver": {"type": "switch", "label": "使用自定义DNS解析器"},
         },
         "special_editor": "dns_hosts",
         "defaults": {
-            "clearEachIteration": False,
-            "isCustomResolver": False,
+            "DNSCacheManager.clearEachIteration": False,
+            "DNSCacheManager.isCustomResolver": False,
         },
     },
     "AuthManager": {
@@ -1117,13 +1117,13 @@ COMPONENT_REGISTRY: Dict[str, Dict[str, Any]] = {
         "allowed_parents": ["TestPlan", "ThreadGroup"],
         "allowed_children": [],
         "properties": {
-            "clearEachIteration": {"type": "switch", "label": "每次迭代清除认证"},
-            "Auth.controlledByThread": {"type": "switch", "label": "由线程控制"},
+            "AuthManager.clearEachIteration": {"type": "switch", "label": "每次迭代清除认证"},
+            "AuthManager.controlledByThreadGroup": {"type": "switch", "label": "由线程控制"},
         },
         "special_editor": "auth",
         "defaults": {
-            "clearEachIteration": False,
-            "Auth.controlledByThread": False,
+            "AuthManager.clearEachIteration": False,
+            "AuthManager.controlledByThreadGroup": False,
         },
     },
     "RandomVariableConfig": {
@@ -1150,6 +1150,138 @@ COMPONENT_REGISTRY: Dict[str, Dict[str, Any]] = {
         },
     },
 }
+
+
+# Elements JMeter ships that plans commonly need. Names are JMeter's own (saveservice.properties and
+# each class's property constants); a wrong one loads as nothing, or not at all.
+_ON_ERROR = [{"value": 0, "label": "继续"}, {"value": 4, "label": "启动下一线程循环"},
+             {"value": 5, "label": "开始当前循环的下一次迭代"}, {"value": 6, "label": "中断当前循环"},
+             {"value": 1, "label": "停止线程"}, {"value": 2, "label": "停止测试"}, {"value": 3, "label": "立即停止测试"}]
+_ADDED = {
+    "OnceOnlyController": ("IfController", {
+        "label": "仅一次控制器", "icon": "1️⃣", "category": "controller", "properties": {}, "defaults": {}}),
+    "InterleaveControl": ("IfController", {
+        "label": "交替控制器", "icon": "🔀", "category": "controller",
+        "properties": {
+            "InterleaveControl.style": {"type": "select", "label": "子控制器", "options": [
+                {"value": 1, "label": "子控制器整体作为一项"}, {"value": 0, "label": "忽略子控制器块"}]},
+            "InterleaveControl.accrossThreads": {"type": "switch", "label": "跨线程交替"},
+        },
+        "defaults": {"InterleaveControl.style": 1, "InterleaveControl.accrossThreads": False}}),
+    "RunTime": ("IfController", {
+        "label": "运行时间控制器", "icon": "⏲️", "category": "controller",
+        "properties": {"RunTime.seconds": {"type": "text", "label": "运行时间（秒）"}},
+        "defaults": {"RunTime.seconds": "60"}}),
+    "SwitchController": ("IfController", {
+        "label": "Switch控制器", "icon": "🔁", "category": "controller",
+        "properties": {"SwitchController.value": {"type": "text", "label": "Switch值（序号或子元素名称）"}},
+        "defaults": {"SwitchController.value": "0"}}),
+    "CriticalSectionController": ("IfController", {
+        "label": "临界区控制器", "icon": "🔒", "category": "controller",
+        "properties": {"CriticalSectionController.lockName": {"type": "text", "label": "锁名称"}},
+        "defaults": {"CriticalSectionController.lockName": "global_lock"}}),
+    "CounterConfig": ("RandomVariableConfig", {
+        "label": "计数器", "icon": "🔢", "category": "config",
+        "properties": {
+            "CounterConfig.start": {"type": "text", "label": "起始值"},
+            "CounterConfig.incr": {"type": "text", "label": "递增"},
+            "CounterConfig.end": {"type": "text", "label": "最大值（空=不限）"},
+            "CounterConfig.format": {"type": "text", "label": "数字格式（如 000）"},
+            "CounterConfig.name": {"type": "text", "label": "引用名称"},
+            "CounterConfig.per_user": {"type": "switch", "label": "每个用户独立计数"},
+            "CounterConfig.reset_on_tg_iteration": {"type": "switch", "label": "线程组每次迭代时重置（需独立计数）"},
+        },
+        "defaults": {"CounterConfig.start": "1", "CounterConfig.incr": "1", "CounterConfig.end": "",
+                     "CounterConfig.format": "", "CounterConfig.name": "counter",
+                     "CounterConfig.per_user": False, "CounterConfig.reset_on_tg_iteration": False}}),
+    "PreciseThroughputTimer": ("ConstantThroughputTimer", {
+        "label": "精确吞吐量定时器", "icon": "🎯", "category": "timer",
+        "properties": {
+            "throughput": {"type": "number", "label": "目标吞吐量（每个周期的样本数）"},
+            "throughputPeriod": {"type": "number", "label": "吞吐量周期（秒）"},
+            "duration": {"type": "number", "label": "测试时长（秒）"},
+            "batchSize": {"type": "number", "label": "每批线程数"},
+            "batchThreadDelay": {"type": "number", "label": "批内线程间隔（毫秒）"},
+            "randomSeed": {"type": "number", "label": "随机种子（0=随机）"},
+            "allowedThroughputSurplus": {"type": "number", "label": "允许超出比例"},
+            "exactLimit": {"type": "number", "label": "精确生成的样本数上限"},
+        },
+        "defaults": {"throughput": 100, "throughputPeriod": 3600, "duration": 3600, "batchSize": 1,
+                     "batchThreadDelay": 0, "randomSeed": 0, "allowedThroughputSurplus": 1.0, "exactLimit": 10000}}),
+    "JDBCSampler": ("JSR223Sampler", {
+        "label": "JDBC请求", "icon": "🗄️", "category": "sampler",
+        "properties": {
+            "dataSource": {"type": "text", "label": "连接池变量名（与JDBC连接配置一致）"},
+            "queryType": {"type": "select", "label": "语句类型", "options": [
+                {"value": "Select Statement", "label": "查询（Select）"},
+                {"value": "Update Statement", "label": "更新（Update）"},
+                {"value": "Callable Statement", "label": "存储过程（Callable）"},
+                {"value": "Prepared Select Statement", "label": "预编译查询"},
+                {"value": "Prepared Update Statement", "label": "预编译更新"},
+                {"value": "Commit", "label": "提交"}, {"value": "Rollback", "label": "回滚"}]},
+            "query": {"type": "textarea", "label": "SQL语句"},
+            "queryArguments": {"type": "text", "label": "参数值（逗号分隔）"},
+            "queryArgumentsTypes": {"type": "text", "label": "参数类型（如 INTEGER,VARCHAR）"},
+            "variableNames": {"type": "text", "label": "结果列变量名（逗号分隔）"},
+            "resultVariable": {"type": "text", "label": "结果对象变量名"},
+            "queryTimeout": {"type": "text", "label": "查询超时（秒）"},
+            "resultSetMaxRows": {"type": "text", "label": "最多读取行数"},
+        },
+        "defaults": {"dataSource": "", "queryType": "Select Statement", "query": "", "queryArguments": "",
+                     "queryArgumentsTypes": "", "variableNames": "", "resultVariable": "", "queryTimeout": "",
+                     "resultSetMaxRows": "", "resultSetHandler": "Store as String"}}),
+    "HtmlExtractor": ("BoundaryExtractor", {
+        "label": "CSS选择器提取器", "icon": "🎨", "category": "extractor",
+        "properties": {
+            "HtmlExtractor.refname": {"type": "text", "label": "变量名"},
+            "HtmlExtractor.expr": {"type": "text", "label": "CSS选择器"},
+            "HtmlExtractor.attribute": {"type": "text", "label": "属性（空=文本）"},
+            "HtmlExtractor.match_number": {"type": "text", "label": "匹配序号（0=随机，-1=全部）"},
+            "HtmlExtractor.default": {"type": "text", "label": "默认值"},
+            "HtmlExtractor.default_empty_value": {"type": "switch", "label": "默认值为空字符串"},
+        },
+        "defaults": {"HtmlExtractor.refname": "", "HtmlExtractor.expr": "", "HtmlExtractor.attribute": "",
+                     "HtmlExtractor.match_number": "1", "HtmlExtractor.default": "",
+                     "HtmlExtractor.default_empty_value": False, "HtmlExtractor.extractor_impl": ""}}),
+    "XPath2Assertion": ("SizeAssertion", {
+        "label": "XPath2断言", "icon": "🌿", "category": "assertion",
+        "properties": {
+            "XPath.xpath": {"type": "text", "label": "XPath表达式"},
+            "XPath.namespaces": {"type": "textarea", "label": "命名空间（每行 前缀=URI）"},
+            "XPath.negate": {"type": "switch", "label": "结果取反"},
+        },
+        "defaults": {"XPath.xpath": "/", "XPath.namespaces": "", "XPath.negate": False}}),
+    "ResultAction": ("JSR223PostProcessor", {
+        "label": "结果状态处理器", "icon": "🚦", "category": "post_processor",
+        "properties": {"OnError.action": {"type": "select", "label": "取样器失败后", "options": _ON_ERROR}},
+        "defaults": {"OnError.action": 1}}),
+    "DebugPostProcessor": ("JSR223PostProcessor", {
+        "label": "调试后置处理器", "icon": "🐞", "category": "post_processor",
+        "properties": {
+            "displayJMeterVariables": {"type": "switch", "label": "显示JMeter变量"},
+            "displayJMeterProperties": {"type": "switch", "label": "显示JMeter属性"},
+            "displaySamplerProperties": {"type": "switch", "label": "显示取样器属性"},
+            "displaySystemProperties": {"type": "switch", "label": "显示系统属性"},
+        },
+        "defaults": {"displayJMeterVariables": True, "displayJMeterProperties": False,
+                     "displaySamplerProperties": True, "displaySystemProperties": False}}),
+}
+
+
+def _add_like(testclass: str, like: str, meta: Dict[str, Any]) -> None:
+    """Place a new element where an existing one of its kind goes, with the same children."""
+    model = COMPONENT_REGISTRY[like]
+    COMPONENT_REGISTRY[testclass] = {"allowed_parents": list(model["allowed_parents"]),
+                                     "allowed_children": list(model["allowed_children"]), **meta}
+    for other in COMPONENT_REGISTRY.values():
+        if like in other["allowed_children"] and testclass not in other["allowed_children"]:
+            other["allowed_children"].append(testclass)
+        if like in other["allowed_parents"] and testclass not in other["allowed_parents"]:
+            other["allowed_parents"].append(testclass)
+
+
+for _testclass, (_like, _meta) in _ADDED.items():
+    _add_like(_testclass, _like, _meta)
 
 
 def get_component_meta(testclass: str) -> Dict[str, Any]:

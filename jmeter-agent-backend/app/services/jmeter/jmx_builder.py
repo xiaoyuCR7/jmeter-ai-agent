@@ -25,6 +25,34 @@ DERIVED_PROPS = {
     "HTTPsampler.Arguments": ("__body_data", "__http_params", "HTTPSampler.postBodyRaw"),
 }
 DERIVED_FIELDS = {"loops", "__body_data", "__http_params"}
+
+# Names this editor once wrote that JMeter does not know: a plan saved with them failed to load, or
+# its controllers ignored their settings. A plan saved again gets JMeter's names.
+LEGACY_ELEMENTS = {"JSONAssertion": ("JSONPathAssertion", "JSONPathAssertionGui"),
+                   "SimpleController": ("GenericController", "LogicControllerGui"),
+                   "ForEachController": ("ForeachController", "ForeachControlPanel"),
+                   "JDBCConnectionConfiguration": ("JDBCDataSource", "TestBeanGUI")}
+LEGACY_PROPERTIES = {
+    "IfController": {"condition": "IfController.condition", "evaluateAll": "IfController.evaluateAll",
+                     "useExpression": "IfController.useExpression"},
+    "LoopController": {"loops": "LoopController.loops"},
+    "WhileController": {"condition": "WhileController.condition"},
+    "TransactionController": {"generateParentSample": "TransactionController.parent",
+                              "includeTimers": "TransactionController.includeTimers"},
+    "RandomController": {"style": "InterleaveControl.style"},
+    "ThroughputController": {"style": "ThroughputController.style", "throughput": "ThroughputController.maxThroughput",
+                             "percentThroughput": "ThroughputController.percentThroughput",
+                             "perThread": "ThroughputController.perThread"},
+    "ForeachController": {name: "ForeachController." + name
+                          for name in ("inputVal", "returnVal", "useSeparator", "startIndex", "endIndex")},
+    "XPath2Extractor": {"XPathExtractor2.match_number": "XPathExtractor2.matchNumber"},
+    "GaussianRandomTimer": {"RandomTimer.deviation": "RandomTimer.range"},
+    "DNSCacheManager": {"clearEachIteration": "DNSCacheManager.clearEachIteration",
+                        "isCustomResolver": "DNSCacheManager.isCustomResolver",
+                        "DNSCacheManager.hostTable": "DNSCacheManager.hosts"},
+    "AuthManager": {"clearEachIteration": "AuthManager.clearEachIteration",
+                    "Auth.controlledByThread": "AuthManager.controlledByThreadGroup"},
+}
 _MISSING = object()
 
 
@@ -52,10 +80,16 @@ def _build_node(parent_hash_tree: ET.Element, node: Dict[str, Any]) -> None:
     testclass = node.get("testclass", "TestPlan")
     if testclass == "HTTPSampler":
         testclass = "HTTPSamplerProxy"
+    legacy_gui = None
+    if testclass in LEGACY_ELEMENTS:
+        testclass, legacy_gui = LEGACY_ELEMENTS[testclass]
     testname = node.get("testname", "")
     enabled = "true" if node.get("enabled", True) else "false"
 
     properties = dict(node.get("properties", {}))
+    for old_name, new_name in LEGACY_PROPERTIES.get(testclass, {}).items():
+        if old_name in properties and new_name not in properties:
+            properties[new_name] = properties.pop(old_name)
     source = properties.pop(SOURCE_KEY, None)
     if not (isinstance(source, dict) and isinstance(source.get("props"), list)
             and isinstance(source.get("snapshot"), dict)):
@@ -63,7 +97,7 @@ def _build_node(parent_hash_tree: ET.Element, node: Dict[str, Any]) -> None:
     listener_type = properties.pop("_listener_type", None) if testclass == "ResultCollector" else None
 
     elem = ET.SubElement(parent_hash_tree, testclass)
-    elem.set("guiclass", listener_type or (source and source.get("guiclass")) or _get_guiclass(testclass, node))
+    elem.set("guiclass", listener_type or legacy_gui or (source and source.get("guiclass")) or _get_guiclass(testclass, node))
     elem.set("testclass", testclass)
     elem.set("testname", testname)
     elem.set("enabled", enabled)
@@ -292,7 +326,7 @@ def _get_guiclass(testclass: str, node: Dict[str, Any]) -> str:
         "PostThreadGroup": "PostThreadGroupGui",
         "HTTPSamplerProxy": "HttpTestSampleGui",
         "JSR223Sampler": "TestBeanGUI",
-        "DebugSampler": "TestPanel",
+        "DebugSampler": "TestBeanGUI",
         "ConfigTestElement": "HttpDefaultsGui",
         "HeaderManager": "HeaderPanel",
         "CookieManager": "CookiePanel",
@@ -300,7 +334,7 @@ def _get_guiclass(testclass: str, node: Dict[str, Any]) -> str:
         "CSVDataSet": "TestBeanGUI",
         "Arguments": "ArgumentsPanel",
         "ResponseAssertion": "AssertionGui",
-        "JSONAssertion": "JSONAssertionGui",
+        "JSONPathAssertion": "JSONPathAssertionGui",
         "JSR223Assertion": "TestBeanGUI",
         "DurationAssertion": "DurationAssertionGui",
         "SizeAssertion": "SizeAssertionGui",
@@ -315,17 +349,20 @@ def _get_guiclass(testclass: str, node: Dict[str, Any]) -> str:
         "UniformRandomTimer": "UniformRandomTimerGui",
         "GaussianRandomTimer": "GaussianRandomTimerGui",
         "PoissonRandomTimer": "PoissonRandomTimerGui",
-        "SyncTimer": "SyncTimerGui",
+        "SyncTimer": "TestBeanGUI",
         "ConstantThroughputTimer": "TestBeanGUI",
         "IfController": "IfControllerPanel",
         "LoopController": "LoopControlPanel",
         "WhileController": "WhileControllerGui",
         "TransactionController": "TransactionControllerGui",
-        "SimpleController": "SimpleControllerGui",
-        "RandomController": "RandomControllerGui",
+        "GenericController": "LogicControllerGui",
+        "RandomController": "RandomControlGui",
         "ThroughputController": "ThroughputControllerGui",
-        "ForEachController": "ForEachControllerGui",
-        "JDBCConnectionConfiguration": "TestBeanGUI",
+        "ForeachController": "ForeachControlPanel",
+        "JDBCDataSource": "TestBeanGUI",
+        "JDBCSampler": "TestBeanGUI",
+        "PreciseThroughputTimer": "TestBeanGUI",
+        "DebugPostProcessor": "TestBeanGUI",
         "DNSCacheManager": "DNSCachePanel",
         "AuthManager": "AuthPanel",
         "RandomVariableConfig": "TestBeanGUI",

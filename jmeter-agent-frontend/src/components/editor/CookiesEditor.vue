@@ -5,22 +5,22 @@
       <el-table :data="cookies" border size="small" style="width: 100%">
         <el-table-column :label="t('editor.cookies.name')" min-width="120">
           <template #default="{ $index }">
-            <el-input v-model="cookies[$index]['Cookie.name']" size="small" />
+            <el-input :model-value="cookies[$index]['Cookie.name']" @update:model-value="updateCell($index, 'Cookie.name', $event)" size="small" />
           </template>
         </el-table-column>
         <el-table-column :label="t('editor.cookies.value')" min-width="140">
           <template #default="{ $index }">
-            <FunctionInput v-model="cookies[$index]['Cookie.value']" size="small" />
+            <FunctionInput :model-value="cookies[$index]['Cookie.value']" @update:model-value="updateCell($index, 'Cookie.value', $event)" size="small" />
           </template>
         </el-table-column>
         <el-table-column :label="t('editor.cookies.domain')" min-width="120">
           <template #default="{ $index }">
-            <el-input v-model="cookies[$index]['Cookie.domain']" size="small" />
+            <el-input :model-value="cookies[$index]['Cookie.domain']" @update:model-value="updateCell($index, 'Cookie.domain', $event)" size="small" />
           </template>
         </el-table-column>
         <el-table-column :label="t('editor.cookies.path')" width="100">
           <template #default="{ $index }">
-            <el-input v-model="cookies[$index]['Cookie.path']" size="small" />
+            <el-input :model-value="cookies[$index]['Cookie.path']" @update:model-value="updateCell($index, 'Cookie.path', $event)" size="small" />
           </template>
         </el-table-column>
         <el-table-column width="70">
@@ -55,7 +55,8 @@ const cookies = computed({
     return list.map((item: any) => ({
       _elementType: 'Cookie',
       _name: item._name || item['Cookie.name'] || '',
-      'Cookie.name': item['Cookie.name'] || '',
+      // JMeter names a cookie by its element name; there is no Cookie.name property.
+      'Cookie.name': item['Cookie.name'] ?? item._name ?? '',
       'Cookie.value': item['Cookie.value'] || '',
       'Cookie.domain': item['Cookie.domain'] || '',
       'Cookie.path': item['Cookie.path'] || '/',
@@ -64,7 +65,8 @@ const cookies = computed({
     }))
   },
   set(val) {
-    emit('update:modelValue', { ...props.modelValue, 'CookieManager.cookies': val })
+    const written = val.map(({ 'Cookie.name': name, ...cookie }: any) => ({ ...cookie, _name: name || '' }))
+    emit('update:modelValue', { ...props.modelValue, 'CookieManager.cookies': written })
   },
 })
 
@@ -88,5 +90,10 @@ function removeCookie(index: number) {
   const list = [...cookies.value]
   list.splice(index, 1)
   cookies.value = list
+}
+
+// A cell edit replaces the list, so the change reaches the plan (editing the getter's copy did not).
+function updateCell(index: number, field: string, value: any) {
+  cookies.value = cookies.value.map((item: any, i: number) => i === index ? { ...item, [field]: value } : item)
 }
 </script>

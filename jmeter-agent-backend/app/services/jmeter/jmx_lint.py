@@ -171,6 +171,11 @@ def lint(content) -> list[dict]:
                                                           '每个用户登录一次时用 phase=once_per_user。'))
     if state['samplers'] and not state['timeout']:
         issues.append(_issue('warning', 'no_timeout', '计划没有设置响应超时，服务挂住时线程会一直等待。'))
+    # JMeter evaluates a sampler's name per request: one request then reports as many labels.
+    for label in sorted({element.get('testname') or '' for element in root.iter('HTTPSamplerProxy')
+                         if element.get('enabled') != 'false' and '${' in (element.get('testname') or '')}):
+        issues.append(_issue('warning', 'dynamic_label', f'请求名称「{label}」里有变量或函数，JMeter 每次请求都会重新求值，'
+                                                         '报告会把它拆成很多行，需求和历史对比也匹配不上；名称里不要写 ${…}。'))
     return issues
 
 

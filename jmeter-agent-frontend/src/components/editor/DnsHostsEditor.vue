@@ -5,12 +5,12 @@
       <el-table :data="hosts" border size="small" style="width: 100%">
         <el-table-column :label="t('editor.dnsHosts.hostname')" min-width="180">
           <template #default="{ $index }">
-            <el-input v-model="hosts[$index]['StaticHost.Name']" size="small" />
+            <el-input :model-value="hosts[$index]['StaticHost.Name']" @update:model-value="updateCell($index, 'StaticHost.Name', $event)" size="small" />
           </template>
         </el-table-column>
         <el-table-column :label="t('editor.dnsHosts.ipAddress')" min-width="180">
           <template #default="{ $index }">
-            <el-input v-model="hosts[$index]['StaticHost.Address']" size="small" />
+            <el-input :model-value="hosts[$index]['StaticHost.Address']" @update:model-value="updateCell($index, 'StaticHost.Address', $event)" size="small" />
           </template>
         </el-table-column>
         <el-table-column width="80">
@@ -38,7 +38,7 @@ const emit = defineEmits<{ 'update:modelValue': [value: Record<string, any>] }>(
 
 const hosts = computed({
   get() {
-    const list = props.modelValue['DNSCacheManager.hostTable']
+    const list = props.modelValue['DNSCacheManager.hosts']
     if (!Array.isArray(list)) return []
     return list.map((item: any) => ({
       _elementType: 'StaticHost',
@@ -48,7 +48,7 @@ const hosts = computed({
     }))
   },
   set(val) {
-    emit('update:modelValue', { ...props.modelValue, 'DNSCacheManager.hostTable': val })
+    emit('update:modelValue', { ...props.modelValue, 'DNSCacheManager.hosts': val })
   },
 })
 
@@ -63,5 +63,10 @@ function removeHost(index: number) {
   const list = [...hosts.value]
   list.splice(index, 1)
   hosts.value = list
+}
+
+// A cell edit replaces the list, so the change reaches the plan (editing the getter's copy did not).
+function updateCell(index: number, field: string, value: any) {
+  hosts.value = hosts.value.map((item: any, i: number) => i === index ? { ...item, [field]: value } : item)
 }
 </script>

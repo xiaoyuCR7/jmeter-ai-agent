@@ -102,8 +102,18 @@ export function usePlanTree(state: PlanTreeState) {
 
   function readCsvConfig(node: any) {
     const p = node?.properties || {}
+    const flag = (value: any, fallback: boolean) => value === undefined ? fallback : value === true || value === 'true'
+    // JMeter's names and defaults: fileEncoding, and a first line that is data unless told otherwise.
     return { filePath: p.filename ?? '', variableNames: p.variableNames ?? '', delimiter: p.delimiter ?? ',',
-      encoding: p.encoding ?? 'UTF-8', ignoreFirstLine: p.ignoreFirstLine ?? true, recycle: p.recycle ?? true }
+      encoding: p.fileEncoding ?? p.encoding ?? 'UTF-8', ignoreFirstLine: flag(p.ignoreFirstLine, false),
+      recycle: flag(p.recycle, true) }
+  }
+
+  // Generated plans keep the data set on the test plan, shared by every thread group; others put it in the group.
+  function csvHolder(root: any, group: any) {
+    if ((group?.children || []).some(isCsvDataset)) return group
+    if ((root?.children || []).some(isCsvDataset)) return root
+    return group
   }
 
   function unsupportedEdit(field: string): never {
@@ -153,10 +163,11 @@ export function usePlanTree(state: PlanTreeState) {
             expected: '',
           })
         }
-        if (child.testclass === 'JSONAssertion') {
+        // JSONPathAssertion is JMeter's name; JSONAssertion is what this editor once wrote (JMeter could not load it).
+        if (child.testclass === 'JSONPathAssertion' || child.testclass === 'JSONAssertion') {
           assertions.push({
             type: 'json_path',
-            operator: 'eq',
+            operator: child.properties?.INVERT ? 'neq' : 'eq',
             field: child.properties?.JSON_PATH || '',
             expected: child.properties?.EXPECTED_VALUE || '',
           })
@@ -174,8 +185,9 @@ export function usePlanTree(state: PlanTreeState) {
     let bodyType: EndpointData['bodyType'] = 'none'
     let bodyContent = ''
     if (props['HTTPSampler.postBodyRaw'] && props['__body_data']) {
-      bodyType = 'json'
+      // A form login (username=...&password=...) is a raw body too; calling it JSON misled whoever edited it.
       bodyContent = props['__body_data']
+      bodyType = /^\s*[[{]/.test(bodyContent) ? 'json' : 'raw'
     }
 
     return {
@@ -231,18 +243,19 @@ export function usePlanTree(state: PlanTreeState) {
         duration: 'ThreadGroup.duration', delay: 'ThreadGroup.delay', scheduler: 'ThreadGroup.scheduler',
         onSampleError: 'ThreadGroup.on_sample_error',
       })
-      const csvNodes = (tg.children || []).filter(isCsvDataset)
+      const holder = csvHolder(root, tg)
+      const csvNodes = (holder.children || []).filter(isCsvDataset)
       if (JSON.stringify(csvDatasetConfig) !== JSON.stringify(readCsvConfig(csvNodes[0]))) {
         if (csvNodes.length > 1) unsupportedEdit('多个 CSV 数据集')
         if (!csvDatasetConfig.filePath) {
-          tg.children = tg.children.filter((child: any) => child !== csvNodes[0])
+          holder.children = holder.children.filter((child: any) => child !== csvNodes[0])
         } else {
           const csv = csvNodes[0] || { id: Math.random().toString(36).substring(2, 10), testclass: 'CSVDataSet', testname: 'CSV Data Set Config', enabled: true, properties: {}, children: [] }
           patchProperties(csv, csvDatasetConfig, csvNodes[0] ? readCsvConfig(csv) : {}, {
-            filePath: 'filename', variableNames: 'variableNames', delimiter: 'delimiter', encoding: 'encoding',
+            filePath: 'filename', variableNames: 'variableNames', delimiter: 'delimiter', encoding: 'fileEncoding',
             ignoreFirstLine: 'ignoreFirstLine', recycle: 'recycle',
           })
-          if (!csvNodes.length) (tg.children ||= []).push(csv)
+          if (!csvNodes.length) (holder.children ||= []).push(csv)
         }
       }
     } else if (JSON.stringify(threadGroupConfig) !== JSON.stringify(readThreadGroupConfig(null)) ||
@@ -437,13 +450,14 @@ export function usePlanTree(state: PlanTreeState) {
         if (a.type === 'json_path') {
           children.push({
             id: Math.random().toString(36).substring(2, 10),
-            testclass: 'JSONAssertion',
+            testclass: 'JSONPathAssertion',
             testname: 'JSON Assertion',
             enabled: true,
             properties: {
               JSON_PATH: a.field || '',
               EXPECTED_VALUE: a.expected || '',
-              JSONVALIDATION: false,
+              // Without it JMeter only checks that the path exists and never compares the value.
+              JSONVALIDATION: a.expected !== undefined && a.expected !== '',
               EXPECT_NULL: false,
               INVERT: a.operator === 'neq',
               ISREGEX: a.operator === 'regex',
@@ -595,7 +609,7 @@ export function usePlanTree(state: PlanTreeState) {
   }
 
   return {
-    isThreadGroup, isCsvDataset, readThreadGroupConfig, threadGroupNumberValue, canEditNumber, readCsvConfig,
+    isThreadGroup, isCsvDataset, readThreadGroupConfig, threadGroupNumberValue, canEditNumber, readCsvConfig, csvHolder,
     parseEndpoint, buildTreeFromEndpoints,
   }
 }

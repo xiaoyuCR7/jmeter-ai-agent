@@ -5,17 +5,17 @@
       <el-table :data="params" border size="small" style="width: 100%">
         <el-table-column :label="t('editor.params.name')" min-width="140">
           <template #default="{ $index }">
-            <el-input v-model="params[$index]['Argument.name']" size="small" />
+            <el-input :model-value="params[$index]['Argument.name']" @update:model-value="updateCell($index, 'Argument.name', $event)" size="small" />
           </template>
         </el-table-column>
         <el-table-column :label="t('editor.params.value')" min-width="200">
           <template #default="{ $index }">
-            <FunctionInput v-model="params[$index]['Argument.value']" size="small" />
+            <FunctionInput :model-value="params[$index]['Argument.value']" @update:model-value="updateCell($index, 'Argument.value', $event)" size="small" />
           </template>
         </el-table-column>
         <el-table-column :label="t('editor.params.encode')" width="80">
           <template #default="{ $index }">
-            <el-switch v-model="params[$index]['HTTPArgument.always_encode']" size="small" />
+            <el-switch :model-value="params[$index]['HTTPArgument.always_encode']" @update:model-value="updateCell($index, 'HTTPArgument.always_encode', $event)" size="small" />
           </template>
         </el-table-column>
         <el-table-column width="80">
@@ -80,5 +80,10 @@ function removeParam(index: number) {
   const list = [...params.value]
   list.splice(index, 1)
   params.value = list
+}
+
+// A cell edit replaces the list, so the change reaches the plan (editing the getter's copy did not).
+function updateCell(index: number, field: string, value: any) {
+  params.value = params.value.map((item: any, i: number) => i === index ? { ...item, [field]: value } : item)
 }
 </script>

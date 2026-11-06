@@ -241,3 +241,17 @@ def test_an_average_of_one_request_phase_is_a_real_number():
     fact = FactLedger.compute_from_summary(summary, 'x')
     assert FactValidator().validate('新建连接平均耗时 1000ms', fact).mismatches == []
     assert FactValidator().validate('平均耗时 98765ms', fact).mismatches
+
+
+def test_a_function_in_the_path_never_reaches_the_report_label():
+    """GET /items/${__Random(1,20,)} named its sampler that way: JMeter evaluated the name per request."""
+    from app.services.jmeter import jmx_lint
+    detail = APIEndpoint(name='详情', method='GET', path='/items/${__Random(1,20,)}')
+    nested = APIEndpoint(name='嵌套', method='GET', path='/a/${__Random(1,${max},)}/b')
+    labels = [endpoint.name for endpoint in normalize_scenario([detail, nested])]
+    assert labels == ['GET /items/{__Random}', 'GET /a/{__Random}/b']
+    content = plan(APIEndpoint(name='GET /x/${id}', method='GET', path='/x/1'))
+    assert 'testname="GET /x/{id}"' in content
+    hand_written = content.replace('testname="GET /x/{id}"', 'testname="GET /x/${id}"')
+    assert [issue['code'] for issue in jmx_lint.lint(hand_written)].count('dynamic_label') == 1
+    assert 'dynamic_label' not in [issue['code'] for issue in jmx_lint.lint(content)]

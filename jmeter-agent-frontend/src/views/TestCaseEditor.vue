@@ -352,25 +352,26 @@ const csvDatasetConfig = reactive({
   variableNames: '',
   delimiter: ',',
   encoding: 'UTF-8',
-  ignoreFirstLine: true,
+  ignoreFirstLine: false,
   recycle: true,
 })
 
 
 const {
-  isThreadGroup, isCsvDataset, readThreadGroupConfig, threadGroupNumberValue, canEditNumber, readCsvConfig,
+  isThreadGroup, isCsvDataset, readThreadGroupConfig, threadGroupNumberValue, canEditNumber, readCsvConfig, csvHolder,
   parseEndpoint, buildTreeFromEndpoints,
 } = usePlanTree({ planId, treeData, threadGroupNode, endpoints, threadGroupConfig, csvDatasetConfig, t })
 
 // Computed
 const endpointList = computed<EndpointItem[]>(() => {
   const result: EndpointItem[] = []
-  endpoints.value.forEach((node, id) => {
+  // The map holds parsed requests, not tree nodes: reading testname/properties listed every one as "unnamed GET /".
+  endpoints.value.forEach((endpoint, id) => {
     result.push({
       id,
-      name: node.testname || t('common.unnamed'),
-      method: node.properties?.['HTTPSampler.method'] || 'GET',
-      path: node.properties?.['HTTPSampler.path'] || '/',
+      name: endpoint.name || t('common.unnamed'),
+      method: endpoint.method || 'GET',
+      path: endpoint.path || '/',
     })
   })
   return result
@@ -557,7 +558,7 @@ function parseTreeToEndpoints(tree: any) {
 
   walk(tree)
   Object.assign(threadGroupConfig, readThreadGroupConfig(threadGroupNode.value))
-  Object.assign(csvDatasetConfig, readCsvConfig(threadGroupNode.value?.children?.find(isCsvDataset)))
+  Object.assign(csvDatasetConfig, readCsvConfig(csvHolder(tree, threadGroupNode.value)?.children?.find(isCsvDataset)))
 
   // Select first endpoint
   if (endpoints.value.size > 0) {

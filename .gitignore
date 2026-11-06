@@ -27,6 +27,7 @@ rag_lancedb.migrated/
 *.db-wal.migrated
 *.db-shm.migrated
 /jmeter-agent-backend/uploads/
+/jmeter-agent-backend/test_data/
 /jmeter-agent-backend/test_exec_id.txt
 /jmeter-agent-backend/test_plan_id.txt
 /jmeter-agent-backend/test_project_id.txt

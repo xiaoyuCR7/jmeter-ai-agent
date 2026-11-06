@@ -5,7 +5,8 @@
         <el-input
           v-for="(_, idx) in paramNames"
           :key="'name-' + idx"
-          v-model="paramNames[idx]"
+          :model-value="paramNames[idx]"
+          @update:model-value="updateName(idx, $event)"
           size="small"
           :placeholder="t('editor.userParams.param') + (idx + 1)"
           style="width: 140px"
@@ -26,7 +27,7 @@
           min-width="140"
         >
           <template #default="{ $index }">
-            <FunctionInput v-model="threadRows[$index][colIdx]" size="small" />
+            <FunctionInput :model-value="threadRows[$index][colIdx]" @update:model-value="updateValue($index, colIdx, $event)" size="small" />
           </template>
         </el-table-column>
         <el-table-column width="80">
@@ -114,6 +115,16 @@ function removeRow(index: number) {
   const rows = [...threadRows.value]
   rows.splice(index, 1)
   syncToModel(paramNames.value, rows.length ? rows : [Array(paramNames.value.length).fill('')])
+}
+
+// Each edit goes through syncToModel; editing the getters' copies never reached the plan.
+function updateName(index: number, value: string) {
+  syncToModel(paramNames.value.map((name, i) => i === index ? value : name), threadRows.value)
+}
+
+function updateValue(row: number, column: number, value: string) {
+  syncToModel(paramNames.value, threadRows.value.map((values, i) =>
+    i === row ? values.map((cell, j) => j === column ? value : cell) : values))
 }
 </script>
 

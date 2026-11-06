@@ -831,6 +831,27 @@ async def test_project_variables_from_a_model_are_stored_as_strings(monkeypatch)
     assert project.environment.headers == {'X-Retry': '3'}
 
 
+@pytest.mark.asyncio
+async def test_a_project_the_ai_creates_sends_its_headers_on_every_run(monkeypatch):
+    """Runs apply only the active environment: the AI's project had none, so X-Tenant-Id never left."""
+    from app.services.ai.agent.tools import project as project_tools
+    from app.services.db_store import db_store
+    from app.services.execution_lifecycle import active_environment
+    from app.services.jmeter import environment
+    saved, stored = {}, AsyncMock()
+    monkeypatch.setattr(db_store, 'create_project', stored)
+    monkeypatch.setattr(project_tools.store, 'set_project', lambda pid, project: saved.update(project=project))
+    monkeypatch.setattr(project_tools.os, 'makedirs', lambda *a, **k: None)
+    await project_tools.create_project('Acme', base_url='http://127.0.0.1:18090', headers={'X-Tenant-Id': 'acme'})
+    _, active = active_environment(saved['project'])
+    assert active.headers == {'X-Tenant-Id': 'acme'} and active.base_url == 'http://127.0.0.1:18090'
+    assert stored.call_args.args[0]['environments_data']['active_id'] == active.id
+    plan = (b'<jmeterTestPlan><hashTree><TestPlan testname="p"/><hashTree>'
+            b'<ThreadGroup testname="g"/><hashTree/></hashTree></hashTree></jmeterTestPlan>')
+    run_copy, applied = environment.apply(plan, active.revealed(), [])
+    assert b'X-Tenant-Id' in run_copy and applied['headers'] == ['X-Tenant-Id']
+
+
 def test_tool_errors_are_classified_by_type_before_wording():
     from app.services.ai.agent.types import classify_exception, reported_category
     # The wording alone would call these an input error and a retryable one.

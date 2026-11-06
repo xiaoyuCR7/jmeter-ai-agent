@@ -17,17 +17,17 @@
       <el-table :data="variables" border size="small" style="width: 100%">
         <el-table-column :label="t('editor.variables.name')" min-width="180">
           <template #default="{ $index }">
-            <el-input v-model="variables[$index]['Argument.name']" size="small" />
+            <el-input :model-value="variables[$index]['Argument.name']" @update:model-value="updateCell($index, 'Argument.name', $event)" size="small" />
           </template>
         </el-table-column>
         <el-table-column :label="t('editor.variables.value')" min-width="240">
           <template #default="{ $index }">
-            <FunctionInput v-model="variables[$index]['Argument.value']" size="small" />
+            <FunctionInput :model-value="variables[$index]['Argument.value']" @update:model-value="updateCell($index, 'Argument.value', $event)" size="small" />
           </template>
         </el-table-column>
         <el-table-column :label="t('editor.variables.desc')" min-width="150">
           <template #default="{ $index }">
-            <el-input v-model="variables[$index]['Argument.desc']" size="small" />
+            <el-input :model-value="variables[$index]['Argument.desc']" @update:model-value="updateCell($index, 'Argument.desc', $event)" size="small" />
           </template>
         </el-table-column>
         <el-table-column width="80">
@@ -172,5 +172,10 @@ function handleImport(event: Event) {
   }
   reader.readAsText(file)
   target.value = ''
+}
+
+// A cell edit replaces the list, so the change reaches the plan (editing the getter's copy did not).
+function updateCell(index: number, field: string, value: any) {
+  variables.value = variables.value.map((item: any, i: number) => i === index ? { ...item, [field]: value } : item)
 }
 </script>

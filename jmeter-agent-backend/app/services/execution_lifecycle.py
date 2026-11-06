@@ -40,6 +40,18 @@ def active_environment(project):
     return active_id, next((env for env in project.environments.environments if env.id == active_id), None)
 
 
+def default_environments(environment):
+    """A new project's one environment, from its base URL, headers and variables.
+
+    Runs apply only the active environment: a project without one sent none of the headers the
+    document requires on every request (an AI-written project's X-Tenant-Id: every request got 400).
+    """
+    from app.models.schemas import EnvironmentConfig, ProjectEnvironments
+    return ProjectEnvironments(environments=[EnvironmentConfig(
+        id="env_default", name="默认环境", base_url=environment.base_url,
+        variables=environment.variables, headers=environment.headers)], active_id="env_default")
+
+
 def check_environment_limits(environment, content: bytes, confirm_production: bool):
     """An environment's thread cap always holds; a production one also waits for an explicit yes."""
     threads = sum(group['threads'] for group in jmx_lint.planned_load(content))

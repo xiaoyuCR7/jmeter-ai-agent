@@ -6,7 +6,7 @@
         :key="index"
         class="pattern-row"
       >
-        <FunctionInput v-model="patterns[index]" size="small" style="flex: 1" />
+        <FunctionInput :model-value="pattern" @update:model-value="updatePattern(index, $event)" size="small" style="flex: 1" />
         <el-button type="danger" size="small" text @click="removePattern(index)">
           <el-icon><Delete /></el-icon>
         </el-button>
@@ -57,6 +57,11 @@ function removePattern(index: number) {
   const list = [...patterns.value]
   list.splice(index, 1)
   patterns.value = list
+}
+
+// Replacing the list sends the edit to the plan; editing the getter's copy did not.
+function updatePattern(index: number, value: string) {
+  patterns.value = patterns.value.map((pattern, i) => i === index ? value : pattern)
 }
 </script>
 

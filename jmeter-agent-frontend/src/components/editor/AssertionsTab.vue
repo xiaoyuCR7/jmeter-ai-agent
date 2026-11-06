@@ -71,8 +71,9 @@
                   </el-select>
                 </el-form-item>
             </el-col>
-            <el-col :span="8">
-              <el-form-item :label="assertion.type === 'json_path' ? 'JSONPath' : assertion.type === 'duration' ? t('editor.assertion.maxDuration') : assertion.type === 'size' ? t('editor.assertion.sizeBytes') : assertion.type === 'jsr223' ? t('editor.assertion.script') : t('editor.assertion.expected')">
+            <!-- JSON path and header checks edit their path and expected value in the row below. -->
+            <el-col v-if="assertion.type !== 'json_path' && assertion.type !== 'header'" :span="8">
+              <el-form-item :label="assertion.type === 'duration' ? t('editor.assertion.maxDuration') : assertion.type === 'size' ? t('editor.assertion.sizeBytes') : assertion.type === 'jsr223' ? t('editor.assertion.script') : t('editor.assertion.expected')">
                 <template v-if="assertion.type === 'jsr223'">
                   <el-input
                     v-model="assertion.expected"

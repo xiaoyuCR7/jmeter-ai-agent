@@ -5,27 +5,27 @@
       <el-table :data="entries" border size="small" style="width: 100%">
         <el-table-column label="URL" min-width="160">
           <template #default="{ $index }">
-            <FunctionInput v-model="entries[$index]['Authorization.url']" size="small" />
+            <FunctionInput :model-value="entries[$index]['Authorization.url']" @update:model-value="updateCell($index, 'Authorization.url', $event)" size="small" />
           </template>
         </el-table-column>
         <el-table-column :label="t('editor.auth.username')" min-width="100">
           <template #default="{ $index }">
-            <FunctionInput v-model="entries[$index]['Authorization.username']" size="small" />
+            <FunctionInput :model-value="entries[$index]['Authorization.username']" @update:model-value="updateCell($index, 'Authorization.username', $event)" size="small" />
           </template>
         </el-table-column>
         <el-table-column :label="t('editor.auth.password')" min-width="100">
           <template #default="{ $index }">
-            <FunctionInput v-model="entries[$index]['Authorization.password']" size="small" />
+            <FunctionInput :model-value="entries[$index]['Authorization.password']" @update:model-value="updateCell($index, 'Authorization.password', $event)" size="small" />
           </template>
         </el-table-column>
         <el-table-column :label="t('editor.auth.domain')" min-width="90">
           <template #default="{ $index }">
-            <el-input v-model="entries[$index]['Authorization.domain']" size="small" />
+            <el-input :model-value="entries[$index]['Authorization.domain']" @update:model-value="updateCell($index, 'Authorization.domain', $event)" size="small" />
           </template>
         </el-table-column>
         <el-table-column label="Realm" min-width="90">
           <template #default="{ $index }">
-            <el-input v-model="entries[$index]['Authorization.realm']" size="small" />
+            <el-input :model-value="entries[$index]['Authorization.realm']" @update:model-value="updateCell($index, 'Authorization.realm', $event)" size="small" />
           </template>
         </el-table-column>
         <el-table-column width="70">
@@ -90,5 +90,10 @@ function removeEntry(index: number) {
   const list = [...entries.value]
   list.splice(index, 1)
   entries.value = list
+}
+
+// A cell edit replaces the list, so the change reaches the plan (editing the getter's copy did not).
+function updateCell(index: number, field: string, value: any) {
+  entries.value = entries.value.map((item: any, i: number) => i === index ? { ...item, [field]: value } : item)
 }
 </script>

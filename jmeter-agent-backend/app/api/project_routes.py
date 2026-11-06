@@ -15,7 +15,7 @@ from app.models.schemas import (
     UpdateEnvironmentRequest,
 )
 from app.services.storage import store
-from app.services.execution_lifecycle import persist_project
+from app.services.execution_lifecycle import default_environments, persist_project
 from app.api.shared import DEFAULT_PROJECT_ID, _persist_project, ensure_default_project
 
 logger = logging.getLogger(__name__)
@@ -33,17 +33,7 @@ async def create_project(request: CreateProjectRequest):
 
     # If new multi-env format not provided, auto-create default env from legacy config
     if not environments:
-        default_env = EnvironmentConfig(
-            id="env_default",
-            name="默认环境",
-            base_url=environment.base_url,
-            variables=environment.variables,
-            headers=environment.headers
-        )
-        environments = ProjectEnvironments(
-            environments=[default_env],
-            active_id="env_default"
-        )
+        environments = default_environments(environment)
 
     project = ProjectInfo(
         id=project_id,

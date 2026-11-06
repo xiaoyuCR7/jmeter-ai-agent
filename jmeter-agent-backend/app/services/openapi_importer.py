@@ -1,6 +1,6 @@
 """OpenAPI/Swagger auto-import — parse spec → create project + test plans.
 
-Supports local references, scalar parameters and JSON object examples/defaults.
+Supports local references, scalar parameters and JSON or form object examples/defaults.
 Authentication credentials and unsupported serialization require manual setup.
 """
 
@@ -246,11 +246,14 @@ class OpenAPIImporter:
         from app.models.schemas import ProjectInfo, ProjectEnvironment
         from datetime import datetime
 
+        from app.services.execution_lifecycle import default_environments
+        environment = ProjectEnvironment(base_url=parsed.base_url)
         project = ProjectInfo(
             id=project_id,
             name=parsed.title,
             description=parsed.description or f"Imported from {source_url}",
-            environment=ProjectEnvironment(base_url=parsed.base_url),
+            environment=environment,
+            environments=default_environments(environment),
             created_at=datetime.now(),
         )
 
@@ -281,6 +284,7 @@ class OpenAPIImporter:
             await db_store.create_project({
                 "id": project_id, "name": project.name, "description": project.description,
                 "base_url": parsed.base_url, "environment_data": project.environment.model_dump(),
+                "environments_data": project.environments.model_dump(context={'reveal_secrets': True}),
                 "created_at": project.created_at})
             project_created = True
             plan_id = uuid.uuid4().hex
@@ -493,7 +497,9 @@ class OpenAPIImporter:
             return {name: self._example(value) for name, value in node.get("properties", {}).items()}
         raise ValueError("Provide an example/default for the parameter or request body")
 
-    def _api_endpoint(self, ep, parsed, warnings):
+    def _api_endpoint(self, ep, parsed, warnings, templated_path=False):
+        """The request a plan sends. With templated_path, a path parameter without an example stays
+        {name} for the plan to bind (an id the flow creates), and the rest of the request is kept."""
         from app.models.schemas import APIEndpoint
         path, headers, query = ep.path, {}, {}
         for parameter in ep.parameters:
@@ -505,6 +511,9 @@ class OpenAPIImporter:
             try:
                 value = self._example(parameter)
             except ValueError:
+                if location == "path" and templated_path:
+                    warnings.append(f"{ep.path}: path parameter {name} has no example; bind it to a value the flow extracts")
+                    continue
                 if parameter.get("required") or location == "path":
                     raise ValueError(f"{ep.path}: required parameter {name} needs an example/default")
                 warnings.append(f"{ep.path}: optional parameter {name} omitted; no example/default")
@@ -517,18 +526,20 @@ class OpenAPIImporter:
                 query[name] = value
             else:
                 headers[name] = str(value)
-        if re.search(r"\{[^{}]+\}", path):
+        if re.search(r"\{[^{}]+\}", path) and not templated_path:
             raise ValueError(f"Unresolved path parameter in {path}")
         body, content_type = None, "application/json"
         if ep.request_body:
             content = ep.request_body.get("content", {})
             json_types = [key for key in content if key == "application/json" or key.endswith("+json")]
-            if not json_types:
-                raise ValueError(f"{ep.path}: only JSON object request bodies are supported")
-            content_type = json_types[0]
+            # A login form: sending it as JSON was refused (415) before any request got a token.
+            form_types = [key for key in content if key == "application/x-www-form-urlencoded"]
+            if not json_types and not form_types:
+                raise ValueError(f"{ep.path}: only JSON and form (application/x-www-form-urlencoded) bodies are supported")
+            content_type = (json_types or form_types)[0]
             body = self._example(content[content_type])
             if not isinstance(body, dict):
-                raise ValueError(f"{ep.path}: JSON body must be an object in this importer")
+                raise ValueError(f"{ep.path}: the request body must be an object in this importer")
         if ep.security and not any(not requirement for requirement in ep.security):
             # Select the first documented OR alternative; schemes within it are AND.
             for name in ep.security[0]:
@@ -570,7 +581,13 @@ def _fields(schema, depth=0):
             return 'object'
         names = list(schema.get('properties') or {})[:RESPONSE_FIELDS]
         return {name: _fields(schema['properties'][name], depth + 1) for name in names}
-    return schema.get('type') or 'any'
+    kind = schema.get('type') or 'any'
+    # "code: integer" alone hid that 0 is success, so checks only tested that the field exists.
+    if schema.get('enum'):
+        kind += ' (one of ' + ', '.join(map(str, schema['enum'][:10])) + ')'
+    if schema.get('description'):
+        kind += ' — ' + str(schema['description'])[:120]
+    return kind
 
 
 def _response_shape(importer: 'OpenAPIImporter', ep: ParsedEndpoint, spec: dict) -> Optional[dict]:
@@ -632,13 +649,21 @@ def endpoints_from_document(text: str) -> Optional[dict]:
     for ep in parsed.endpoints:
         item = {'name': ep.name, 'method': ep.method, 'path': ep.path}
         try:
-            api = importer._api_endpoint(ep, parsed, notes)
+            own: list[str] = []
+            api = importer._api_endpoint(ep, parsed, own, templated_path=True)
         except (ValueError, TypeError, KeyError, AttributeError) as error:
             # Still listed: the model fills in what the spec leaves out, from the parameters.
             item['parameters'] = [{key: parameter[key] for key in ('name', 'in', 'required') if key in parameter}
                                   for parameter in ep.parameters]
             item['note'] = str(error)
         else:
+            unbound = [note for note in own if ': path parameter ' in note]
+            notes.extend(note for note in own if note not in unbound)
+            if unbound:
+                # On the endpoint, where the model writes its binding.
+                item['parameters'] = [{key: parameter[key] for key in ('name', 'in', 'required') if key in parameter}
+                                      for parameter in ep.parameters if parameter.get('in') == 'path']
+                item['note'] = '; '.join(unbound)
             if api.path != ep.path:
                 item.update(path=api.path, documented_path=ep.path)
             item.update({key: value for key, value in (
@@ -654,4 +679,6 @@ def endpoints_from_document(text: str) -> Optional[dict]:
             item['tags'] = ep.tags
         endpoints.append(item)
     return {'title': parsed.title, 'version': parsed.version, 'base_url': parsed.base_url,
-            'auth': parsed.auth_type, 'endpoints': endpoints, 'notes': notes}
+            # Conventions every endpoint shares (business codes, required headers) live here.
+            **({'description': str(parsed.description)[:2000]} if parsed.description else {}),
+            'auth': parsed.auth_type, 'endpoints': endpoints, 'notes': list(dict.fromkeys(notes))}
