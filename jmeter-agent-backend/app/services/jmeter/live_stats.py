@@ -107,7 +107,7 @@ class LiveStats:
         """Elapsed time against the planned duration; unknown (None) when the run ends by loop count."""
         if not self.planned_seconds:
             return None
-        return max(1, min(99, int(100 * self.elapsed_seconds() / self.planned_seconds)))
+        return max(1, min(99, round(100 * self.elapsed_seconds() / self.planned_seconds)))
 
     def snapshot(self) -> dict:
         self.tidy()

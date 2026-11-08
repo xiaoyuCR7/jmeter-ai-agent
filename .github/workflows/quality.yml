@@ -71,6 +71,50 @@ jobs:
       - name: Run portable backend suite
         run: python -m pytest tests -q
 
+  # The portable suite skips every check that needs JMeter itself: names JMeter cannot load,
+  # settings it never reads, plans it refuses. This job installs JMeter and runs them.
+  backend-jmeter:
+    needs: dependency-lock
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      JMETER_VERSION: '5.6.3'
+      JMETER_SHA512: 5978a1a35edb5a7d428e270564ff49d2b1b257a65e17a759d259a9283fc17093e522fe46f474a043864aea6910683486340706d745fcdf3db1505fd71e689083
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: jmeter-agent-backend/requirements-dev.txt
+      - uses: actions/cache@v4
+        id: jmeter-cache
+        with:
+          path: apache-jmeter-${{ env.JMETER_VERSION }}.tgz
+          key: jmeter-${{ env.JMETER_VERSION }}
+      - name: Download JMeter
+        if: steps.jmeter-cache.outputs.cache-hit != 'true'
+        run: curl -fsSL -o "apache-jmeter-$JMETER_VERSION.tgz" "https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-$JMETER_VERSION.tgz"
+      # The app expects bin/ and lib/ at the repository root, as in a local install.
+      - name: Install JMeter
+        run: |
+          echo "$JMETER_SHA512  apache-jmeter-$JMETER_VERSION.tgz" | sha512sum -c -
+          tar -xzf "apache-jmeter-$JMETER_VERSION.tgz"
+          mv "apache-jmeter-$JMETER_VERSION/bin" "apache-jmeter-$JMETER_VERSION/lib" .
+          bin/jmeter --version
+      - name: Install exact dependencies
+        working-directory: jmeter-agent-backend
+        run: python -m pip install -r requirements-dev.txt
+      - name: Run the checks against real JMeter
+        working-directory: jmeter-agent-backend
+        env:
+          RUN_JMETER_TESTS: '1'
+        run: python -m pytest tests/test_editor_components.py tests/test_generated_plans_jmeter.py -q -rs
+
   frontend:
     runs-on: ubuntu-latest
     timeout-minutes: 25
