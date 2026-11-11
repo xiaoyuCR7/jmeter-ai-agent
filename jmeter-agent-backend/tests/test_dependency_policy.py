@@ -71,8 +71,11 @@ def test_runtime_security_migrations_are_explicit_and_remove_unsafe_jose_stack()
 
     assert str(direct['fastapi'].specifier) == '==0.136.3'
     assert str(direct['starlette'].specifier) == '==1.3.1'
-    assert str(direct['pyjwt'].specifier) == '==2.13.0'
-    assert direct['pyjwt'].extras == {'crypto'}
+    # Left from the multi-user version; nothing imports them in the no-login local mode.
+    for unused in ('pyjwt', 'passlib', 'jinja2', 'xmltodict', 'aiofiles', 'python-dateutil', 'lxml', 'websockets'):
+        assert unused not in direct
+    for unused in ('pyjwt', 'passlib', 'bcrypt', 'xmltodict', 'aiofiles', 'python-dateutil', 'lxml'):
+        assert unused not in locked
     assert 'python-jose' not in direct
     assert 'python-jose' not in locked
     assert 'ecdsa' not in locked

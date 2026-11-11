@@ -27,7 +27,6 @@ from app.services.ai.agent.tool_registry import ToolRegistry
 from app.services.ai import analysis_context
 from app.services.ai.memory import fact_ledger, fact_validator, get_heuristics_prompt
 from app.models.schemas import FactSheet, DetailedTestSummary
-from app.services.jmeter.report_parser import ReportParser
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)

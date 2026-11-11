@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 from app.core.config import settings
+from app.core.text import tr
 from app.models.schemas import AIChatMessage, SECRET_MASK
 from app.services.jmeter import environment as environment_for_run
 from app.services.jmeter.script_risk import ScriptApprovalRequired, content_hash, scan as scan_scripts
@@ -89,7 +90,8 @@ def trial_copy(content: bytes) -> bytes:
             _set(controller, 'stringProp', 'LoopController.loops', '1')
             _set(controller, 'boolProp', 'LoopController.continue_forever', 'false')
     if main is None:
-        raise ValueError('试跑需要计划里有一个启用的标准线程组（ThreadGroup）')
+        raise ValueError(tr('试跑需要计划里有一个启用的标准线程组（ThreadGroup）',
+                            'A trial run needs an enabled standard Thread Group in the plan'))
     for element in root.iter():
         if element.tag.endswith('Timer'):
             element.set('enabled', 'false')
@@ -285,7 +287,7 @@ async def run(plan, approved_sha256: Optional[str] = None, confirm_production: b
     failed = sum(1 for sample in samples if not sample['success'])
     error = None
     if not samples:
-        error = _masked(result.error_message or '', secrets) or '计划没有发出任何请求'
+        error = _masked(result.error_message or '', secrets) or tr('计划没有发出任何请求', 'The plan sent no request')
     _last[plan.id] = {'sha256': digest, 'samples': samples, 'outline': outline(content), 'fixes': []}
     return {'status': 'error' if error else 'failed' if failed else 'passed', 'error': error,
             'duration_seconds': round(time.monotonic() - started, 1), 'environment': active.name if active else None,
@@ -295,10 +297,11 @@ async def run(plan, approved_sha256: Optional[str] = None, confirm_production: b
 def _current(plan) -> dict:
     trial = _last.get(plan.id)
     if trial is None:
-        raise TrialOutdated('先试跑一次这个计划')
+        raise TrialOutdated(tr('先试跑一次这个计划', 'Run a trial of this plan first'))
     if content_hash(Path(plan.jmx_path).read_bytes()) != trial['sha256']:
         _last.pop(plan.id, None)
-        raise TrialOutdated('计划在试跑之后改过，请重新试跑')
+        raise TrialOutdated(tr('计划在试跑之后改过，请重新试跑',
+                               'The plan changed after its trial run; run the trial again'))
     return trial
 
 
@@ -366,7 +369,8 @@ async def diagnose(plan, adapter, lang: str = 'zh-CN') -> dict:
     from app.services.requirements import _json_object
     trial = _current(plan)
     if not any(not sample['success'] for sample in trial['samples']):
-        raise ValueError('试跑里没有失败的请求，不需要诊断')
+        raise ValueError(tr('试跑里没有失败的请求，不需要诊断',
+                            'No request failed in the trial run, so there is nothing to diagnose'))
     prompt = DIAGNOSIS_PROMPT + ('\n\nWrite summary, reasons and advice in English.' if lang == 'en' else '')
     async with agent_slot():
         reply = await adapter.chat([AIChatMessage(role='system', content=prompt),
@@ -383,7 +387,7 @@ async def diagnose(plan, adapter, lang: str = 'zh-CN') -> dict:
 
 def _extractor(variable: str, expression: str):
     element = ET.Element('JSONPostProcessor', guiclass='JSONPostProcessorGui', testclass='JSONPostProcessor',
-                         testname=f'提取 {variable}', enabled='true')
+                         testname=tr(f'提取 {variable}', f'Extract {variable}'), enabled='true')
     for name, value in (('referenceNames', variable), ('jsonPathExprs', expression),
                         ('match_numbers', '1'), ('defaultValues', 'NOT_FOUND')):
         ET.SubElement(element, 'stringProp', name=f'JSONPostProcessor.{name}').text = value
@@ -394,7 +398,8 @@ def apply_fix(plan, fix_id: int) -> dict:
     """Write one checked extractor fix into the plan file; the plan then needs a new trial."""
     trial = _current(plan)
     if not 0 <= fix_id < len(trial['fixes']) or not trial['fixes'][fix_id]['applicable']:
-        raise ValueError('这条建议没有被试跑结果证实，不能自动应用')
+        raise ValueError(tr('这条建议没有被试跑结果证实，不能自动应用',
+                            'The trial run does not bear this suggestion out, so it cannot be applied automatically'))
     fix = trial['fixes'][fix_id]
     content = with_json_extractor(Path(plan.jmx_path).read_bytes(), fix['sampler'], fix['variable'], fix['expression'],
                                   replace=fix['action'] == 'change')
@@ -449,5 +454,6 @@ def with_json_extractor(content: bytes, sampler: str, variable: str, expression:
             holder.append(ET.Element('hashTree'))
             done = True
     if not done:
-        raise ValueError('计划里找不到这个请求或提取器')
+        raise ValueError(tr('计划里找不到这个请求或提取器',
+                            'The plan has no such request or extractor'))
     return ET.tostring(root, encoding='utf-8', xml_declaration=True)

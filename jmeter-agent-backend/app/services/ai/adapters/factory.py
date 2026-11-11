@@ -73,7 +73,8 @@ class AIAdapterFactory:
             raise ValueError(f"AI model is disabled: {model}")
 
         adapter_type = cfg.get("adapter_type", OPENAI_COMPATIBLE)
-        api_key = cfg.get("api_key") or ""
+        from app.core.config import resolve_api_key
+        api_key = resolve_api_key(cfg.get("api_key"))
         model_name = cfg["model"]
         api_base = cfg.get("api_base")
 

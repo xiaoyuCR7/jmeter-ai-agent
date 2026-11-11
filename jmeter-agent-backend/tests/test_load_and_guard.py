@@ -89,3 +89,56 @@ async def test_the_guard_stops_after_two_bad_checks(tmp_path, monkeypatch):
 async def test_a_disabled_guard_does_nothing(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, 'RUN_GUARD_ENABLED', False)
     await asyncio.wait_for(run_guard.watch(str(tmp_path / 'x.jtl'), None), timeout=1)
+
+
+def timed_window(rows):
+    w = run_guard.Window(30)
+    for stamp, elapsed in rows:
+        w.add(stamp, True, elapsed)
+    return w
+
+
+def test_the_latency_rule_is_off_unless_asked_for(monkeypatch):
+    monkeypatch.setattr(settings, 'RUN_GUARD_GRACE_SECONDS', 0)
+    monkeypatch.setattr(settings, 'RUN_GUARD_MIN_SAMPLES', 5)
+    slow = timed_window([(i * 1000, 100) for i in range(31)] + [(31_000 + i, 5000) for i in range(100)])
+    assert run_guard.judge(slow, 60_000) is None and slow.baseline_ms is None
+
+
+def test_the_latency_rule_compares_with_the_first_window_after_the_grace_period(monkeypatch):
+    monkeypatch.setattr(settings, 'RUN_GUARD_GRACE_SECONDS', 10)
+    monkeypatch.setattr(settings, 'RUN_GUARD_MIN_SAMPLES', 5)
+    monkeypatch.setattr(settings, 'RUN_GUARD_LATENCY_FACTOR', 10)
+    w = timed_window([(i * 1000, 100) for i in range(41)])
+    assert run_guard.judge(w, 20_000) is None and w.baseline_ms is None  # Grace plus one window not over yet.
+    assert run_guard.judge(w, 40_000) is None and w.baseline_ms == 100   # The bar is set, nothing judged against itself.
+    w.samples.clear()
+    for i in range(20):
+        w.add(60_000 + i, True, 900)
+    assert run_guard.judge(w, 60_100) is None                            # Nine times slower: under the factor.
+    for i in range(200):
+        w.add(61_000 + i, True, 1500)
+    reason = run_guard.judge(w, 61_300)
+    assert '响应时间' in reason and '100 ms' in reason
+
+
+def test_the_machine_rule_stops_a_run_about_to_exhaust_memory(monkeypatch):
+    monkeypatch.setattr(settings, 'RUN_GUARD_MEMORY_PERCENT', 97)
+    assert run_guard.judge_machine(96.9) is None
+    assert '内存' in run_guard.judge_machine(98.2)
+    monkeypatch.setattr(settings, 'RUN_GUARD_MEMORY_PERCENT', 0)
+    assert run_guard.judge_machine(100) is None
+
+
+@pytest.mark.asyncio
+async def test_the_guard_stops_a_healthy_run_on_a_machine_out_of_memory(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(run_guard.psutil, 'virtual_memory', lambda: SimpleNamespace(percent=99.0))
+    path = tmp_path / 'result.jtl'
+    path.write_text('timeStamp,elapsed,success\n' + ''.join(f'{i},10,true\n' for i in range(10)), encoding='utf-8')
+    reasons = []
+
+    async def stop(reason):
+        reasons.append(reason)
+    await asyncio.wait_for(run_guard.watch(str(path), stop, check_seconds=0.01), timeout=2)
+    assert len(reasons) == 1 and '内存' in reasons[0]

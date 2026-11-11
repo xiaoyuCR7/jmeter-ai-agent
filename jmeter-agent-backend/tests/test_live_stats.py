@@ -142,3 +142,40 @@ async def test_the_executor_keeps_ticking_for_as_long_as_jmeter_runs(tmp_path, m
             flag.write_text('COMPLETED')
     await asyncio.wait_for(module.JMeterExecutor.__new__(module.JMeterExecutor)._monitor_progress('x', str(flag), callback), 5)
     assert ticks[:40] == [None] * 40 and ticks[-1] == 100
+
+
+@pytest.mark.asyncio
+async def test_the_live_stream_sends_changes_and_closes_when_the_run_ends(monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from app.api import execution_routes
+    from app.models.schemas import TestExecutionInfo, TestExecutionStatus
+    execution = TestExecutionInfo(id='run-9', test_plan_id='p', status=TestExecutionStatus.RUNNING, jmx_path='x.jmx')
+    monkeypatch.setattr(execution_routes.store, '_executions', {'run-9': execution})
+    monkeypatch.setattr(execution_routes.store, '_test_plans', {})
+    monkeypatch.setattr(execution_routes, 'LIVE_PUSH_SECONDS', 0.01)
+    monkeypatch.setattr(execution_routes, 'LIVE_KEEPALIVE_SECONDS', 0.03)
+
+    async def connected():
+        return False
+    request = SimpleNamespace(is_disconnected=connected)
+    response = await execution_routes.stream_execution_live('run-9', request)
+    assert response.media_type == 'text/event-stream'
+    received = []
+
+    async def read():
+        async for chunk in response.body_iterator:
+            received.append(chunk)
+    reader = asyncio.create_task(read())
+    await asyncio.sleep(0.15)
+    # Nothing changed meanwhile: one view, then only keep-alive comments.
+    views = [chunk for chunk in received if chunk.startswith('data: ')]
+    assert len(views) == 1 and json.loads(views[0][6:])['status'] == 'running'
+    assert any(chunk.startswith(':') for chunk in received)
+    execution.status = TestExecutionStatus.COMPLETED
+    await asyncio.wait_for(reader, timeout=2)
+    views = [json.loads(chunk[6:]) for chunk in received if chunk.startswith('data: ')]
+    assert [view['status'] for view in views] == ['running', 'completed']
+
+    with pytest.raises(execution_routes.HTTPException):
+        await execution_routes.stream_execution_live('missing', request)

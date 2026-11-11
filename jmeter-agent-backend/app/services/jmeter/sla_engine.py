@@ -5,7 +5,7 @@ instead of relying solely on LLM-generated natural-language analysis.
 """
 
 from dataclasses import dataclass, field
-from typing import Optional, Dict, List
+from typing import Dict, List
 from enum import Enum
 import math
 

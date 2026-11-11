@@ -6,7 +6,7 @@ import pytest
 
 from app.models.schemas import (DetailedTestSummary, Hypothesis, HypothesisStatus, TestExecutionStatus as Status)
 from app.services import experiments
-from app.services.experiments import CapacityStep, capacity_steps, judge_step
+from app.services.experiments import CapacityStep, capacity_steps, judge_step, refine_load
 
 
 def test_capacity_steps_end_at_the_maximum():
@@ -18,8 +18,9 @@ def test_capacity_steps_end_at_the_maximum():
         capacity_steps(20, 10, 1.5)
 
 
-def step(threads, throughput, error_rate=0.0, requirements='pass'):
-    return CapacityStep(threads=threads, throughput=throughput, error_rate=error_rate, requirements=requirements)
+def step(threads, throughput, error_rate=0.0, requirements='pass', saturated=False):
+    return CapacityStep(threads=threads, throughput=throughput, error_rate=error_rate, requirements=requirements,
+                        generator_saturated=saturated)
 
 
 def test_a_step_stops_the_search_on_requirements_errors_or_a_plateau():
@@ -28,13 +29,23 @@ def test_a_step_stops_the_search_on_requirements_errors_or_a_plateau():
     assert '需求' in judge_step(step(15, 140, requirements='fail'), step(10, 100), 1.0)
     assert '错误率' in judge_step(step(15, 140, error_rate=3), step(10, 100), 1.0)
     assert '吞吐量' in judge_step(step(20, 105), step(10, 100), 1.0)
+    # A saturated load generator outranks everything: the other numbers are its own.
+    assert '压测机饱和' in judge_step(step(15, 140, requirements='fail', saturated=True), step(10, 100), 1.0)
+
+
+def test_refinement_halves_the_gap_until_it_is_small():
+    assert refine_load(40, 80) == 60
+    assert refine_load(40, 60) == 50
+    assert refine_load(40, 44) is None  # Within a tenth of the passing load.
+    assert refine_load(1, 2) is None
 
 
 class FakeLifecycle:
     """Runs finish at once with the throughput a function of their threads."""
 
-    def __init__(self, throughput_of, error_of=lambda threads: 0.0):
-        self.throughput_of, self.error_of, self.runs, self.cancelled = throughput_of, error_of, {}, []
+    def __init__(self, throughput_of, error_of=lambda threads: 0.0, saturated_of=lambda threads: False):
+        self.throughput_of, self.error_of, self.saturated_of = throughput_of, error_of, saturated_of
+        self.runs, self.cancelled, self.held = {}, [], []
 
     async def prepare(self, jmx_path, **kwargs):
         execution_id = f"run-{len(self.runs)}"
@@ -44,11 +55,13 @@ class FakeLifecycle:
                                       sent_bytes_per_sec=0,
                                       throughput=self.throughput_of(threads), percentiles={'p95': 200})
         run = SimpleNamespace(id=execution_id, status=Status.COMPLETED, summary=summary, error_message=None,
-                              project_id='p', jmx_path=jmx_path, kwargs=kwargs)
+                              project_id='p', jmx_path=jmx_path, kwargs=kwargs,
+                              resource_snapshot_post={'during': {'saturated': self.saturated_of(threads)}})
         self.runs[execution_id] = run
         return run
 
-    def submit_prepared(self, prepared):
+    def submit_prepared(self, prepared, **kwargs):
+        self.held.append(kwargs.get('wait_for_resources'))
         return None
 
     async def wait(self, execution_id):
@@ -84,13 +97,73 @@ async def test_a_capacity_search_stops_where_throughput_stops_growing(plan, monk
     monkeypatch.setattr(experiments, 'execution_lifecycle', fake)
     search = await experiments.start_capacity_search('plan-1', start_threads=10, max_threads=100, factor=2)
     done = await finish(search)
-    assert [s.threads for s in done.steps] == [10, 20, 40, 80, 100]
+    # The ramp, the stopping load run again, then two loads between 40 (passed) and 80 (stopped).
+    assert [(s.threads, s.phase) for s in done.steps] == [
+        (10, 'ramp'), (20, 'ramp'), (40, 'ramp'), (80, 'ramp'), (100, 'ramp'),
+        (80, 'confirm'), (60, 'refine'), (50, 'refine')]
     assert done.status == 'finished' and done.capacity_threads == 40 and done.capacity_throughput == 400
     # The load after the stop never ran, and does not read as waiting to.
-    assert [s.status for s in done.steps] == ['passed', 'passed', 'passed', 'stopped', 'skipped']
-    assert '吞吐量' in done.stop_reason
+    assert [s.status for s in done.steps] == ['passed', 'passed', 'passed', 'stopped', 'skipped',
+                                              'stopped', 'stopped', 'stopped']
+    assert '吞吐量' in done.stop_reason and '40 线程通过，50 线程不通过' in done.stop_reason
     assert fake.runs['run-1'].kwargs['purpose'] == {'kind': 'capacity', 'search_id': search.id, 'step': 1}
     assert experiments.list_searches('plan-1')[0].id == search.id
+    # Every step waits for the machine to settle after the one before.
+    assert fake.held and all(fake.held)
+
+
+@pytest.mark.asyncio
+async def test_refinement_finds_a_limit_between_two_ramp_steps(plan, monkeypatch):
+    fake = FakeLifecycle(lambda threads: min(threads, 70) * 10.0)
+    monkeypatch.setattr(experiments, 'execution_lifecycle', fake)
+    done = await finish(await experiments.start_capacity_search('plan-1', start_threads=10, max_threads=160, factor=2))
+    # 80 passes on the ramp (700 against 400), 160 does not; 120 and 100 do not either.
+    assert done.capacity_threads == 80
+    assert [(s.threads, s.status) for s in done.steps if s.phase == 'refine'] == [(120, 'stopped'), (100, 'stopped')]
+
+    fake = FakeLifecycle(lambda threads: threads * 10.0, error_of=lambda threads: 5.0 if threads > 130 else 0.0)
+    monkeypatch.setattr(experiments, 'execution_lifecycle', fake)
+    done = await finish(await experiments.start_capacity_search('plan-1', start_threads=10, max_threads=160, factor=2))
+    assert [(s.threads, s.status) for s in done.steps if s.phase == 'refine'] == [(120, 'passed'), (140, 'stopped')]
+    assert done.capacity_threads == 120 and done.capacity_throughput == 1200
+    assert '120 线程通过，140 线程不通过' in done.stop_reason
+
+
+@pytest.mark.asyncio
+async def test_a_stop_that_does_not_repeat_is_noise_and_the_search_goes_on(plan, monkeypatch):
+    seen = []
+
+    def errors(threads):
+        seen.append(threads)
+        return 5.0 if threads == 20 and seen.count(20) == 1 else 0.0  # Only the first run at 20 threads.
+    fake = FakeLifecycle(lambda threads: threads * 10.0, error_of=errors)
+    monkeypatch.setattr(experiments, 'execution_lifecycle', fake)
+    done = await finish(await experiments.start_capacity_search('plan-1', start_threads=10, max_threads=40, factor=2))
+    assert [(s.threads, s.phase, s.status) for s in done.steps] == [
+        (10, 'ramp', 'passed'), (20, 'ramp', 'retried'), (40, 'ramp', 'passed'), (20, 'confirm', 'passed')]
+    assert done.capacity_threads == 40 and '仍然通过' in done.stop_reason
+    assert '复测通过' in done.steps[1].note
+
+
+@pytest.mark.asyncio
+async def test_a_saturated_load_generator_ends_the_search_without_more_runs(plan, monkeypatch):
+    fake = FakeLifecycle(lambda threads: threads * 10.0, saturated_of=lambda threads: threads >= 40)
+    monkeypatch.setattr(experiments, 'execution_lifecycle', fake)
+    done = await finish(await experiments.start_capacity_search('plan-1', start_threads=10, max_threads=80, factor=2))
+    # Neither repeated nor refined: more load from this machine proves nothing.
+    assert [(s.threads, s.status) for s in done.steps] == [(10, 'passed'), (20, 'passed'), (40, 'stopped'), (80, 'skipped')]
+    assert done.capacity_threads == 20 and '压测机饱和' in done.stop_reason
+
+
+@pytest.mark.asyncio
+async def test_confirmation_and_refinement_can_be_switched_off(plan, monkeypatch):
+    fake = FakeLifecycle(lambda threads: min(threads, 40) * 10.0)
+    monkeypatch.setattr(experiments, 'execution_lifecycle', fake)
+    done = await finish(await experiments.start_capacity_search(
+        'plan-1', start_threads=10, max_threads=100, factor=2, confirm_stop=False, refine_steps=0))
+    assert [s.status for s in done.steps] == ['passed', 'passed', 'passed', 'stopped', 'skipped']
+    with pytest.raises(ValueError):
+        await experiments.start_capacity_search('plan-1', start_threads=10, max_threads=100, factor=2, refine_steps=9)
 
 
 @pytest.mark.asyncio
@@ -117,7 +190,8 @@ def reports(monkeypatch):
 async def test_a_search_writes_one_report_on_the_step_that_stopped_it(plan, monkeypatch, reports):
     monkeypatch.setattr(experiments, 'execution_lifecycle', FakeLifecycle(lambda threads: min(threads, 40) * 10.0))
     done = await finish(await experiments.start_capacity_search('plan-1', start_threads=10, max_threads=100, factor=2))
-    assert reports == ['run-3'] and done.report_execution_id == 'run-3'  # 80 threads, where throughput stopped.
+    # 50 threads: the lowest load that did not pass, found by refining between 40 and 80.
+    assert reports == ['run-6'] and done.report_execution_id == 'run-6'
 
 
 @pytest.mark.asyncio

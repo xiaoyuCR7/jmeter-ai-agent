@@ -1,15 +1,15 @@
 """Database-backed async store — replaces in-memory SharedStore."""
 
 import logging
-from typing import Optional, List, Dict, Any
+from typing import Optional
 
 from app.core.errors import ServiceError
 from sqlalchemy import select, delete, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.db import (
-    get_session_factory, ProjectModel, TestPlanModel, ExecutionModel,
-    EnvironmentModel, BaselineModel,
+    get_session_factory, get_sync_engine, ProjectModel, TestPlanModel, ExecutionModel,
+    BaselineModel,
 )
 from app.core.time import utc_now_naive
 
@@ -153,7 +153,6 @@ class DBStore:
                 description=plan_data.get("description", ""),
                 test_type=plan_data.get("test_type", "baseline"),
                 jmx_path=plan_data.get("jmx_path", ""),
-                jmx_content=plan_data.get("jmx_content"),
                 test_config=plan_data.get("test_config", {}),
                 endpoints_count=plan_data.get("endpoints_count", 0),
                 created_at=plan_data.get("created_at", utc_now_naive()),
@@ -195,6 +194,21 @@ class DBStore:
             plans = [self._plan_to_dict(p) for p in result.scalars()]
             total = (await s.execute(select(func.count()).select_from(TestPlanModel).where(*conditions))).scalar_one()
             return {"test_plans": plans, "total": total, "offset": offset, "limit": limit}
+
+    async def find_test_plan_by_path(self, jmx_path: str) -> Optional[dict]:
+        """The plan registered for exactly this path string (indexed); the newest when several are."""
+        async with await self._session() as s:
+            result = await s.execute(select(TestPlanModel).where(TestPlanModel.jmx_path == jmx_path)
+                                     .order_by(TestPlanModel.created_at.desc()).limit(1))
+            tp = result.scalar_one_or_none()
+            return self._plan_to_dict(tp) if tp else None
+
+    async def execution_source_exists(self, jmx_path: str) -> bool:
+        """Whether a run with a recorded source hash was started from exactly this path string."""
+        async with await self._session() as s:
+            result = await s.execute(select(ExecutionModel.id).where(
+                ExecutionModel.jmx_path == jmx_path, ExecutionModel.source_sha256.is_not(None)).limit(1))
+            return result.first() is not None
 
     def _plan_to_dict(self, tp: TestPlanModel) -> dict:
         return {
@@ -377,3 +391,17 @@ class DBStore:
 
 # Module-level singleton
 db_store = DBStore()
+
+
+def load_execution_sync(exec_id: str) -> Optional[dict]:
+    """One run's row, read without awaiting: the run cache fills in a run it holds only in outline.
+
+    About a millisecond on SQLite. None when the database is not SQLite or has no such row.
+    """
+    from sqlalchemy.orm import Session
+    engine = get_sync_engine()
+    if engine is None:
+        return None
+    with Session(engine) as session:
+        row = session.get(ExecutionModel, exec_id)
+        return db_store._exec_to_dict(row) if row is not None else None

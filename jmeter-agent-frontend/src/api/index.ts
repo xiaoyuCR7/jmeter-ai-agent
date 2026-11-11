@@ -7,12 +7,17 @@ export interface CapacitySearchInput {
   max_threads: number
   factor: number
   max_error_rate: number
+  confirm_stop?: boolean  // Run a stopping load once more before believing it.
+  refine_steps?: number   // Loads to try between the last that passed and the first that did not.
 }
 
 export interface CapacityStep {
   threads: number
   execution_id: string | null
-  status: 'pending' | 'running' | 'passed' | 'stopped' | 'failed' | 'skipped'
+  // retried: stopped once, then passed when run again, so it was noise and not the limit.
+  status: 'pending' | 'running' | 'passed' | 'stopped' | 'failed' | 'skipped' | 'retried'
+  phase?: 'ramp' | 'confirm' | 'refine'
+  generator_saturated?: boolean
   throughput: number | null
   p95: number | null
   error_rate: number | null
@@ -32,6 +37,25 @@ export interface CapacitySearch {
   report_execution_id: string | null
   created_at: string
   finished_at: string | null
+}
+
+export interface StorageUsage {
+  reports_dir: string
+  runs: number
+  total_bytes: number
+  dashboard_bytes: number
+  result_bytes: number
+  retention_days: number
+  retention_includes_results: boolean
+}
+
+// CPU and memory of the machine running JMeter. `saturated`: at its limit for a fifth of the run or more.
+export interface LoadGeneratorEvidence {
+  before: { cpu_percent: number | null; memory_percent: number | null } | null
+  after: { cpu_percent: number | null; memory_percent: number | null } | null
+  during?: { samples: number; interval_seconds: number; cpu_avg: number; cpu_peak: number; memory_avg: number
+    memory_peak: number; saturated_share: number; saturated: boolean }
+  saturated?: boolean
 }
 
 export interface LivePoint {
@@ -219,6 +243,7 @@ export interface ExecutionEvidence {
   test_plan_id: string | null
   requirements: RequirementEvaluation
   plan_issues?: PlanIssue[]
+  load_generator?: LoadGeneratorEvidence | null
   baseline: HistoryEvidence | null
   server_metrics: ServerMetricsEvidence | null
 }
@@ -418,6 +443,20 @@ export const api = {
   cancelExecution: (id: string) => instance.post(`/executions/${id}/cancel`),
   getExecution: (id: string) => instance.get(`/executions/${encodeURIComponent(id)}`),
   getExecutionLive: (id: string) => instance.get<LiveRun>(`/executions/${encodeURIComponent(id)}/live`),
+  // The same view pushed as events whenever it changes; the stream ends with the run.
+  streamExecutionLive: (id: string, signal?: AbortSignal) => {
+    const lang = currentLang()
+    return fetch(`${baseURL}/executions/${encodeURIComponent(id)}/live/stream?lang=${lang}`, {
+      headers: { Accept: 'text/event-stream', 'Accept-Language': lang },
+      signal,
+    }).then((response) => {
+      if (response.status === 401) requestAccess()
+      return response
+    })
+  },
+  getStorageUsage: () => instance.get<StorageUsage>('/system/storage'),
+  pruneStorage: (days: number, includeResults: boolean) =>
+    instance.post<{ pruned_runs: number; freed_bytes: number }>('/system/storage/prune', { days, include_results: includeResults }),
 
   // Progress arrives as {step: 'progress'} events, then {step: 'answer'} or {step: 'error'}.
   askAboutRunStream: (executionId: string, question: string, signal?: AbortSignal) => {

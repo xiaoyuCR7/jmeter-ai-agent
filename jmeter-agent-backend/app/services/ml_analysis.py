@@ -12,7 +12,6 @@ from typing import Optional
 from dataclasses import dataclass, field
 from collections import defaultdict
 
-from app.core.time import utc_now_naive
 
 logger = logging.getLogger(__name__)
 

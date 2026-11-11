@@ -115,7 +115,9 @@ def _previous_run(execution_id: str, project_id: str, test_plan_id: Optional[str
                   if e.id != execution_id and e.project_id == project_id and e.test_plan_id == test_plan_id
                   and e.status == TestExecutionStatus.COMPLETED and e.start_time and e.start_time < start
                   and e.summary is not None and e.summary.total_requests > 0 and _environment(e) == environment_id]
-    return max(candidates, key=lambda e: e.start_time, default=None)
+    latest = max(candidates, key=lambda e: e.start_time, default=None)
+    # Chosen from headline copies; the comparison needs the run's per-request numbers.
+    return store.get_execution(latest.id) or latest if latest is not None else None
 
 
 async def evidence_for(execution, summary: DetailedTestSummary) -> dict:

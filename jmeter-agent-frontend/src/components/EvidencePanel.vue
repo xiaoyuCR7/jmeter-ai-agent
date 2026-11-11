@@ -4,6 +4,10 @@
       :title="L('这次运行使用的测试计划有问题，结果可能不可信', 'The test plan used for this run has problems, so the results may mislead')">
       <ul class="plan-issues"><li v-for="(text, i) in planErrors" :key="i">{{ text }}</li></ul>
     </el-alert>
+    <el-alert v-if="machine?.saturated" type="error" :closable="false" show-icon class="machine"
+      :title="L('压测机饱和，这次的响应时间和吞吐量不能当作被测系统的性能', 'The load generator was saturated: these response times and throughput are not the target\'s')"
+      :description="machineText" />
+    <p v-else-if="machine?.during" class="machine-ok">{{ machineText }}</p>
     <section class="panel">
     <div class="section-header">
       <h4>{{ L('性能需求达标', 'Requirements') }}</h4>
@@ -213,6 +217,19 @@ const planErrors = computed(() => (props.evidence?.plan_issues ?? []).filter(iss
   dead_assertion: L('有断言不起作用，失败的请求可能被算成成功。重新生成计划可以修复。', 'An assertion checks nothing, so failed requests may count as successes. Regenerating the plan fixes this.'),
 } as Record<string, string>)[issue.code] ?? issue.message))
 
+// The machine running JMeter, sampled through the run. Saturated, it measured itself.
+const machine = computed(() => props.evidence?.load_generator ?? null)
+const machineText = computed(() => {
+  const during = machine.value?.during
+  if (!during) return ''
+  const share = Math.round(during.saturated_share * 100)
+  return machine.value?.saturated
+    ? L(`运行期间有 ${share}% 的时间压测机的 CPU 或内存达到上限（CPU 峰值 ${during.cpu_peak}%，平均 ${during.cpu_avg}%；内存峰值 ${during.memory_peak}%）。请降低单机负载或改用分布式执行后重测。`,
+        `For ${share}% of the run this machine's CPU or memory was at its limit (CPU peak ${during.cpu_peak}%, average ${during.cpu_avg}%; memory peak ${during.memory_peak}%). Put less load on one machine or run distributed, then test again.`)
+    : L(`压测机在运行期间未达到上限：CPU 平均 ${during.cpu_avg}%，峰值 ${during.cpu_peak}%；内存峰值 ${during.memory_peak}%（共采样 ${during.samples} 次）。`,
+        `The load generator stayed within its limits: CPU ${during.cpu_avg}% on average, ${during.cpu_peak}% at peak; memory peak ${during.memory_peak}% (${during.samples} samples).`)
+})
+
 const history = computed(() => props.evidence?.baseline ?? null)
 // A run that met every requirement is the natural first baseline; without one, regressions go unnoticed.
 const suggestBaseline = computed(() => req.value?.verdict === 'pass' && !history.value?.baseline && !history.value?.is_baseline)
@@ -300,6 +317,8 @@ const chartOption = computed(() => {
 </script>
 
 <style scoped lang="scss">
+.machine { margin-bottom: 12px; }
+.machine-ok { margin: 0 0 12px; font-size: 12px; color: var(--app-text-muted); }
 .evidence-panel { display: flex; flex-direction: column; gap: 16px; }
 .tally { margin: 0 0 12px; color: var(--app-text-secondary); font-variant-numeric: tabular-nums; }
 .ok { color: var(--app-success); }

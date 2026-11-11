@@ -8,6 +8,7 @@ from app.core.config import (
     get_all_model_configs, load_user_model_configs, save_user_model_configs, sanitize_model_config,
 )
 from app.services.ai.adapters.factory import AIAdapterFactory, HEALTH_CHECK_TIMEOUT_SECONDS
+from app.core.text import tr
 
 router = APIRouter()
 
@@ -65,12 +66,12 @@ async def add_model_config(model: AIModelConfig):
             configs[i] = config
             save_user_model_configs(configs)
             await AIAdapterFactory.invalidate(model.id)
-            return {"success": True, "message": "模型配置已更新", "config": sanitize_model_config(config)}
+            return {"success": True, "message": tr("模型配置已更新", "Model settings updated"), "config": sanitize_model_config(config)}
     data = await _fill_context_window(data)
     configs.append(data)
     save_user_model_configs(configs)
     await AIAdapterFactory.invalidate(model.id)
-    return {"success": True, "message": "模型配置已添加", "config": sanitize_model_config(data)}
+    return {"success": True, "message": tr("模型配置已添加", "Model added"), "config": sanitize_model_config(data)}
 
 
 @router.put("/ai/model-configs/{model_id}")
@@ -83,7 +84,7 @@ async def update_model_config(model_id: str, model: AIModelConfig):
             configs[i] = data
             save_user_model_configs(configs)
             await AIAdapterFactory.invalidate(model_id)
-            return {"success": True, "message": "模型配置已更新", "config": sanitize_model_config(data)}
+            return {"success": True, "message": tr("模型配置已更新", "Model settings updated"), "config": sanitize_model_config(data)}
     raise HTTPException(status_code=404, detail="Model config not found")
 
 
@@ -94,7 +95,7 @@ async def delete_model_config(model_id: str):
     configs = [c for c in configs if c.get("id") != model_id]
     save_user_model_configs(configs)
     await AIAdapterFactory.invalidate(model_id)
-    return {"success": True, "message": "模型配置已删除"}
+    return {"success": True, "message": tr("模型配置已删除", "Model removed")}
 
 
 @router.post("/ai/model-configs/{model_id}/test")
@@ -109,8 +110,8 @@ async def test_model_config(model_id: str):
         response = await asyncio.wait_for(adapter.chat([
             AIChatMessage(role="user", content="Hello, please reply with a short greeting.")
         ], max_tokens=32, temperature=0, max_retries=0), timeout=HEALTH_CHECK_TIMEOUT_SECONDS)
-        return {"success": True, "message": "连接成功", "response": response}
+        return {"success": True, "message": tr("连接成功", "Connected"), "response": response}
     except (HTTPException, ServiceError):
         raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"连接失败: {type(e).__name__}")
+        raise HTTPException(status_code=400, detail=tr(f"连接失败: {type(e).__name__}", f"Connection failed: {type(e).__name__}")) from e

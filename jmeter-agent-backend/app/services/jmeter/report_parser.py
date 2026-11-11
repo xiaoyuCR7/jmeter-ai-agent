@@ -1,15 +1,14 @@
 import os
 import csv
 import heapq
-import re
 import time
 import logging
-from typing import Dict, Any, Optional
-from datetime import datetime
+from typing import Any, Optional
 from array import array
 from collections import Counter, defaultdict
 
-from app.models.schemas import TestSummary, DetailedTestSummary, ErrorDetail, TimelineSegment, PerformanceTrend
+from app.models.schemas import DetailedTestSummary, ErrorDetail, TimelineSegment, PerformanceTrend
+from app.core.text import tr
 
 logger = logging.getLogger(__name__)
 
@@ -164,20 +163,31 @@ class ReportParser:
 
         if second_half_avg > first_half_avg * 1.3 and directional:
             trend = "degrading"
-            desc = f"性能呈恶化趋势，后半段平均响应时间({second_half_avg:.0f}ms)比前半段({first_half_avg:.0f}ms)增加了 {((second_half_avg/first_half_avg-1)*100):.0f}%"
+            growth = (second_half_avg / first_half_avg - 1) * 100
+            desc = tr(f"性能呈恶化趋势，后半段平均响应时间({second_half_avg:.0f}ms)比前半段({first_half_avg:.0f}ms)增加了 {growth:.0f}%",
+                      f"Getting slower: the average response time of the last part ({second_half_avg:.0f} ms) is "
+                      f"{growth:.0f}% above the first part ({first_half_avg:.0f} ms)")
             if second_half_err > first_half_err * 1.5 and second_half_err > 1:
-                desc += f"，且后半段错误率({second_half_err:.1f}%)显著上升"
+                desc += tr(f"，且后半段错误率({second_half_err:.1f}%)显著上升",
+                           f", and the error rate rose clearly towards the end ({second_half_err:.1f}%)")
         elif second_half_avg < first_half_avg * 0.8 and directional:
             trend = "improving"
-            desc = f"性能呈改善趋势，后半段平均响应时间({second_half_avg:.0f}ms)比前半段({first_half_avg:.0f}ms)降低了 {((1-second_half_avg/first_half_avg)*100):.0f}%"
+            drop = (1 - second_half_avg / first_half_avg) * 100
+            desc = tr(f"性能呈改善趋势，后半段平均响应时间({second_half_avg:.0f}ms)比前半段({first_half_avg:.0f}ms)降低了 {drop:.0f}%",
+                      f"Getting faster: the average response time of the last part ({second_half_avg:.0f} ms) is "
+                      f"{drop:.0f}% below the first part ({first_half_avg:.0f} ms)")
         elif fluctuation_ratio > 0.5:
             trend = "fluctuating"
-            desc = f"性能波动较大，响应时间在 {min(rt_values):.0f}ms ~ {max(rt_values):.0f}ms 之间大幅变化，系统稳定性不足"
+            desc = tr(f"性能波动较大，响应时间在 {min(rt_values):.0f}ms ~ {max(rt_values):.0f}ms 之间大幅变化，系统稳定性不足",
+                      f"Unsteady: response times swing between {min(rt_values):.0f} ms and {max(rt_values):.0f} ms")
         else:
             trend = "stable"
-            desc = f"性能总体稳定，前后半段平均响应时间分别为 {first_half_avg:.0f}ms 和 {second_half_avg:.0f}ms"
+            desc = tr(f"性能总体稳定，前后半段平均响应时间分别为 {first_half_avg:.0f}ms 和 {second_half_avg:.0f}ms",
+                      f"Steady: the average response time was {first_half_avg:.0f} ms in the first part and "
+                      f"{second_half_avg:.0f} ms in the last")
             if second_half_err > 5:
-                desc += f"，但存在 {second_half_err:.1f}% 的持续错误率"
+                desc += tr(f"，但存在 {second_half_err:.1f}% 的持续错误率",
+                           f", with a lasting error rate of {second_half_err:.1f}%")
         
         return PerformanceTrend(trend_direction=trend, description=desc)
 

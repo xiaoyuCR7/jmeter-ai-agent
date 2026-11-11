@@ -78,6 +78,7 @@ import { LineChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/components'
 import VChart from 'vue-echarts'
 import { api, type LiveRun } from '@/api'
+import { readEvents } from '@/api/sse'
 import { useI18n } from '@/composables/useI18n'
 
 use([CanvasRenderer, LineChart, GridComponent, TooltipComponent, LegendComponent])
@@ -91,6 +92,9 @@ const live = ref<LiveRun | null>(null)
 const stopping = ref(false)
 let timer: ReturnType<typeof setTimeout> | undefined
 let disposed = false
+let ended = false
+let polling = false  // Only when the stream is unavailable or was cut off.
+let stream: AbortController | undefined
 
 // The newest bucket is still filling; drawing it would show a false drop at the end of every line.
 const points = computed(() => (live.value?.series || []).filter(point => !point.partial))
@@ -166,19 +170,47 @@ const latencyOption = computed(() => {
   }
 })
 
+function show(data: LiveRun) {
+  live.value = data
+  if (!ended && !['pending', 'running'].includes(data.status)) {
+    ended = true
+    emit('ended', data.status)
+  }
+}
+
+// One read of the current numbers; repeats itself only while polling stands in for the stream.
 async function poll() {
   clearTimeout(timer)
   try {
-    live.value = (await api.getExecutionLive(props.executionId)).data
+    show((await api.getExecutionLive(props.executionId)).data)
   } catch {
     // A missed poll is retried on the next tick.
   }
-  if (disposed) return
-  if (live.value && !['pending', 'running'].includes(live.value.status)) {
-    emit('ended', live.value.status)
-    return
+  if (disposed || ended) return
+  if (polling) timer = setTimeout(poll, POLL_MS)
+}
+
+// The server pushes the numbers when they change. If the stream cannot be opened or breaks before the
+// run ends (an old backend, a proxy that buffers), polling takes over, so the panel never goes stale.
+async function watchRun() {
+  stream?.abort()
+  clearTimeout(timer)
+  const controller = new AbortController()
+  stream = controller
+  ended = false
+  polling = false
+  try {
+    const response = await api.streamExecutionLive(props.executionId, controller.signal)
+    if (!response.ok || !response.body) throw new Error('No live stream')
+    await readEvents(response, (data) => {
+      if (!disposed && stream === controller) show(data)
+    })
+  } catch {
+    // Falls through to polling below.
   }
-  timer = setTimeout(poll, POLL_MS)
+  if (disposed || ended || stream !== controller) return
+  polling = true
+  poll()
 }
 
 async function stop() {
@@ -200,8 +232,8 @@ async function stop() {
   }
 }
 
-watch(() => props.executionId, () => { live.value = null; poll() }, { immediate: true })
-onUnmounted(() => { disposed = true; clearTimeout(timer) })
+watch(() => props.executionId, () => { live.value = null; watchRun() }, { immediate: true })
+onUnmounted(() => { disposed = true; clearTimeout(timer); stream?.abort() })
 </script>
 
 <style scoped lang="scss">

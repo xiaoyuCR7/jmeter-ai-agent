@@ -48,8 +48,6 @@ def fast_sleep(monkeypatch):
 
 class TestGetExecutor:
     def test_lazy_singleton(self, monkeypatch):
-        created = []
-
         class FakeExec:
             pass
 
@@ -170,7 +168,7 @@ class TestExecute:
     async def test_unsafe_execution_ids_are_rejected_before_filesystem_effects(self, tmp_path, execution_id, monkeypatch):
         from unittest.mock import AsyncMock
         ex = make_executor()
-        ex._execute_windows_terminal = AsyncMock(return_value=None)
+        ex._launch = AsyncMock(return_value=None)
         ex._wait_for_completion = AsyncMock()
         jmx = tmp_path / 'plan.jmx'
         jmx.write_text('<jmeterTestPlan/>')
@@ -194,8 +192,6 @@ class TestSchedulerReadiness:
                                   get_history=lambda n: [])
         scheduler = TestScheduler(monitor=monitor)
         assert scheduler.check_readiness().decision == SchedulerDecision.PROCEED
-        assert scheduler._executor is None
-        assert scheduler._active_test_count == 0
 
     def test_explicit_zero_disables_cooldown_and_wait(self):
         from app.services.jmeter.test_scheduler import TestScheduler
@@ -334,25 +330,36 @@ class TestCancel:
 
 
 class TestExportJunitXml:
-    @pytest.mark.asyncio
-    async def test_export_from_sample_jtl(self, tmp_path):
+    def test_export_from_sample_jtl(self):
+        from app.services.jmeter.junit import junit_xml
+        from app.services.jmeter.report_parser import ReportParser
         sample = os.path.join(os.path.dirname(__file__), "fixtures", "sample.jtl")
         if not os.path.exists(sample):
             pytest.skip("sample.jtl fixture missing")
+        summary = ReportParser().parse_jtl(sample)
+        root = ET.fromstring(junit_xml(summary, "Sample"))
+        assert root.tag == "testsuite" and root.get("name") == "Sample"
+        assert int(root.get("tests")) == len(summary.per_label) > 0
+        assert len(root.findall("testcase")) == int(root.get("tests"))
 
-        out = str(tmp_path / "junit" / "report.xml")
-        ex = make_executor()
-        result_path = await ex.export_junit_xml(sample, out, test_name="Sample")
-
-        assert result_path == out
-        tree = ET.parse(out)
-        root = tree.getroot()
-        assert root.tag == "testsuite"
-        assert root.get("name") == "Sample"
-        assert int(root.get("tests")) > 0
-        cases = root.findall("testcase")
-        assert len(cases) >= 1
-        assert all(c.get("name") for c in cases)
+    def test_counts_and_times_say_what_happened(self):
+        from app.models.schemas import DetailedTestSummary
+        from app.services.jmeter.junit import junit_xml
+        summary = DetailedTestSummary(
+            total_requests=1000, avg_response_time=250, min_response_time=1, max_response_time=900,
+            error_rate=0.3, throughput=50.0, received_bytes_per_sec=0, sent_bytes_per_sec=0,
+            percentiles={'p95': 400.0, 'p99': 700.0},
+            per_label={'GET /ok': {'count': 600, 'avg_response_time': 100, 'error_rate': 0.0},
+                       'POST /orders': {'count': 400, 'avg_response_time': 475, 'error_rate': 0.75,
+                                        'p95_response_time': 800, 'p99_response_time': 890}})
+        root = ET.fromstring(junit_xml(summary, 'Checkout'))
+        # One failing label, not int(0.3% of 1000) == 0 as before; the suite lasted 1000 / 50 seconds.
+        assert root.get('tests') == '2' and root.get('failures') == '1' and root.get('time') == '20.000'
+        failed = root.find("testcase[@name='POST /orders']")
+        assert failed.get('time') == '0.475' and '3 of 400 requests failed' in failed.find('failure').get('message')
+        assert root.find("testcase[@name='GET /ok']").find('failure') is None
+        properties = {p.get('name'): p.get('value') for p in root.find('properties')}
+        assert properties['failed_requests'] == '3' and properties['total_requests'] == '1000'
 
 
 @pytest.mark.asyncio
@@ -364,7 +371,7 @@ async def test_tracked_launcher_uses_argument_list_and_registers_before_yield(tm
     monkeypatch.setattr(executor_mod.subprocess, 'Popen', spawn)
     flag = str(tmp_path / '_done.flag')
     try:
-        pid = await ex._execute_unix_terminal(['jmeter', '-t', 'plan $(unsafe).jmx'], 'owned', flag)
+        pid = await ex._launch(['jmeter', '-t', 'plan $(unsafe).jmx'], 'owned', flag)
         assert pid == process.pid
         assert ex._running_processes['owned']['process'] is process
         args, kwargs = spawn.call_args
@@ -471,9 +478,11 @@ def test_tracked_windows_java_keeps_heap_defaults_and_explicit_jvm_args(tmp_path
     try:
         ex._start_process([str(tmp_path / 'jmeter.bat'), '-n'], 'windows-options', str(tmp_path / '_done.flag'))
         argv = spawn.call_args.args[0]
-        assert '-Xms1g' in argv and '-XX:+UseG1GC' in argv
-        assert r'-Ddata=C:\datasets' in argv and '-Xmx2g' in argv
-        assert argv.index('-Xmx2g') > argv.index('-Xmx1g')
+        # The heap comes from JMETER_HEAP_MIN/MAX; JVM_ARGS comes later, so it still wins.
+        assert '-Xms256m' in argv and '-XX:+UseG1GC' in argv
+        assert r'-Ddata=C:\datasets' in argv
+        heap = [index for index, value in enumerate(argv) if value == '-Xmx2g']
+        assert len(heap) == 2 and argv.index(r'-Ddata=C:\datasets') > heap[0]
     finally:
         info = ex._running_processes.pop('windows-options', {})
         if info.get('console'):

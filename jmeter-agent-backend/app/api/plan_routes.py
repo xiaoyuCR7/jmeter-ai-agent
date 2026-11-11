@@ -23,6 +23,7 @@ from app.services.storage import store
 from app.services.execution_lifecycle import active_environment
 from app.services import trial_run
 from app.api.shared import DEFAULT_PROJECT_ID, _approval_needed, _delete_test_plan_from_db, _persist_test_plan, ensure_default_project
+from app.core.text import tr
 
 router = APIRouter()
 
@@ -31,27 +32,27 @@ router = APIRouter()
 TEST_TEMPLATES = [
     TestTemplate(
         id="baseline",
-        name="基准测试",
+        name=tr("基准测试", "Baseline test"),
         test_type=TestType.BASELINE,
-        description="低并发长时间运行，获取系统基础性能指标",
+        description=tr("低并发长时间运行，获取系统基础性能指标", "Low load for a long time, to measure how the system normally performs"),
         default_config={"test_type": TestType.BASELINE, "concurrent_users": 5, "ramp_up_seconds": 30, 
                        "duration_seconds": 600, "target_rps": 10, "think_time_ms": 1000},
         icon="📊"
     ),
     TestTemplate(
         id="concurrency",
-        name="高并发测试",
+        name=tr("高并发测试", "Concurrency test"),
         test_type=TestType.CONCURRENCY,
-        description="高并发用户数，测试系统最大承载能力",
+        description=tr("高并发用户数，测试系统最大承载能力", "Many users at once, to see how much the system carries"),
         default_config={"test_type": TestType.CONCURRENCY, "concurrent_users": 500, "ramp_up_seconds": 120,
                        "duration_seconds": 300, "target_rps": 1000, "think_time_ms": 0},
         icon="🔥"
     ),
     TestTemplate(
         id="ramp_up",
-        name="阶梯加压测试",
+        name=tr("阶梯加压测试", "Ramp-up test"),
         test_type=TestType.RAMP_UP,
-        description="逐步增加负载，找到系统性能拐点",
+        description=tr("逐步增加负载，找到系统性能拐点", "Load raised step by step, to find where performance turns"),
         default_config={"test_type": TestType.RAMP_UP, "concurrent_users": 200, "ramp_up_seconds": 600,
                        "duration_seconds": 600, "target_rps": 500, "think_time_ms": 100,
                        "step_users": 20, "step_duration": 60},
@@ -59,36 +60,36 @@ TEST_TEMPLATES = [
     ),
     TestTemplate(
         id="stress",
-        name="压力测试",
+        name=tr("压力测试", "Stress test"),
         test_type=TestType.STRESS,
-        description="超过正常负载的并发，测试系统极限",
+        description=tr("超过正常负载的并发，测试系统极限", "More load than normal, to find the system's limit"),
         default_config={"test_type": TestType.STRESS, "concurrent_users": 1000, "ramp_up_seconds": 60,
                        "duration_seconds": 300, "target_rps": 2000, "think_time_ms": 0},
         icon="⚡"
     ),
     TestTemplate(
         id="stability",
-        name="稳定性测试",
+        name=tr("稳定性测试", "Stability test"),
         test_type=TestType.STABILITY,
-        description="中等并发长时间运行，验证系统稳定性",
+        description=tr("中等并发长时间运行，验证系统稳定性", "Moderate load for a long time, to check the system stays stable"),
         default_config={"test_type": TestType.STABILITY, "concurrent_users": 100, "ramp_up_seconds": 60,
                        "duration_seconds": 3600, "target_rps": 200, "think_time_ms": 500},
         icon="🛡️"
     ),
     TestTemplate(
         id="spike",
-        name="尖峰测试",
+        name=tr("尖峰测试", "Spike test"),
         test_type=TestType.SPIKE,
-        description="短时间内大量用户涌入，测试突发流量应对能力",
+        description=tr("短时间内大量用户涌入，测试突发流量应对能力", "Many users arriving at once, to see how a sudden burst is handled"),
         default_config={"test_type": TestType.SPIKE, "concurrent_users": 2000, "ramp_up_seconds": 10,
                        "duration_seconds": 120, "target_rps": 5000, "think_time_ms": 0},
         icon="🚀"
     ),
     TestTemplate(
         id="custom",
-        name="自定义测试",
+        name=tr("自定义测试", "Custom test"),
         test_type=TestType.CUSTOM,
-        description="完全自定义并发、Ramp-up、持续时间等所有测试参数",
+        description=tr("完全自定义并发、Ramp-up、持续时间等所有测试参数", "Every setting your own: users, ramp-up, duration and the rest"),
         default_config={"test_type": TestType.CUSTOM, "concurrent_users": 100, "ramp_up_seconds": 60,
                        "duration_seconds": 300, "target_rps": 100, "think_time_ms": 0},
         icon="⚙️"
@@ -143,7 +144,7 @@ async def generate_test_plan(request: GenerateTestPlanRequest, project_id: str =
         failures = jmx_lint.errors(jmx_lint.lint(jmx_content))
         loaded = await asyncio.to_thread(jmx_lint.load_check, jmx_content) if not failures else None
         if failures or (loaded and loaded['checked'] and not loaded['ok']):
-            raise HTTPException(status_code=422, detail=jmx_lint.describe(failures) or f"JMeter 无法加载：{loaded['error']}")
+            raise HTTPException(status_code=422, detail=jmx_lint.describe(failures) or tr(f"JMeter 无法加载：{loaded['error']}", f"JMeter cannot load the plan: {loaded['error']}"))
 
         # Save JMX under project directory
         plan_id = str(uuid.uuid4())[:8]
@@ -154,7 +155,8 @@ async def generate_test_plan(request: GenerateTestPlanRequest, project_id: str =
             id=plan_id,
             project_id=project_id,
             name=plan_name,
-            description=f"AI生成的{request.test_config.test_type.value}测试计划",
+            description=tr(f"AI生成的{request.test_config.test_type.value}测试计划",
+                           f"AI-written {request.test_config.test_type.value} test plan"),
             jmx_path=jmx_path,
             created_at=datetime.now(),
             test_config=request.test_config,
@@ -166,7 +168,7 @@ async def generate_test_plan(request: GenerateTestPlanRequest, project_id: str =
     except (HTTPException, ServiceError):
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/test-plans", response_model=dict)
@@ -236,7 +238,7 @@ async def update_jmx_tree(plan_id: str, request: UpdateJMXTreeRequest):
             os.remove(temp_path)
         if isinstance(e, ServiceError):
             raise
-        raise HTTPException(status_code=500, detail=f"Failed to update JMX: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to update JMX: {str(e)}") from e
 
 
 @router.get("/test-plans/{plan_id}/parse")
@@ -250,7 +252,7 @@ async def parse_test_plan(plan_id: str):
     try:
         return parse_jmx(plan.jmx_path)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to parse JMX: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to parse JMX: {str(e)}") from e
 
 
 @router.get("/test-plans/{plan_id}/jmx/content")
@@ -318,7 +320,7 @@ async def diagnose_trial(plan_id: str, lang: str = 'zh-CN', ai_model: Optional[s
     except ValueError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
     except Exception as error:
-        raise HTTPException(status_code=502, detail=f"诊断失败：{error}") from error
+        raise HTTPException(status_code=502, detail=tr(f"诊断失败：{error}", f"Diagnosis failed: {error}")) from error
     return {**diagnosis, 'usage': used}
 
 

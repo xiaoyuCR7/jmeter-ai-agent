@@ -24,8 +24,6 @@ def get_request_lang(request: Request = None, body: dict = None, default: str = 
     3. Request body field: {"lang": "en"}
     4. Default: "zh-CN"
     """
-    lang = None
-
     # 1. Query parameter
     if request is not None:
         try:
@@ -93,16 +91,7 @@ def localize_prompt(prompt: str, lang: str) -> str:
     return prompt + get_lang_system_prompt(lang)
 
 
-def normalize_lang(value) -> "str | None":
-    """'en' or 'zh-CN' for the spellings people use, None for anything else."""
-    if not isinstance(value, str):
-        return None
-    lowered = value.strip().lower()
-    if lowered in ("en", "en-us", "en-gb", "english"):
-        return "en"
-    if lowered in ("zh-cn", "zh", "cn", "chinese"):
-        return "zh-CN"
-    return None
+from app.core.text import normalize_lang  # noqa: E402,F401  (one definition; also imported from here)
 
 
 def report_lang(value=None) -> str:

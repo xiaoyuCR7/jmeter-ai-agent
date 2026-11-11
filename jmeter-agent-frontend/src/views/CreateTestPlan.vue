@@ -279,7 +279,6 @@ const getTemplateDesc = (id: string) => t(`createPlan.template.${id}.desc`) || n
 
 const projectId = computed(() => route.params.projectId as string)
 const activeStep = ref(0)
-const loading = ref(false)
 const generating = ref(false)
 const templates = ref<any[]>([])
 const selectedTemplate = ref<any>(null)

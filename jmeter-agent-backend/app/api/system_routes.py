@@ -7,6 +7,8 @@ from fastapi import APIRouter, HTTPException, Response
 from app.core import local_access
 from app.core.config import settings
 from app.core.config import load_paths_config, save_paths_config
+from app.core.text import current_lang, tr
+from app.services.jmeter.registry_en import localize
 from app.services.jmeter.executor import get_executor
 from app.services.jmeter.component_registry import get_all_components, get_allowed_children
 from app.services.jmeter.function_registry import get_all_functions
@@ -50,8 +52,27 @@ async def decide_confirmation(confirmation_id: str, decision: dict):
     try:
         confirmations.decide(confirmation_id, approved)
     except KeyError:
-        raise HTTPException(409, "Confirmation expired or already consumed")
+        raise HTTPException(409, "Confirmation expired or already consumed") from None
     return {"accepted": True}
+
+
+# ===== Report storage =====
+
+@router.get("/system/storage")
+async def report_storage():
+    """How much disk the reports hold, and how much of it pruning old runs could free."""
+    from app.services import report_retention
+    return await asyncio.to_thread(report_retention.usage)
+
+
+@router.post("/system/storage/prune")
+async def prune_reports(request: dict):
+    """Remove the HTML dashboard (and optionally the raw results) of runs older than ``days``."""
+    from app.services import report_retention
+    days, include = request.get("days"), request.get("include_results", False)
+    if type(days) is not int or days < 1 or not isinstance(include, bool):
+        raise HTTPException(422, "days must be a whole number of at least 1; include_results a JSON boolean")
+    return await report_retention.prune(days, include)
 
 
 def _local_jmeter():
@@ -126,42 +147,42 @@ async def update_paths_config(request: dict):
     reports_dir = request.get("reports_dir")
     
     if not test_plans_dir or not reports_dir:
-        raise HTTPException(status_code=400, detail="test_plans_dir 和 reports_dir 都是必填项")
+        raise HTTPException(status_code=400, detail=tr("test_plans_dir 和 reports_dir 都是必填项", "Both test_plans_dir and reports_dir are required"))
     
     if not os.path.isabs(test_plans_dir):
-        raise HTTPException(status_code=400, detail="test_plans_dir 必须是绝对路径")
+        raise HTTPException(status_code=400, detail=tr("test_plans_dir 必须是绝对路径", "test_plans_dir must be an absolute path"))
     
     if not os.path.isabs(reports_dir):
-        raise HTTPException(status_code=400, detail="reports_dir 必须是绝对路径")
+        raise HTTPException(status_code=400, detail=tr("reports_dir 必须是绝对路径", "reports_dir must be an absolute path"))
     
     try:
         os.makedirs(test_plans_dir, exist_ok=True)
         os.makedirs(reports_dir, exist_ok=True)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"无法创建目录: {str(e)}")
+        raise HTTPException(status_code=500, detail=tr(f"无法创建目录: {str(e)}", f"Could not create the folder: {str(e)}")) from e
     
     save_paths_config({
         "test_plans_dir": test_plans_dir,
         "reports_dir": reports_dir
     })
     
-    return {"success": True, "message": "路径配置已更新"}
+    return {"success": True, "message": tr("路径配置已更新", "Folders updated")}
 
 
 # ===== JMeter Component & Function Registry =====
 @router.get("/jmeter/components")
 async def get_components():
     """获取支持的 JMeter 组件列表"""
-    return get_all_components()
+    return localize(get_all_components(), current_lang())
 
 
 @router.get("/jmeter/functions")
 async def get_functions():
     """获取支持的 JMeter 函数列表"""
-    return get_all_functions()
+    return localize(get_all_functions(), current_lang())
 
 
 @router.get("/jmeter/components/{parent_testclass}/children")
 async def get_component_children(parent_testclass: str):
     """获取某组件下允许添加的子组件"""
-    return get_allowed_children(parent_testclass)
+    return localize(get_allowed_children(parent_testclass), current_lang())

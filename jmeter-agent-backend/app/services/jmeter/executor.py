@@ -9,9 +9,9 @@ import logging
 import psutil
 from datetime import datetime
 from typing import Optional, Callable
-from xml.etree import ElementTree as ET
 
 from app.core.config import settings
+from app.core.ids import validate_id
 from app.models.schemas import TestExecutionInfo, TestExecutionStatus
 
 _jmeter_slots: Optional[asyncio.Semaphore] = None
@@ -28,6 +28,40 @@ async def _acquire_jmeter_slot() -> asyncio.Semaphore:
         raise RuntimeError(f'JMeter concurrency limit ({settings.RESOURCE_MAX_CONCURRENT_TESTS}) reached') from None
     return _jmeter_slots
 
+def jvm_environment() -> dict:
+    """HEAP, GC_ALGO and JVM_ARGS for JMeter's JVM in local mode.
+
+    A variable set in the backend's own environment wins; otherwise the JMETER_HEAP_*, JMETER_GC_OPTS
+    and JMETER_EXTRA_OPTS settings apply. Nothing used to read them, so a raised heap never took effect.
+    """
+    env = {
+        'HEAP': os.environ.get('HEAP') or (f'-Xms{settings.JMETER_HEAP_MIN} -Xmx{settings.JMETER_HEAP_MAX} '
+                                           '-XX:MaxMetaspaceSize=256m'),
+        'GC_ALGO': os.environ.get('GC_ALGO') or settings.JMETER_GC_OPTS,
+    }
+    jvm_args = ' '.join(filter(None, (settings.JMETER_EXTRA_OPTS.strip(), os.environ.get('JVM_ARGS', '').strip())))
+    if jvm_args:
+        env['JVM_ARGS'] = jvm_args
+    return env
+
+
+def run_timeout(jmx_path: str) -> int:
+    """Seconds a run may take before it is stopped as hung.
+
+    JMETER_TIMEOUT guards against a run that never ends. A plan that says how long it runs gets that long
+    plus time to write its report: a two-hour stability test used to be killed at the default hour.
+    """
+    from app.services.jmeter import load_variants
+    try:
+        with open(jmx_path, 'rb') as stream:
+            planned = load_variants.planned_seconds(stream.read())
+    except Exception:
+        planned = None
+    if not planned:
+        return settings.JMETER_TIMEOUT
+    return max(settings.JMETER_TIMEOUT, int(planned + max(REPORT_GRACE_SECONDS, planned * 0.1)))
+
+
 # Windows-only Popen flags; resolved lazily so the Windows branches stay importable
 # and testable on POSIX, where these constants do not exist.
 _CREATE_NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
@@ -39,6 +73,7 @@ CONTAINER_LABEL = 'jmeter-agent'  # every run container carries it, so orphans c
 DOCKER_ENVIRONMENT = {'DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_CONFIG', 'DOCKER_CERT_PATH', 'DOCKER_TLS_VERIFY'}
 OUTPUT_CHECK_SECONDS = 5.0
 PROGRESS_TICK_SECONDS = 5.0
+REPORT_GRACE_SECONDS = 300  # After the planned duration: threads finishing, the HTML dashboard being written.
 
 
 def _is_pid_running(pid: Optional[int]) -> bool:
@@ -148,21 +183,20 @@ class JMeterExecutor:
         cmd.append("-Jjmeter.save.saveservice.assertion_results_failure_message=true")
         return cmd, jtl_path, log_path, html_report_dir
 
-    @staticmethod
-    def validate_execution_id(execution_id: str):
-        import re
-        if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,49}", execution_id)
-                or execution_id.endswith('.')
-                or execution_id.split('.')[0].upper() in {'CON', 'PRN', 'AUX', 'NUL',
-                    *{f'COM{i}' for i in range(1, 10)}, *{f'LPT{i}' for i in range(1, 10)}}):
-            raise ValueError('Invalid execution ID')
+    def owns(self, execution_id: str) -> bool:
+        """Whether this executor still holds the run's process or container, started or being stopped."""
+        return execution_id in self._running_processes
+
+    def cleanup_failed(self, execution_id: str) -> bool:
+        """Whether stopping the run was tried and failed, so its process may still be generating load."""
+        return bool(self._running_processes.get(execution_id, {}).get('cleanup_failed'))
 
     async def execute(self, jmx_path: str, execution_id: str,
                       progress_callback: Optional[Callable[[int], None]] = None, *,
                       remote_engines: Optional[list[str]] = None,
                       working_directory: Optional[str] = None, trial: bool = False) -> TestExecutionInfo:
         """Run one owned child process; queued and active work share cancellation."""
-        self.validate_execution_id(execution_id)
+        validate_id(execution_id)
         if any(entry.get('cleanup_failed') for entry in self._running_processes.values()):
             raise RuntimeError('A previous execution could not be stopped; clean it up before starting another test')
         if execution_id in self._running_processes:
@@ -183,6 +217,9 @@ class JMeterExecutor:
         cmd, jtl_path, log_path, _ = self._build_command(jmx_path, report_dir, trial)
         if remote_engines:
             cmd += ['-R', ','.join(remote_engines)]
+            if not settings.JMETER_REMOTE_SSL_ENABLED:
+                # JMeter 5 expects an RMI keystore unless told otherwise; engines must be started the same way.
+                cmd.append('-Jserver.rmi.ssl.disable=true')
         info = TestExecutionInfo(id=execution_id, test_plan_id='', status=TestExecutionStatus.PENDING,
                                  start_time=datetime.now(), jmx_path=jmx_path, report_dir=report_dir,
                                  log_path=log_path)
@@ -198,12 +235,12 @@ class JMeterExecutor:
                     raise RuntimeError('Previous execution cleanup is incomplete')
                 info.status = TestExecutionStatus.RUNNING
                 try:
-                    launcher = self._execute_windows_terminal if self.system == 'Windows' else self._execute_unix_terminal
-                    pid = await launcher(cmd, execution_id, flag_file)
+                    pid = await self._launch(cmd, execution_id, flag_file)
                     entry['pid'] = pid
                     if progress_callback:
                         monitor = asyncio.create_task(self._monitor_progress(execution_id, flag_file, progress_callback))
-                    await self._wait_within_output_limit(flag_file, pid, jtl_path, report_dir)
+                    entry['timeout'] = await asyncio.to_thread(run_timeout, jmx_path)
+                    await self._wait_within_output_limit(flag_file, pid, jtl_path, report_dir, entry['timeout'])
                     flag = ''
                     if os.path.exists(flag_file):
                         with open(flag_file, encoding='ascii') as stream:
@@ -223,7 +260,7 @@ class JMeterExecutor:
                 except asyncio.TimeoutError:
                     await asyncio.to_thread(self._kill_process, execution_id)
                     info.status = TestExecutionStatus.FAILED
-                    info.error_message = f'Test timed out after {settings.JMETER_TIMEOUT}s'
+                    info.error_message = f"Test timed out after {entry.get('timeout', settings.JMETER_TIMEOUT)}s"
                 except Exception as error:
                     await asyncio.to_thread(self._kill_process, execution_id)
                     info.status = TestExecutionStatus.FAILED
@@ -279,14 +316,14 @@ class JMeterExecutor:
                 lexer.commenters = ''
                 lexer.escape = ''  # Backslashes in Windows paths are data, not shell escapes.
                 return list(lexer)
-            defaults = []
+            defaults, jvm = [], jvm_environment()
             if not os.environ.get('JMETER_COMPLETE_ARGS'):
                 defaults = ['-XX:+HeapDumpOnOutOfMemoryError', '-Djava.security.egd=file:/dev/urandom']
-                defaults += options(os.environ.get('HEAP', '-Xms1g -Xmx1g -XX:MaxMetaspaceSize=256m'))
-                defaults += options(os.environ.get('GC_ALGO', '-XX:+UseG1GC -XX:MaxGCPauseMillis=100 -XX:G1ReservePercent=20'))
+                defaults += options(jvm['HEAP'])
+                defaults += options(jvm['GC_ALGO'])
                 for variable in ('JAVA9_OPTS', 'VERBOSE_GC', 'DDRAW', 'JMETER_LANGUAGE', 'RUN_IN_DOCKER'):
                     defaults += options(os.environ.get(variable, ''))
-            jvm_args = defaults + options(os.environ.get('JMETER_OPTS', '')) + options(os.environ.get('JVM_ARGS', ''))
+            jvm_args = defaults + options(os.environ.get('JMETER_OPTS', '')) + options(jvm.get('JVM_ARGS', ''))
             command = [java, *jvm_args, '-jar', jar, *command[1:]]
         console_path = os.path.join(os.path.dirname(flag_file), 'console.log')
         console = open(console_path, 'ab')
@@ -314,7 +351,11 @@ class JMeterExecutor:
         if settings.JMETER_EXECUTION_MODE == 'container':
             # Only the Docker CLI needs these; a local JMeter would hand scripts the daemon.
             allowed |= DOCKER_ENVIRONMENT
-        return {key: value for key, value in os.environ.items() if key.upper() in allowed}
+        environment = {key: value for key, value in os.environ.items() if key.upper() in allowed}
+        if settings.JMETER_EXECUTION_MODE != 'container':
+            # bin/jmeter reads these on POSIX; the Windows launch builds the same Java arguments itself.
+            environment.update(jvm_environment())
+        return environment
 
     def _container_command(self, command, entry, execution_id=''):
         import re
@@ -375,19 +416,17 @@ class JMeterExecutor:
         entry.update(container_name=name, docker_path=docker)
         return [*argv, '--entrypoint', 'jmeter', image, *remapped]
 
-    async def _execute_windows_terminal(self, cmd: list, execution_id: str, flag_file: str) -> int:
+    async def _launch(self, cmd: list, execution_id: str, flag_file: str) -> int:
+        """Start the process; the one seam tests replace to run without JMeter."""
         return self._start_process(cmd, execution_id, flag_file)
 
-    async def _execute_unix_terminal(self, cmd: list, execution_id: str, flag_file: str) -> int:
-        return self._start_process(cmd, execution_id, flag_file)
-
-    async def _wait_within_output_limit(self, flag_file, pid, jtl_path, report_dir):
+    async def _wait_within_output_limit(self, flag_file, pid, jtl_path, report_dir, timeout=None):
         """Wait for JMeter, stopping it if its output could fill the disk.
 
         Results, logs and reports are written straight to the host in both modes.
         """
         waiting = asyncio.ensure_future(
-            self._wait_for_completion(flag_file, settings.JMETER_TIMEOUT, pid=pid, jtl_path=jtl_path))
+            self._wait_for_completion(flag_file, timeout or settings.JMETER_TIMEOUT, pid=pid, jtl_path=jtl_path))
         limit_mb = settings.JMETER_MAX_OUTPUT_MB
         try:
             while limit_mb > 0:
@@ -583,61 +622,6 @@ class JMeterExecutor:
                 return "Unknown error (check logs)"
         except Exception:
             return "Failed to read log file"
-
-
-    async def export_junit_xml(self, jtl_path: str, output_path: str,
-                               test_name: str = "JMeter Test") -> str:
-        """Export a JTL result file as JUnit XML for CI/CD integration.
-
-        Args:
-            jtl_path: Path to the JTL result file.
-            output_path: Output path for the JUnit XML file.
-            test_name: Test suite name for the XML.
-
-        Returns:
-            Path to the generated JUnit XML file.
-        """
-        from app.services.jmeter.report_parser import ReportParser
-        parser = ReportParser()
-        summary = await asyncio.to_thread(parser.parse_jtl, jtl_path)
-
-        # Build JUnit XML
-        testsuite = ET.Element("testsuite")
-        testsuite.set("name", test_name)
-        testsuite.set("tests", str(summary.total_requests))
-        failures = int(summary.error_rate / 100 * summary.total_requests)
-        testsuite.set("failures", str(failures))
-        testsuite.set("errors", "0")
-        testsuite.set("time", str(round(summary.avg_response_time / 1000, 2)))
-        testsuite.set("timestamp", datetime.now().isoformat())
-
-        # Per-label test cases
-        per_label = getattr(summary, "per_label", None) or {}
-        for label, stats in per_label.items():
-            testcase = ET.SubElement(testsuite, "testcase")
-            testcase.set("classname", test_name)
-            testcase.set("name", label)
-            testcase.set("time", str(round(stats.get("avg_response_time", 0) / 1000, 2)))
-            if stats.get("error_rate", 0) > 0:
-                failure = ET.SubElement(testcase, "failure")
-                failure.set("message", f"Error rate: {stats['error_rate']}%")
-                failure.text = f"P95: {stats.get('p95_response_time', 'N/A')}ms, "
-                failure.text += f"P99: {stats.get('p99_response_time', 'N/A')}ms"
-
-        # If no per-label data, create one test case
-        if not per_label:
-            testcase = ET.SubElement(testsuite, "testcase")
-            testcase.set("classname", test_name)
-            testcase.set("name", "All Requests")
-            testcase.set("time", str(round(summary.avg_response_time / 1000, 2)))
-            if failures > 0:
-                failure = ET.SubElement(testcase, "failure")
-                failure.set("message", f"Error rate: {summary.error_rate}%")
-
-        tree = ET.ElementTree(testsuite)
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        tree.write(output_path, encoding="utf-8", xml_declaration=True)
-        return output_path
 
 
 def _directory_size(path: str) -> int:

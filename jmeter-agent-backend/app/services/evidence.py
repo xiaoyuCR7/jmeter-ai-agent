@@ -108,17 +108,45 @@ async def build_evidence(execution, summary: DetailedTestSummary) -> ExecutionEv
 
 
 def _load_generator(before: Optional[dict], after: Optional[dict]) -> Optional[dict]:
-    """CPU and memory of the machine running JMeter, just before and just after the run."""
+    """CPU and memory of the machine running JMeter: before, after and, sampled every few seconds, during the run.
+
+    ``saturated`` means the machine spent a fifth of the run or more at its limit, so the run measured
+    the load generator as much as the target (see jmeter/load_generator.py).
+    """
     def usage(snapshot):
         return {key: snapshot.get(key) for key in ('cpu_percent', 'memory_percent')} if snapshot else None
-    return {'before': usage(before), 'after': usage(after)} if before or after else None
+    if not before and not after:
+        return None
+    machine = {'before': usage(before), 'after': usage(after)}
+    during = (after or {}).get('during')
+    if during:
+        machine['during'] = during
+        machine['saturated'] = bool(during.get('saturated'))
+    return machine
+
+
+def load_generator_saturated(execution) -> bool:
+    """Whether the run's own machine was at its limit for much of the run."""
+    get = execution.get if isinstance(execution, dict) else lambda key, default=None: getattr(execution, key, default)
+    return bool(((get('resource_snapshot_post') or {}).get('during') or {}).get('saturated'))
 
 
 def _format_load_generator(machine: Optional[dict]) -> str:
     if not machine:
         return ''
-    return (f'## 压测机资源（运行前后各一次）\n{json.dumps(machine, ensure_ascii=False)}'
-            '\n这只是起止两个时刻，不代表运行期间的峰值。运行前已经很高时，要考虑压测机本身限制了负载。')
+    during = machine.get('during')
+    if not during:
+        return (f'## 压测机资源（运行前后各一次）\n{json.dumps(machine, ensure_ascii=False)}'
+                '\n这只是起止两个时刻，不代表运行期间的峰值。运行前已经很高时，要考虑压测机本身限制了负载。')
+    text = (f'## 压测机资源（运行期间每 {during.get("interval_seconds", 5):g} 秒采样一次，共 {during.get("samples")} 次）\n'
+            f'{json.dumps(machine, ensure_ascii=False)}')
+    if machine.get('saturated'):
+        share = float(during.get('saturated_share') or 0) * 100
+        return (text + f'\n**压测机饱和**：运行期间有 {share:.0f}% 的时间 CPU 或内存达到上限'
+                f'（CPU 峰值 {during.get("cpu_peak")}%）。这次测到的响应时间和吞吐量受压测机自身限制，'
+                '不能当作被测系统的性能；必须在整体评估和分析限制里写明，并建议降低单机负载或改用分布式后重测。'
+                '不要据此提出服务端瓶颈的假设。')
+    return text + '\n压测机在运行期间没有达到上限，结果可以按被测系统的表现解读。'
 
 
 def format_for_prompt(evidence: ExecutionEvidence) -> str:

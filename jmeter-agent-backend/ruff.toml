@@ -1,0 +1,20 @@
+# Lint rules for the backend. Run: ruff check app scripts tests
+# CI runs exactly this (see .github/workflows/quality.yml); the version is pinned in requirements-dev.in.
+target-version = "py311"
+line-length = 120
+
+[lint]
+# Only rules that find mistakes, not style:
+#   F    pyflakes: unused imports and variables, undefined names, bad format strings
+#   E9   syntax errors
+#   B006 mutable default arguments      B904 "raise" inside "except" that loses the cause
+#   PLE  pylint errors (await outside async, bad string formats and the like)
+select = ["F", "E9", "B006", "B904", "PLE"]
+# Not enabled yet: ASYNC (blocking file calls inside async functions) reports about 110 places, most of
+# them small reads next to a subprocess that runs for minutes. Worth a pass of its own.
+
+[lint.per-file-ignores]
+# Packages re-export names on purpose.
+"__init__.py" = ["F401"]
+# conftest.py sets the environment before it imports the app.
+"tests/conftest.py" = ["E402"]

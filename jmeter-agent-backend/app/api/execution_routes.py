@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Optional
 
 from app.core.errors import ServiceError
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Query
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Query, Request
 from fastapi.responses import FileResponse
 from fastapi.responses import StreamingResponse
 from app.core.config import settings
@@ -21,7 +21,6 @@ from app.services.jmeter.script_risk import ScriptApprovalRequired
 from app.services.jmeter import live_stats
 from app.services.jmeter.environment import ProductionRunNeedsConfirmation
 from app.services.jmeter.sla_engine import SLAEngine, SLAConfig
-from app.services.ai.agent.tools.jmeter import resource_hooks
 from app.services.ai.agents import AnalysisAgent
 from app.services.ai.agents.analysis_agent import AnalysisExecutionError
 from app.services.storage import store
@@ -53,13 +52,11 @@ async def execute_test_plan(
         raise HTTPException(status_code=404, detail="Test plan not found")
     
     plan = store.test_plans[plan_id]
-    # The user chose to run it now, so a busy machine is recorded for the report, not waited on.
-    before_execute, postprocess = resource_hooks(False, {}, wait=False)
+    # The user chose to run it now, so a busy machine is recorded for the report (as for every run), not waited on.
     try:
         return await execution_lifecycle.submit(
             plan.jmx_path, test_plan_id=plan_id, approved_sha256=approved_sha256,
-            confirm_production=confirm_production,
-            before_execute=before_execute, postprocess=postprocess, ai_model=ai_model)
+            confirm_production=confirm_production, ai_model=ai_model)
     except (ProductionRunNeedsConfirmation, ScriptApprovalRequired) as error:
         raise _approval_needed(error) from error
     except (ValueError, FileExistsError) as error:
@@ -78,7 +75,8 @@ async def list_executions(
     from app.services import requirements as requirements_service
     execs = [e for e in store.executions.values() if not project_id or e.project_id == project_id]
     execs.sort(key=lambda e: e.start_time or datetime.min, reverse=True)
-    page = execs[offset:offset + limit]
+    # The scan gives headline copies; the rows shown need the whole run (per-request numbers for the verdict).
+    page = [store.get_execution(e.id) or e for e in execs[offset:offset + limit]]
     project_requirements = {}
     for pid in {e.project_id for e in page}:
         try:
@@ -125,7 +123,7 @@ async def list_executions(
 async def list_project_executions(project_id: str):
     """列出指定项目下的执行记录"""
     await ensure_default_project()
-    return [e for e in store.executions.values() if e.project_id == project_id]
+    return [store.get_execution(e.id) or e for e in store.executions.values() if e.project_id == project_id]
 
 
 @router.get("/executions/{execution_id}", response_model=TestExecutionInfo)
@@ -136,12 +134,31 @@ async def get_execution(execution_id: str):
     return store.executions[execution_id]
 
 
-@router.get("/executions/{execution_id}/live")
-async def get_execution_live(execution_id: str):
-    """A running execution's numbers so far, in 5-second steps; ``available`` is false before and after the run."""
-    execution = store.executions.get(execution_id)
+@router.get("/executions/{execution_id}/junit.xml")
+async def get_execution_junit(execution_id: str):
+    """这次运行的 JUnit XML：每个请求一个用例，有失败请求的记为失败，供 CI 展示测试结果"""
+    from fastapi.responses import Response
+    from app.services.jmeter.junit import junit_xml
+    execution = store.get_execution(execution_id)
     if execution is None:
         raise HTTPException(status_code=404, detail="Execution not found")
+    if not execution.summary or not execution.summary.total_requests:
+        raise HTTPException(status_code=409, detail="Execution has no usable parsed report")
+    plan = store.get_test_plan(execution.test_plan_id)
+    content = junit_xml(execution.summary, plan.name if plan else execution.id,
+                        execution.start_time.isoformat() if execution.start_time else None)
+    return Response(content, media_type="application/xml")
+
+
+LIVE_PUSH_SECONDS = 2.0   # How often the stream looks for something new to send.
+LIVE_KEEPALIVE_SECONDS = 15.0
+
+
+def _live_view(execution_id: str):
+    """What the live panel shows for a run right now; None when the run is unknown."""
+    execution = store.executions.get(execution_id)
+    if execution is None:
+        return None
     live = live_stats.get(execution_id)
     plan = store.get_test_plan(execution.test_plan_id)
     base = {
@@ -154,6 +171,48 @@ async def get_execution_live(execution_id: str):
     if live is None:
         return base | {'available': False}
     return base | {'available': True} | live.snapshot()
+
+
+@router.get("/executions/{execution_id}/live")
+async def get_execution_live(execution_id: str):
+    """A running execution's numbers so far, in 5-second steps; ``available`` is false before and after the run."""
+    view = _live_view(execution_id)
+    if view is None:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    return view
+
+
+@router.get("/executions/{execution_id}/live/stream")
+async def stream_execution_live(execution_id: str, request: Request):
+    """The same view as an event stream: sent when it changes, until the run ends.
+
+    The panel used to ask every three seconds whether or not anything was new. Here the server sends a
+    view only when it differs from the last one, a comment line now and then so proxies keep the
+    connection, and closes after the view in which the run has ended.
+    """
+    if _live_view(execution_id) is None:
+        raise HTTPException(status_code=404, detail="Execution not found")
+
+    async def events():
+        sent, quiet = None, 0.0
+        while True:
+            view = _live_view(execution_id)
+            if view is None:
+                return  # Deleted while being watched.
+            encoded = json.dumps(view, ensure_ascii=False, default=str)
+            if encoded != sent:
+                sent, quiet = encoded, 0.0
+                yield f"data: {encoded}\n\n"
+            elif quiet >= LIVE_KEEPALIVE_SECONDS:
+                quiet = 0.0
+                yield ": keep-alive\n\n"
+            if view['status'] not in ('pending', 'running') or await request.is_disconnected():
+                return
+            await asyncio.sleep(LIVE_PUSH_SECONDS)
+            quiet += LIVE_PUSH_SECONDS
+
+    return StreamingResponse(events(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
 
 @router.post("/executions/{execution_id}/cancel")

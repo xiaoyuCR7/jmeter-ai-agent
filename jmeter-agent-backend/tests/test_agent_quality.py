@@ -3,11 +3,10 @@ import json
 import xml.etree.ElementTree as ET
 from io import StringIO
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
 
-from app.models.schemas import (APIEndpoint, DetailedTestSummary, ExtractionRule, ReportAnalysis,
+from app.models.schemas import (APIEndpoint, ExtractionRule, ReportAnalysis,
                                 TestConfig as LoadConfig, VariableBinding)
 from app.services import run_diagnostics
 from app.services.ai.adapters.base import BaseAIAdapter, ToolCallRequest, ToolCallResponse

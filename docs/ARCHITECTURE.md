@@ -19,12 +19,15 @@ jmeter-agent-backend/app/
 ├── services/
 │   ├── execution_lifecycle.py   所有运行的唯一入口：prepare → run → post_run，可以按线程数缩放计划
 │   ├── post_run.py              每次运行结束后：写 AI 报告、记录事实和假设
-│   ├── experiments.py           验证运行、容量探索、CI 门禁
+│   ├── experiments.py           验证运行、容量探索（逐级加压 → 复测确认 → 在通过与不通过之间细化）、CI 门禁
+│   ├── report_retention.py      清理旧运行的 HTML 报告和原始结果，保留摘要、AI 报告和历史
 │   ├── evidence.py              需求判定、基线对比、服务端指标、运行诊断，汇总成一份证据
 │   ├── run_diagnostics.py       按接口和时间段的诊断，以及 focus（最该先看的接口）
 │   ├── jmeter/
 │   │   ├── executor.py          启动 JMeter 子进程或容器
-│   │   ├── run_guard.py         运行中读 JTL，请求几乎全部失败时停止运行
+│   │   ├── run_guard.py         运行中读 JTL，请求几乎全部失败、压测机内存将尽（或响应时间成倍恶化，默认关）时停止运行
+│   │   ├── load_generator.py    运行期间每 5 秒采样压测机的 CPU 和内存，判断压测机是否饱和
+│   │   ├── test_scheduler.py    压测机是否空闲到可以开始：阈值和两次运行之间的冷却
 │   │   ├── live_stats.py        把运行中读到的结果按 5 秒汇总，供实时面板（GET /executions/{id}/live）
 │   │   ├── load_variants.py     按比例缩放线程组，不改动计划文件
 │   │   └── report_parser.py     流式解析 JTL，分位数是精确值
@@ -45,7 +48,7 @@ jmeter-agent-frontend/src/       Vue 3 + Element Plus
    - 先检查计划里的脚本，没被批准就拒绝运行。
    - 再套用当前激活的环境；如果是生产环境，要用户确认。
    - 按需缩放线程数，然后把实际要跑的计划存一份快照到 `reports/<id>/snapshot.jmx`。
-2. `run` 启动 JMeter，同时启动 `run_guard`。如果运行被守护停止，`error_message` 里会写明原因。守护读到的每一行结果也交给 `live_stats` 汇总，只存在内存里，运行结束即丢弃；进度按计划时长和已运行时间计算（计划按循环次数结束时无法预估）。
+2. `run` 启动 JMeter，同时启动 `run_guard` 和压测机采样（`load_generator`）。无人值守的运行（助手发起、验证运行、容量探索的每一步）在启动前等压测机空闲并过了冷却时间；手动发起的只记录不等待。压测机在运行期间有五分之一以上的时间达到上限，就记为饱和：证据和报告会写明这次的数字不能当作被测系统的性能，容量探索到此停止。如果运行被守护停止，`error_message` 里会写明原因。守护读到的每一行结果也交给 `live_stats` 汇总，只存在内存里，运行结束即丢弃；进度按计划时长和已运行时间计算（计划按循环次数结束时无法预估）。
 3. 运行结束后解析 JTL，发出 `finished` 事件（Webhook 由这个事件触发），然后调用 `post_run.finish_run`。
 4. `post_run` 汇总证据，调用 `TestAnalyzer` 写报告。报告使用的语言由 `REPORT_LANGUAGE` 或页面语言决定。
    - 需求的范围有三种：`global`（整体）、`each`（每个接口各自都要满足，按最差的接口判定）、`transaction`（某一个接口，写成 `METHOD /path`，文档里的路径模板如 `/items/{id}` 也能对上采样器）。
@@ -72,12 +75,18 @@ jmeter-agent-frontend/src/       Vue 3 + Element Plus
 ## 存储
 
 - 业务数据（项目、计划、执行、环境、基线）存在 SQLAlchemy async + SQLite 里。`storage.store` 是它在内存里的读缓存，启动时加载一次，所有写入都先经过 `db_store`。
+  - 项目和计划完整缓存。运行只缓存概要（整体指标，不含逐接口明细和 AI 报告），最近用到的 `EXECUTION_CACHE_SIZE` 个保留完整内容，其余按 ID 查询时再从数据库读回（`ExecutionCache`）。遍历 `store.executions` 得到的可能是概要副本（`detail_loaded=False`），需要明细时按 ID 再取；概要副本不能保存。
+  - 表结构的维护分两类（`models/db.py`）：只增不减的补列、补索引每次启动都检查；会删除东西的改动是带编号的一次性迁移，记录在 `schema_migrations` 表里。
 - 服务层（`app/services`）不依赖 Web 层：拒绝请求时抛 `app.core.errors.ServiceError(状态码, 说明)`，由 `main.py` 统一转成 HTTP 响应；agent 工具和 MCP 看到的是说明文字。所有路由都在 `app/api/routes.py` 里注册。
 - 记忆数据和业务数据在同一个 SQLite 文件里，但各自用独立的表和连接：
   - 事实和假设用 aiosqlite；
   - 经验（`experience.py`）的读写量很小，用同步 sqlite3，在线程里执行。
 - 容量探索的记录是 `BASE_DIR/capacity_searches/*.json`，每次探索一个文件。
 - 模型配置在 `ai_models_config.json` 里，这个文件被 git 忽略。
+
+## 语言
+
+后端自己写的消息（运行被停止的原因、请求被拒绝的原因、计划检查发现的问题）中英文各写一份：`tr('中文', 'English')`（`core/text.py`）。用哪一份由请求决定：界面每次调用都带 `lang` 参数和 Accept-Language 头，请求发起的后台工作（一次运行、一次容量探索）沿用它；没有请求时用 `I18N_DEFAULT_LANG`。JMeter 组件和函数的标签写在注册表里（中文），英文在 `jmeter/registry_en.py`，返回时替换；有测试保证每个标签都有英文。给模型看的提示词和证据只用一种语言，模型用什么语言回答另行指示。
 
 ## 模型适配
 

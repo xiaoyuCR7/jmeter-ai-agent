@@ -11,28 +11,49 @@ logger = logging.getLogger(__name__)
 PATHS_CONFIG_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "paths_config.json")
 
 
+_paths_cache: Optional[tuple] = None  # (file, mtime_ns, size, config)
+
+
 def load_paths_config() -> Dict[str, str]:
-    """加载用户自定义的路径配置"""
-    if os.path.exists(PATHS_CONFIG_FILE):
-        try:
-            with open(PATHS_CONFIG_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception as error:
-            # Not silent: the app would quietly fall back to default folders and the user's choice is lost.
-            logger.warning("Ignoring unreadable %s: %s", PATHS_CONFIG_FILE, error)
-    return {}
+    """加载用户自定义的路径配置
+
+    settings.TEST_PLANS_DIR and REPORTS_DIR ask on every access, several times per request. The file is
+    parsed again only when it changed on disk; a stat is all an unchanged file costs.
+    """
+    global _paths_cache
+    try:
+        stat = os.stat(PATHS_CONFIG_FILE)
+    except OSError:
+        _paths_cache = None
+        return {}
+    key = (PATHS_CONFIG_FILE, stat.st_mtime_ns, stat.st_size)
+    if _paths_cache is not None and _paths_cache[:3] == key:
+        return dict(_paths_cache[3])
+    try:
+        with open(PATHS_CONFIG_FILE, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        if not isinstance(config, dict):
+            raise ValueError('expected a JSON object')
+    except Exception as error:
+        # Not silent: the app would quietly fall back to default folders and the user's choice is lost.
+        logger.warning("Ignoring unreadable %s: %s", PATHS_CONFIG_FILE, error)
+        config = {}
+    _paths_cache = (*key, config)
+    return dict(config)
 
 
 def save_paths_config(config: Dict[str, str]):
     """保存用户自定义的路径配置"""
+    global _paths_cache
     with open(PATHS_CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump(config, f, ensure_ascii=False, indent=2)
+    _paths_cache = None  # Two saves within one clock tick would otherwise look unchanged.
 
 
 class Settings(BaseSettings):
     APP_NAME: str = "JMeter Agent"
     APP_VERSION: str = "1.0.0"
-    DEBUG: bool = True
+    DEBUG: bool = False  # True restarts the backend on every source change, which ends the runs in flight.
     
     # Server
     HOST: str = "127.0.0.1"
@@ -80,6 +101,7 @@ class Settings(BaseSettings):
     DEFAULT_AI_MODEL: str = ""
 
     # JMeter
+    # Stops a run that never ends. A plan with a fixed duration gets that duration plus time for its report.
     JMETER_TIMEOUT: int = 3600  # seconds
     # Run guard: stop a run whose recent requests nearly all fail (see services/jmeter/run_guard.py)
     RUN_GUARD_ENABLED: bool = True
@@ -87,9 +109,17 @@ class Settings(BaseSettings):
     RUN_GUARD_WINDOW_SECONDS: float = 30.0
     RUN_GUARD_MIN_SAMPLES: int = 50              # fewer requests than this in the window say nothing
     RUN_GUARD_GRACE_SECONDS: float = 30.0        # from the first sample; warm-up errors are common
+    RUN_GUARD_MEMORY_PERCENT: float = 97.0       # stop when this machine's memory is this full; 0 = off
+    # Stop when responses take this many times longer than at the start of the run; 0 = off. Off by
+    # default: stress and capacity tests are meant to slow the target down.
+    RUN_GUARD_LATENCY_FACTOR: float = 0.0
     REPORT_LANGUAGE: str = ""  # zh-CN or en for reports written after a run; empty follows I18N_DEFAULT_LANG
     AUTO_ANALYSIS_ENABLED: bool = True  # Off to spare model calls on batches; facts are recorded either way
     JMETER_MAX_OUTPUT_MB: int = 10240  # stop a run whose report directory grows past this; 0 = no limit
+    # Remove the HTML dashboard (about 3 MB each) of runs that ended more than this many days ago; 0 keeps
+    # everything. The summary, AI report, logs and history stay. See services/report_retention.py.
+    REPORTS_RETENTION_DAYS: int = Field(default=0, ge=0)
+    REPORTS_RETENTION_INCLUDE_JTL: bool = False  # Also remove those runs' raw result.jtl
 
     # Resource monitoring thresholds (CPU/memory usage %)
     # Tests will wait or be deferred when usage exceeds these thresholds
@@ -99,6 +129,9 @@ class Settings(BaseSettings):
     RESOURCE_MAX_WAIT_SECONDS: float = 300.0   # Max time to wait for resources to free up
     RESOURCE_MAX_CONCURRENT_TESTS: int = 2     # Max number of JMeter tests running simultaneously
 
+    # Runs kept whole in memory (summary, AI report); the rest are read back from the database when opened.
+    EXECUTION_CACHE_SIZE: int = Field(default=256, ge=1)
+
     # Agent
     AGENT_TOOL_TIMEOUT_SECONDS: float = 600.0    # max seconds per tool call (10 min)
     AGENT_MAX_CONCURRENT: int = 3                # max concurrent agent executions
@@ -106,8 +139,8 @@ class Settings(BaseSettings):
     AGENT_MAX_TOOL_CALLS_PER_RESPONSE: int = 8
 
     # i18n
-    I18N_DEFAULT_LANG: str = "zh-CN"             # default language
-    I18N_ENABLED_LANGS: str = "zh-CN,en"         # comma-separated enabled languages
+    # zh-CN or en: the language of messages when no request says otherwise (an MCP client, a scheduled job).
+    I18N_DEFAULT_LANG: str = "zh-CN"
 
     # CI/CD integration
     WEBHOOK_URL: Optional[str] = None            # URL to POST execution lifecycle events to
@@ -118,14 +151,28 @@ class Settings(BaseSettings):
     WEBHOOK_ON_ANALYSIS: bool = True             # analysis.completed (post-run AI analysis)
     WEBHOOK_INCLUDE_ANALYSIS: bool = False       # also send the AI's full assessment, not just its conclusion
 
-    # JMeter JVM configuration
+    # JMeter JVM configuration (local mode; a HEAP, GC_ALGO or JVM_ARGS environment variable wins).
+    # Container mode uses the image's own defaults inside JMETER_CONTAINER_MEMORY_MB.
     JMETER_HEAP_MIN: str = "256m"                # -Xms initial heap
     JMETER_HEAP_MAX: str = "2g"                  # -Xmx max heap
-    JMETER_GC_OPTS: str = "-XX:+UseG1GC -XX:MaxGCPauseMillis=100"  # GC options
-    JMETER_EXTRA_OPTS: str = ""                  # Additional JVM options
+    JMETER_GC_OPTS: str = "-XX:+UseG1GC -XX:MaxGCPauseMillis=100 -XX:G1ReservePercent=20"  # GC options
+    JMETER_EXTRA_OPTS: str = ""                  # Additional JVM options, placed before JVM_ARGS
+
+    @field_validator('JMETER_HEAP_MIN', 'JMETER_HEAP_MAX')
+    @classmethod
+    def _heap_size(cls, value: str) -> str:
+        import re
+        if not re.fullmatch(r'[1-9][0-9]*[kKmMgG]', value.strip()):
+            raise ValueError('heap sizes look like 512m or 2g')
+        return value.strip()
+
+    # Logging: the console and a rotating file (default BASE_DIR/logs/jmeter-agent.log; "off" for none).
+    LOG_LEVEL: str = "INFO"
+    LOG_FILE: str = ""
     # Distributed testing — remote engine hosts
     JMETER_REMOTE_ENGINES: str = ""        # Comma-separated host:port list, e.g. "slave1:1099,slave2:1099"
-    JMETER_REMOTE_SSL_ENABLED: bool = False # Whether to use SSL for RMI connections
+    # RMI over SSL needs rmi_keystore.jks on every engine; off passes server.rmi.ssl.disable=true.
+    JMETER_REMOTE_SSL_ENABLED: bool = False
     JMETER_DISTRIBUTED_MAX_ENGINES: int = 4 # Max concurrent remote engines
     
     model_config = SettingsConfigDict(env_file=".env", extra="allow")
@@ -187,9 +234,36 @@ def load_user_model_configs() -> List[Dict[str, Any]]:
 
 
 def save_user_model_configs(configs: List[Dict[str, Any]]):
-    """保存用户自定义模型配置到 JSON 文件"""
-    with open(settings.AI_MODELS_CONFIG_FILE, 'w', encoding='utf-8') as f:
-        json.dump(configs, f, ensure_ascii=False, indent=2)
+    """保存用户自定义模型配置到 JSON 文件
+
+    The file holds API keys. It is written to a temporary file only its owner can read (mode 0600 on
+    POSIX; on Windows the folder's own permissions apply) and swapped in whole, so a crash never
+    leaves half a file. A key written as ``env:NAME`` is not in the file at all (see resolve_api_key).
+    """
+    import tempfile
+    path = settings.AI_MODELS_CONFIG_FILE
+    descriptor, temporary = tempfile.mkstemp(dir=os.path.dirname(path) or '.', prefix='.ai_models_')
+    try:
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as f:
+            json.dump(configs, f, ensure_ascii=False, indent=2)
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.remove(temporary)
+        except OSError:
+            pass
+        raise
+
+
+API_KEY_ENV_PREFIX = 'env:'
+
+
+def resolve_api_key(value: Optional[str]) -> str:
+    """The key to send: ``env:OPENAI_API_KEY`` reads that environment variable, so the key need not be on disk."""
+    value = (value or '').strip()
+    if value.lower().startswith(API_KEY_ENV_PREFIX):
+        return os.environ.get(value[len(API_KEY_ENV_PREFIX):].strip(), '')
+    return value
 
 
 def get_all_model_configs() -> List[Dict[str, Any]]:
@@ -204,6 +278,7 @@ def sanitize_model_config(config: Dict[str, Any]) -> Dict[str, Any]:
     used server-side when building adapters.
     """
     safe = dict(config)
-    if safe.get("api_key"):
-        safe["api_key"] = "***"
+    key = str(safe.get("api_key") or "")
+    if key and not key.lower().startswith(API_KEY_ENV_PREFIX):
+        safe["api_key"] = "***"  # A reference to an environment variable names no secret, so it is shown.
     return safe

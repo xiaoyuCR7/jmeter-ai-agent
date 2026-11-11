@@ -176,12 +176,18 @@ Common settings in `jmeter-agent-backend/.env`:
 |---|---|---|
 | `PORT` | Backend port | `8000` |
 | `JMETER_HOME` | JMeter `bin` directory or install root | `<project>/bin` |
-| `JMETER_TIMEOUT` | Max run time in seconds | `3600` |
+| `JMETER_TIMEOUT` | Stops a run that never ends (seconds). A plan with a longer fixed duration gets its duration plus time to write the report | `3600` |
 | `AUTO_ANALYSIS_ENABLED` | Write an AI report after every finished run, whatever started it; measured history is kept either way | `true` |
-| `JMETER_HEAP_MIN` / `JMETER_HEAP_MAX` | JMeter JVM heap | `256m` / `2g` |
+| `JMETER_HEAP_MIN` / `JMETER_HEAP_MAX` | JMeter's JVM heap in local mode; a `HEAP` variable in the backend's environment wins | `256m` / `2g` |
+| `JMETER_GC_OPTS` / `JMETER_EXTRA_OPTS` | GC options and further JVM options (local mode) | G1 / empty |
 | `JMETER_EXECUTION_MODE` | `local` or `container`; see Execution isolation below | `local` |
 | `JMETER_MAX_OUTPUT_MB` | Stop a run whose report directory grows past this; `0` = no limit | `10240` |
-| `RESOURCE_CPU_THRESHOLD` / `RESOURCE_MEMORY_THRESHOLD` | Queue new runs above this load-generator usage (%) | `80` / `85` |
+| `RESOURCE_CPU_THRESHOLD` / `RESOURCE_MEMORY_THRESHOLD` | Above this load-generator usage (%), unattended runs (started by an assistant, verification runs, each capacity step) wait; a run you start by hand is recorded, not held | `80` / `85` |
+| `RESOURCE_COOLDOWN_SECONDS` | Seconds to let the load generator settle between unattended runs | `10` |
+| `REPORTS_RETENTION_DAYS` / `REPORTS_RETENTION_INCLUDE_JTL` | Daily, remove the HTML dashboard (about 3 MB each) of runs older than this many days, optionally with the raw results; `0` keeps everything. Summaries, AI reports and history stay, and the run an active baseline came from is never pruned. Settings → System info can also prune by hand | `0` / `false` |
+| `EXECUTION_CACHE_SIZE` | Runs kept whole in memory (summary detail and AI report); the rest are held in outline and read from the database when opened | `256` |
+| `LOG_LEVEL` / `LOG_FILE` | Backend log level and file (default `logs/jmeter-agent.log`, 5 MB x 3 rotated; `off` for console only) | `INFO` / empty |
+| `I18N_DEFAULT_LANG` | Language of backend messages when no request names one (an MCP client, for example) | `zh-CN` |
 | `DEFAULT_AI_MODEL` | Model ID used when a request names none | first enabled model |
 | `AGENT_CONTEXT_TOKEN_BUDGET` | Token budget for a model whose context window is unknown | `16384` |
 | `AGENT_MAX_CONCURRENT` | AI tasks at once; reports written after runs use at most N-1, leaving one for questions | `3` |
@@ -189,6 +195,8 @@ Common settings in `jmeter-agent-backend/.env`:
 | `RUN_GUARD_ENABLED` | Stop a run whose recent requests nearly all fail | `true` |
 | `RUN_GUARD_ERROR_RATE` / `RUN_GUARD_WINDOW_SECONDS` | Error rate (%) and window (s) that stop a run; two checks in a row must exceed it | `90` / `30` |
 | `RUN_GUARD_MIN_SAMPLES` / `RUN_GUARD_GRACE_SECONDS` | Fewer requests than this in the window decide nothing; nor does the start of the run | `50` / `30` |
+| `RUN_GUARD_MEMORY_PERCENT` | Stop a run when this machine's memory is this full (`0` = off) | `97` |
+| `RUN_GUARD_LATENCY_FACTOR` | Stop a run whose average response time is this many times its starting value (`0` = off; stress tests are meant to slow the target, so it is off by default) | `0` |
 
 Model API keys are not read from `.env`; add models in the UI. They are stored in `jmeter-agent-backend/ai_models_config.json`,
 which git ignores.

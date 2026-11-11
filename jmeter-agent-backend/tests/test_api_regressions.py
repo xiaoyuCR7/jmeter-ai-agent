@@ -11,7 +11,7 @@ from fastapi import HTTPException, UploadFile
 @pytest.mark.asyncio
 async def test_system_resource_sampling_does_not_block_event_loop(monkeypatch):
     import threading
-    from app.api import execution_routes, plan_routes, shared, system_routes, workflow_routes
+    from app.api import system_routes
     from app.services.jmeter.resource_monitor import get_resource_monitor
     caller = threading.get_ident()
     threads = []
@@ -26,7 +26,7 @@ async def test_system_resource_sampling_does_not_block_event_loop(monkeypatch):
 @pytest.mark.asyncio
 async def test_resource_fallback_uses_configured_readiness_thresholds(monkeypatch):
     import psutil
-    from app.api import execution_routes, plan_routes, shared, system_routes, workflow_routes
+    from app.api import shared, system_routes
     from app.services.jmeter.resource_monitor import get_resource_monitor
     def failed():
         raise OSError('fixture unavailable disk')
@@ -58,7 +58,7 @@ async def test_invalid_analysis_is_recorded_on_the_analysis_not_the_report(monke
 
 @pytest.mark.asyncio
 async def test_failed_execution_without_report_directory_is_readable(monkeypatch):
-    from app.api import execution_routes, plan_routes, shared, system_routes, workflow_routes
+    from app.api import execution_routes, plan_routes
     from app.models.schemas import TestExecutionInfo
 
     execution = TestExecutionInfo(id='failed-no-report', test_plan_id='unknown', status='failed',
@@ -134,7 +134,7 @@ def test_utc_now_naive_preserves_legacy_database_contract():
 
 @pytest.mark.asyncio
 async def test_saving_tree_with_new_name_persists_the_rename(monkeypatch, tmp_path):
-    from app.api import execution_routes, plan_routes, shared, system_routes, workflow_routes
+    from app.api import plan_routes
     from app.models.schemas import TestConfig, TestPlanInfo, UpdateJMXTreeRequest
     jmx = tmp_path / 'plan.jmx'
     jmx.write_text('<jmeterTestPlan><hashTree><TestPlan testclass="TestPlan" testname="P"/><hashTree/></hashTree></jmeterTestPlan>',
@@ -154,7 +154,7 @@ async def test_saving_tree_with_new_name_persists_the_rename(monkeypatch, tmp_pa
 
 @pytest.mark.asyncio
 async def test_failed_tree_save_keeps_the_old_file(monkeypatch, tmp_path):
-    from app.api import execution_routes, plan_routes, shared, system_routes, workflow_routes
+    from app.api import plan_routes
     from app.models.schemas import TestConfig, TestPlanInfo, UpdateJMXTreeRequest
     jmx = tmp_path / 'plan.jmx'
     jmx.write_text('<jmeterTestPlan><hashTree><TestPlan testclass="TestPlan" testname="P"/><hashTree/></hashTree></jmeterTestPlan>',
@@ -211,7 +211,7 @@ def test_analysis_prompt_includes_evidence_only_when_given():
 
 async def _workflow_events(monkeypatch, items, lang=None):
     import json
-    from app.api import execution_routes, plan_routes, shared, system_routes, workflow_routes
+    from app.api import plan_routes, workflow_routes
     from app.models.schemas import AIWorkflowRequest
     from app.services.ai.agents import workflow_agent
 

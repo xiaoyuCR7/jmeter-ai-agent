@@ -107,7 +107,7 @@ async def test_a_cancel_notification_stops_a_streamable_request(server):
 
 @pytest.mark.asyncio
 async def test_a_client_that_leaves_takes_its_request_with_it(server, monkeypatch):
-    from app.services.confirmations import ConfirmationManager, confirmations
+    from app.services.confirmations import confirmations
     server.register_tool('danger', 'danger', {}, AsyncMock(), risk='write')
     gone = asyncio.Event()
     async def receive():

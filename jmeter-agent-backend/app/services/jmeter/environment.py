@@ -16,6 +16,7 @@ from typing import Optional
 from urllib.parse import urlsplit
 
 from app.models.schemas import SECRET_MASK
+from app.core.text import tr
 
 MARK = '[环境'
 SECRET_MARK = '[环境·敏感]'
@@ -27,8 +28,11 @@ class ProductionRunNeedsConfirmation(ValueError):
 
     def __init__(self, environment: str, base_url: str, threads: int):
         self.environment, self.base_url, self.threads = environment, base_url, threads
-        super().__init__(f'环境「{environment}」标记为生产环境（{base_url or "未设地址"}），'
-                         f'这次运行共 {threads} 个线程，需要确认后才会开始。')
+        super().__init__(tr(
+            f'环境「{environment}」标记为生产环境（{base_url or "未设地址"}），'
+            f'这次运行共 {threads} 个线程，需要确认后才会开始。',
+            f'Environment "{environment}" is marked as production ({base_url or "no address set"}); this run '
+            f'has {threads} threads and starts only once you confirm it.'))
 
 
 def _origin(base_url: str) -> Optional[dict]:
@@ -120,8 +124,11 @@ def _retarget_hosts(root, target: dict, known: list[dict]) -> tuple[list[str], O
     if not matched and len(hosts) == 1:
         matched = {next(iter(hosts)): None}  # One host only: that is the system under test.
     if not matched:
-        return [], ('计划访问多个主机，没有一个是项目环境里的地址，请求地址保持不变' if hosts else
-                    '计划里没有写死主机，请求地址保持不变')
+        return [], (tr('计划访问多个主机，没有一个是项目环境里的地址，请求地址保持不变',
+                       "The plan calls several hosts and none is one of the project's environment addresses; "
+                       'request addresses were left as they are') if hosts else
+                    tr('计划里没有写死主机，请求地址保持不变',
+                       'The plan names no host itself; request addresses were left as they are'))
     for domain, origin in matched.items():
         old_path = origin['path'] if origin else ''
         for element in hosts[domain]:
@@ -165,7 +172,9 @@ def apply(content: bytes, environment: dict, other_base_urls: list[str]) -> tupl
         tree = _top_tree(root)
     except (ET.ParseError, ValueError):
         # JMeter will say what is wrong with it; the environment cannot be placed in it.
-        applied['note'] = '计划结构无法解析，环境的地址、请求头和变量都没有应用'
+        applied['note'] = tr('计划结构无法解析，环境的地址、请求头和变量都没有应用',
+                             "The plan could not be parsed; the environment's address, headers and variables "
+                             'were not applied')
         return content, applied
     _remove_marked(tree)
     if target is not None:

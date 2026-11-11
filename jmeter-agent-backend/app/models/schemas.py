@@ -478,6 +478,8 @@ class TestExecutionInfo(BaseModel):
     resource_snapshot_pre: Optional[Dict[str, Any]] = None
     resource_snapshot_post: Optional[Dict[str, Any]] = None
     storage_version: int = Field(1, exclude=True, repr=False)
+    # False on a headline copy from a scan of the run cache: no per-request detail, no AI report, never saved.
+    detail_loaded: bool = Field(True, exclude=True, repr=False)
 
 
 class TestReport(BaseModel):

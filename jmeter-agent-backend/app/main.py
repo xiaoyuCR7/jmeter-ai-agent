@@ -22,11 +22,13 @@ from app.api.mcp_routes import init_mcp_server
 from app.core import local_access
 from app.core.config import settings, validate_deployment_security
 from app.core.errors import ServiceError
+from app.core.logging_setup import configure_logging
+from app.core.text import RequestLanguageMiddleware
 from app.middleware.local_guard import (
     LocalAccessMiddleware, OriginGuardMiddleware, ReportSandboxMiddleware, TrustedHostMiddleware,
 )
 from app.models.db import init_db
-from app.services import experiments, notifications, post_run
+from app.services import experiments, notifications, post_run, report_retention
 from app.services.ai.adapters.factory import AIAdapterFactory
 from app.services.ai.memory import fact_ledger, hypothesis_ledger
 from app.services.execution_lifecycle import execution_lifecycle
@@ -46,6 +48,7 @@ async def _stop_monitoring():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     validate_deployment_security()
+    configure_logging()
     # On the console only: this link is a credential and must stay out of log files.
     print(f'Open JMeter Agent: {local_access.access_url()}', flush=True)
     if os.path.exists(frontend_dist):
@@ -84,6 +87,13 @@ async def lifespan(app: FastAPI):
             await asyncio.gather(backfill, return_exceptions=True)
         cleanup.push_async_callback(stop_backfill)
 
+        pruning = asyncio.create_task(report_retention.keep_pruned())
+
+        async def stop_pruning():
+            pruning.cancel()
+            await asyncio.gather(pruning, return_exceptions=True)
+        cleanup.push_async_callback(stop_pruning)
+
         await init_mcp_server()
 
         try:
@@ -115,6 +125,7 @@ async def service_error(_request: Request, error: ServiceError):
 
 # Local single-user tool: no accounts. The access token proves a caller is the user; Origin
 # checks still stop other websites in the same browser from driving the local API.
+app.add_middleware(RequestLanguageMiddleware)  # Innermost: refusals by the guards below stay in English.
 app.add_middleware(LocalAccessMiddleware)
 app.add_middleware(ReportSandboxMiddleware)
 app.add_middleware(OriginGuardMiddleware)

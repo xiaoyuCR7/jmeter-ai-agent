@@ -2,7 +2,6 @@
 
 import asyncio
 import os
-import json
 from typing import Optional
 
 from app.core.config import settings
@@ -12,7 +11,7 @@ from app.services.jmeter.jmx_generator import JMXGenerator, normalize_scenario
 from app.services.jmeter.jmx_parser import parse_jmx, strip_source
 from app.services.jmeter.jmx_builder import build_jmx
 from app.models.schemas import (
-    APIEndpoint, CsvDataFile, ResponseCheck, TestConfig, ExtractionRule, VariableBinding, ExtractionType
+    APIEndpoint, CsvDataFile, ResponseCheck, TestConfig, ExtractionRule, VariableBinding
 )
 
 # A closed loop with no pause measures how fast the threads spin, not how users behave.

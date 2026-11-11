@@ -13,10 +13,8 @@ from app.models.schemas import (
 )
 from app.services import post_run, run_diagnostics
 from app.services.ai import analysis_context
-from app.services.ai.agent.tools import jmeter as jmeter_tools
 from app.services.ai.agent.types import AgentResult
 from app.services.evidence import _load_generator, _format_load_generator
-from app.services.jmeter.test_scheduler import SchedulerDecision
 
 
 def summary():
@@ -70,25 +68,23 @@ async def test_a_run_without_results_gets_no_post_run_work(steps, tmp_path, over
     assert steps == []
 
 
-@pytest.mark.parametrize('decision', [SchedulerDecision.OVERLOADED, SchedulerDecision.WAIT])
-@pytest.mark.asyncio
-async def test_a_run_the_user_started_is_recorded_not_held(monkeypatch, decision):
-    snapshot = SimpleNamespace(cpu_percent=99, memory_percent=90)
-    monkeypatch.setattr(jmeter_tools._scheduler, 'check_readiness', lambda: SimpleNamespace(
-        snapshot=snapshot, decision=decision, message='busy'))
-    monkeypatch.setattr('dataclasses.asdict', lambda value: vars(value))
-    monkeypatch.setattr(jmeter_tools, 'get_resource_monitor', lambda: pytest.fail('must not wait'))
-    before_execute, _ = jmeter_tools.resource_hooks(False, {}, wait=False)
-    execution = SimpleNamespace(status=Status.PENDING, error_message=None, resource_snapshot_pre=None)
-    await before_execute(execution)
-    assert execution.status == Status.PENDING and execution.resource_snapshot_pre['cpu_percent'] == 99
-
-
 def test_the_analysis_is_told_how_busy_the_load_generator_was():
     machine = _load_generator({'cpu_percent': 91, 'memory_percent': 70, 'disk_percent': 5}, None)
     assert machine == {'before': {'cpu_percent': 91, 'memory_percent': 70}, 'after': None}
     assert '压测机' in _format_load_generator(machine) and '91' in _format_load_generator(machine)
     assert _load_generator(None, None) is None and _format_load_generator(None) == ''
+
+
+def test_the_analysis_is_told_when_the_load_generator_was_the_limit():
+    during = {'samples': 24, 'interval_seconds': 5, 'cpu_avg': 93.0, 'cpu_peak': 100.0, 'memory_avg': 60.0,
+              'memory_peak': 61.0, 'saturated_share': 0.75, 'saturated': True}
+    machine = _load_generator({'cpu_percent': 12, 'memory_percent': 50},
+                              {'cpu_percent': 30, 'memory_percent': 55, 'during': during})
+    assert machine['saturated'] is True and machine['during']['cpu_peak'] == 100.0
+    text = _format_load_generator(machine)
+    assert '压测机饱和' in text and '75%' in text and '不能当作被测系统的性能' in text
+    quiet = _load_generator(None, {'cpu_percent': 30, 'memory_percent': 55, 'during': {**during, 'saturated': False}})
+    assert quiet['saturated'] is False and '压测机饱和' not in _format_load_generator(quiet)
 
 
 def fact(execution_id='old-run-1', **overrides):
@@ -210,7 +206,7 @@ def test_questions_are_bounded():
 
 @pytest.mark.asyncio
 async def test_a_run_deleted_while_answering_keeps_nothing(run_with_report, monkeypatch):
-    from app.api import execution_routes, model_routes, routes, shared
+    from app.api import shared
     reads = iter([run_with_report.execution, None])
     monkeypatch.setattr(shared.store, 'get_execution', lambda execution_id: next(reads))
     assert (await post_question(run_with_report.app))[1]['step'] == 'error'
@@ -227,7 +223,7 @@ async def test_a_run_cannot_be_questioned_while_its_analysis_is_written(run_with
 @pytest.mark.asyncio
 async def test_questions_asked_together_are_both_kept(run_with_report, monkeypatch):
     import asyncio
-    from app.api import execution_routes, model_routes, routes, shared
+    from app.api import execution_routes, shared
     latest = {'run': run_with_report.execution}
     monkeypatch.setattr(shared.store, 'get_execution', lambda execution_id: latest['run'])
     async def persist(updated):
@@ -295,13 +291,13 @@ async def test_a_restart_ends_analyses_that_were_running(stored_run):
     stored_run.held['run'].report_status = 'running'
     await post_run.recover_interrupted()
     assert stored_run.held['run'].report_status == 'failed'
-    assert stored_run.held['run'].report_error == post_run.INTERRUPTED
+    assert stored_run.held['run'].report_error == post_run.interrupted()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('failure, status', [(LookupError('run'), 404), (ValueError('no'), 409), (RuntimeError('busy'), 409)])
 async def test_the_analysis_endpoint_reports_why_it_cannot_start(monkeypatch, failure, status):
-    from app.api import execution_routes, model_routes, routes, shared
+    from app.api import execution_routes, routes
     monkeypatch.setattr(execution_routes.post_run, 'start_reanalysis', AsyncMock(side_effect=failure))
     app = FastAPI()
     app.include_router(routes.router)

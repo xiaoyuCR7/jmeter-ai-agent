@@ -3,14 +3,11 @@
 Extends JMeterExecutor with remote engine coordination.
 """
 
-import os
-import asyncio
 import logging
-from datetime import datetime
 from typing import Optional, Callable
 
 from app.core.config import settings
-from app.models.schemas import TestExecutionInfo, TestExecutionStatus
+from app.models.schemas import TestExecutionInfo
 from app.services.jmeter.executor import JMeterExecutor, get_executor
 
 logger = logging.getLogger(__name__)

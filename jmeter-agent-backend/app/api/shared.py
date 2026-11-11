@@ -1,6 +1,5 @@
 """Helpers the API modules share: persistence, startup recovery and the answer to a run that needs approval."""
 import os
-import logging
 from datetime import datetime
 
 from fastapi import HTTPException
@@ -9,7 +8,6 @@ from app.services.db_store import db_store
 from app.models.schemas import (
     TestPlanInfo, TestExecutionInfo, TestExecutionStatus, ProjectInfo, ProjectEnvironment,
 )
-from app.services.jmeter.executor import get_executor
 from app.services.jmeter.report_parser import ReportParser
 from app.services.jmeter.environment import ProductionRunNeedsConfirmation
 from app.services.storage import store

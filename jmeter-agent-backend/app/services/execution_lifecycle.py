@@ -10,11 +10,13 @@ import asyncio
 import hashlib
 import json
 import logging
-import re
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
 from app.core.errors import ServiceError
+from app.core.ids import validate_id  # noqa: F401  (also imported from here by other modules)
+from app.core.text import tr
 
 from app.core.config import settings
 from app.models.schemas import (
@@ -26,7 +28,8 @@ from app.services.jmeter.executor import get_executor
 from app.services.jmeter import environment as environment_for_run, jmx_lint
 from app.services.jmeter.environment import ProductionRunNeedsConfirmation
 from app.services.jmeter.script_risk import ScriptApprovalRequired, content_hash, scan as scan_scripts
-from app.services.jmeter import live_stats, load_variants, run_guard
+from app.services.jmeter import live_stats, load_generator, load_variants, run_guard
+from app.services.jmeter.test_scheduler import get_scheduler
 
 logger = logging.getLogger(__name__)
 ENVIRONMENT_FILE = 'environment.json'  # Which environment a run used, next to its results.
@@ -56,8 +59,11 @@ def check_environment_limits(environment, content: bytes, confirm_production: bo
     """An environment's thread cap always holds; a production one also waits for an explicit yes."""
     threads = sum(group['threads'] for group in jmx_lint.planned_load(content))
     if environment.max_threads and threads > environment.max_threads:
-        raise ValueError(f'计划共 {threads} 个线程，超过环境「{environment.name}」允许的上限 '
-                         f'{environment.max_threads}；降低线程数或在环境设置里调整上限')
+        raise ValueError(tr(
+            f'计划共 {threads} 个线程，超过环境「{environment.name}」允许的上限 '
+            f'{environment.max_threads}；降低线程数或在环境设置里调整上限',
+            f'The plan has {threads} threads, more than the {environment.max_threads} that environment '
+            f'"{environment.name}" allows; use fewer threads or raise the limit in the environment settings'))
     if environment.kind == 'production' and not confirm_production:
         raise ProductionRunNeedsConfirmation(environment.name, environment.base_url, threads)
 
@@ -92,13 +98,15 @@ def _planned_load(jmx_path: str) -> tuple:
         return None, 0
 
 
-def validate_id(value: str) -> str:
-    """IDs are portable single path components, including on Windows."""
-    if (not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,49}", value)
-            or value.endswith('.') or value.split('.')[0].upper() in
-            {'CON', 'PRN', 'AUX', 'NUL', *(f'COM{i}' for i in range(1, 10)), *(f'LPT{i}' for i in range(1, 10))}):
-        raise ValueError('Invalid execution/project/plan ID: expected a safe path component')
-    return value
+def _owns(executor, execution_id) -> bool:
+    """Whether the executor still holds this run's process; an executor that cannot say holds nothing."""
+    owns = getattr(executor, 'owns', None)
+    return bool(owns and owns(execution_id))
+
+
+def _cleanup_failed(executor, execution_id) -> bool:
+    check = getattr(executor, 'cleanup_failed', None)
+    return bool(check and check(execution_id))
 
 
 async def persist_project(project: ProjectInfo, *, create=None):
@@ -125,6 +133,9 @@ async def persist_project(project: ProjectInfo, *, create=None):
 
 
 async def persist_execution(execution: TestExecutionInfo, *, create=False):
+    if not execution.detail_loaded:
+        # A copy from a scan of the run cache has no summary detail or AI report; saving it would erase them.
+        raise RuntimeError(f'Execution {execution.id} is a headline copy; load it by ID before saving')
     data = execution.model_dump()
     data['status'] = execution.status.value
     data['ai_analysis_data'] = data.pop('ai_analysis')
@@ -137,7 +148,7 @@ async def persist_execution(execution: TestExecutionInfo, *, create=False):
         if not persisted:
             raise LookupError(f'Execution not registered: {execution.id}')
     execution.storage_version = persisted['storage_version']
-    store.set_execution(execution.id, execution.model_copy(deep=True))
+    store.set_execution(execution.id, execution.model_copy(deep=True), persisted=True)
 
 
 class ExecutionLifecycle:
@@ -213,7 +224,8 @@ class ExecutionLifecycle:
             for name in fields:
                 setattr(cached, name, getattr(execution, name))
             cached.storage_version = execution.storage_version
-            store.set_execution(execution.id, cached)
+            # Only a process still owned keeps unsaved state (its progress); everything else is in the database.
+            store.set_execution(execution.id, cached, persisted=True)
 
     async def register_plan(self, plan: TestPlanInfo):
         validate_id(plan.id)
@@ -251,6 +263,10 @@ class ExecutionLifecycle:
             return path
         # Old configured roots remain usable only for the exact DB-registered
         # file, never for arbitrary siblings or the entire application BASE_DIR.
+        # Paths are stored resolved, so an indexed lookup answers nearly always; rows written before that
+        # (another spelling of the same file) still get the full comparison below.
+        if await db_store.find_test_plan_by_path(str(path)) or await db_store.execution_source_exists(str(path)):
+            return path
         plans = await db_store.list_test_plans(limit=100000)
         if any(path == Path(p['jmx_path']).resolve() for p in plans['test_plans'] if p.get('jmx_path')):
             return path
@@ -269,6 +285,11 @@ class ExecutionLifecycle:
                 raise ServiceError(409, 'Requested project differs from source file directory')
             project_id = owner
         async with self._registration_lock:
+            known = await db_store.find_test_plan_by_path(str(path))
+            if known is not None:
+                plan = TestPlanInfo(**known)
+                store.set_test_plan(plan.id, plan)
+                return plan
             plans = await db_store.list_test_plans(limit=100000)
             for data in plans['test_plans']:
                 if data.get('jmx_path') and Path(data['jmx_path']).resolve() == path:
@@ -346,10 +367,15 @@ class ExecutionLifecycle:
                 'prometheus_url': active.prometheus_url, **applied}, ensure_ascii=False), encoding='utf-8')
         source_path = str(path)
         # Re-running a known snapshot preserves the original resource directory.
-        for existing in store.executions.values():
-            if Path(existing.jmx_path).resolve() == path and existing.source_jmx_path:
-                source_path = existing.source_jmx_path
-                break
+        # Only a file inside the reports folder can be a snapshot; the comparison touches no disk, so
+        # thousands of earlier runs cost nothing here.
+        if path.is_relative_to(root):
+            wanted = os.path.normcase(str(path))
+            for existing in store.executions.values():
+                if (existing.source_jmx_path and existing.jmx_path
+                        and os.path.normcase(os.path.abspath(existing.jmx_path)) == wanted):
+                    source_path = existing.source_jmx_path
+                    break
         context_snapshot = {
             'project_id': plan.project_id, 'test_plan_id': plan.id, 'environment_id': environment_id,
             'environment_fingerprint': fingerprint,
@@ -371,7 +397,11 @@ class ExecutionLifecycle:
         return execution
 
     async def run(self, execution_id, *, remote_engines=None, postprocess=None,
-                  before_execute=None, progress_callback=None, executor=None, ai_model=None):
+                  before_execute=None, progress_callback=None, executor=None, ai_model=None,
+                  wait_for_resources=False):
+        """``wait_for_resources`` holds an unattended run until the load generator is quiet and the
+        previous run's cooldown has passed, or cancels it saying why. Every run, held or not, records
+        how busy the machine was before, during and after."""
         execution = store.get_execution(execution_id)
         if execution is None:
             raise LookupError(f'Execution not found: {execution_id}')
@@ -385,6 +415,10 @@ class ExecutionLifecycle:
         try:
             if before_execute:
                 await before_execute(execution)
+            if wait_for_resources and execution.status != TestExecutionStatus.CANCELLED:
+                refused = await get_scheduler().hold_until_ready()
+                if refused:
+                    execution.status, execution.error_message = TestExecutionStatus.CANCELLED, refused
             if execution.status == TestExecutionStatus.CANCELLED:
                 execution.end_time = datetime.now()
                 await persist_execution(execution)
@@ -413,6 +447,9 @@ class ExecutionLifecycle:
             guard = asyncio.create_task(run_guard.watch(
                 str(Path(execution.report_dir) / 'result.jtl'), lambda reason: self._guard_stop(execution_id, reason),
                 live=live))
+            sampler = load_generator.Sampler()
+            execution.resource_snapshot_pre = await sampler.start() or execution.resource_snapshot_pre
+            machine = None
             try:
                 result = await executor.execute(
                     execution.jmx_path, execution_id, progress_callback=progress,
@@ -423,16 +460,20 @@ class ExecutionLifecycle:
                 guard.cancel()
                 await asyncio.gather(guard, return_exceptions=True)
                 live_stats.finish(execution_id)
+                machine = await sampler.stop()
+                get_scheduler().note_run_finished()
             # JMeter has read the plan; its copy need not hold the environment's secrets any longer.
             await asyncio.to_thread(environment_for_run.scrub, execution.jmx_path)
-            for field in ('status', 'end_time', 'error_message', 'resource_snapshot_pre', 'resource_snapshot_post'):
+            for field in ('status', 'end_time', 'error_message'):
                 value = getattr(result, field, None)
                 if value is not None:
                     setattr(execution, field, value)
             for field in ('report_dir', 'log_path'):
                 if getattr(result, field, None):
                     setattr(execution, field, getattr(result, field))
-            if getattr(executor, '_running_processes', {}).get(execution_id, {}).get('cleanup_failed'):
+            if machine:
+                execution.resource_snapshot_post = machine
+            if _cleanup_failed(executor, execution_id):
                 execution.status = TestExecutionStatus.RUNNING
                 execution.end_time = None
                 execution.error_message = 'Termination failed; process/container remains owned and requires cleanup'
@@ -490,7 +531,7 @@ class ExecutionLifecycle:
             if execution_id in self._guard_reasons:
                 execution.error_message = self._guard_reasons.pop(execution_id)
             executor = self._executors.get(execution_id)
-            still_owned = executor and execution_id in getattr(executor, '_running_processes', {})
+            still_owned = _owns(executor, execution_id)
             if still_owned:
                 execution.status = TestExecutionStatus.RUNNING
                 execution.error_message = 'Cancellation cleanup failed; process remains owned'
@@ -517,14 +558,14 @@ class ExecutionLifecycle:
             if self._tasks.get(execution_id) is current:
                 self._tasks.pop(execution_id, None)
             executor = self._executors.get(execution_id)
-            if executor and execution_id not in getattr(executor, '_running_processes', {}):
+            if executor and not _owns(executor, execution_id):
                 self._executors.pop(execution_id, None)
 
     async def _guard_stop(self, execution_id, reason):
         """The run guard's stop: a cancel that remembers why, so the run says it."""
         self._guard_reasons[execution_id] = reason
         executor = self._executors.get(execution_id)
-        if executor and execution_id in getattr(executor, '_running_processes', {}):
+        if _owns(executor, execution_id):
             # Ends JMeter and the task waiting for it; run() records the reason as it unwinds.
             await executor.cancel(execution_id)
 
@@ -595,7 +636,7 @@ class ExecutionLifecycle:
         executor = self._executors.get(execution_id)
         if executor is None and execution.status == TestExecutionStatus.RUNNING:
             executor = get_executor()
-        if executor and execution_id in getattr(executor, '_running_processes', {}):
+        if _owns(executor, execution_id):
             if not await executor.cancel(execution_id):
                 return False
         task = self._tasks.get(execution_id)

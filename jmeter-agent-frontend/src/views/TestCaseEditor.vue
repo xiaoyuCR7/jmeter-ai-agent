@@ -259,7 +259,7 @@ import {
   ArrowLeft, DocumentChecked, VideoPlay, Document
 } from '@element-plus/icons-vue'
 import { api } from '@/api'
-import { useEditorStore, type EnvironmentInfo } from '@/store'
+import type { EnvironmentInfo } from '@/store'
 import { useI18n } from '@/composables/useI18n'
 import EnvironmentSelector from '@/components/editor/EnvironmentSelector.vue'
 import EndpointList from '@/components/editor/EndpointList.vue'
@@ -277,8 +277,8 @@ import ThreadGroupForm from '@/components/editor/ThreadGroupForm.vue'
 import EndpointSettingsForm from '@/components/editor/EndpointSettingsForm.vue'
 import ParamsEditor from '@/components/editor/ParamsEditor.vue'
 import type { DebugResponse } from '@/components/editor/ResponsePanel.vue'
-import type { EndpointItem } from '@/components/editor/EndpointList.vue'
 import { usePlanTree, type EndpointData } from '@/composables/usePlanTree'
+import { useEndpointList } from '@/composables/useEndpointList'
 
 const httpMethods = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS']
 const bodyTypes = [
@@ -293,8 +293,7 @@ type MainView = 'edit' | 'debug' | 'testcase' | 'settings'
 
 const route = useRoute()
 const router = useRouter()
-const editorStore = useEditorStore()
-const { t } = useI18n()
+const { t, L } = useI18n()
 
 const planId = computed(() => route.params.planId as string || route.params.id as string)
 const projectId = computed(() => route.params.projectId as string)
@@ -362,27 +361,18 @@ const {
   parseEndpoint, buildTreeFromEndpoints,
 } = usePlanTree({ planId, treeData, threadGroupNode, endpoints, threadGroupConfig, csvDatasetConfig, t })
 
-// Computed
-const endpointList = computed<EndpointItem[]>(() => {
-  const result: EndpointItem[] = []
-  // The map holds parsed requests, not tree nodes: reading testname/properties listed every one as "unnamed GET /".
-  endpoints.value.forEach((endpoint, id) => {
-    result.push({
-      id,
-      name: endpoint.name || t('common.unnamed'),
-      method: endpoint.method || 'GET',
-      path: endpoint.path || '/',
-    })
+// The request list: selection, add, copy, remove, reorder.
+const { endpointList, selectEndpoint, addEndpoint, deleteEndpoint, duplicateEndpoint, reorderEndpoint: handleReorder } =
+  useEndpointList({
+    endpoints, selectedId: selectedEndpointId, t, L, notify: ElMessage,
+    onSelect: () => { mainView.value = 'edit'; debugTab.value = 'params' },
   })
-  return result
-})
 
-// Headers editor needs this format
 const headerProps = computed({
   get: () => {
     const ep = selectedEndpoint.value
     if (!ep) return {}
-    const list = ep.headers.map((h: any, i: number) => ({
+    const list = ep.headers.map((h: any) => ({
       _elementType: 'Header',
       _name: h.name || '',
       'Header.name': h.name || '',
@@ -567,84 +557,6 @@ function parseTreeToEndpoints(tree: any) {
   }
 }
 
-// === Endpoint Actions ===
-function selectEndpoint(id: string) {
-  selectedEndpointId.value = id
-  mainView.value = 'edit'
-  debugTab.value = 'params'
-}
-
-function addEndpoint() {
-  const id = Math.random().toString(36).substring(2, 10)
-  endpoints.value.set(id, {
-    id,
-    _parentId: endpoints.value.get(selectedEndpointId.value || '')?._parentId,
-    name: t('editor.newEndpoint'),
-    description: '',
-    method: 'GET',
-    path: '/',
-    domain: '',
-    port: '',
-    protocol: '',
-    headers: [],
-    cookies: [],
-    queryParams: [],
-    bodyType: 'none',
-    bodyContent: '',
-    auth: { type: 'none', username: '', password: '' },
-    preScript: { language: 'groovy', script: '' },
-    postScript: { language: 'groovy', script: '' },
-    assertions: [],
-    extractors: [],
-    settings: {
-      timeout: 0,
-      followRedirects: true,
-      autoRedirects: false,
-      keepAlive: true,
-      encoding: '',
-    },
-  })
-  selectEndpoint(id)
-}
-
-function deleteEndpoint(id: string) {
-  endpoints.value.delete(id)
-  if (selectedEndpointId.value === id) {
-    selectedEndpointId.value = endpoints.value.keys().next().value || null
-  }
-}
-
-function duplicateEndpoint(id: string) {
-  const original = endpoints.value.get(id)
-  if (!original) return
-  const newId = Math.random().toString(36).substring(2, 10)
-  const copy = JSON.parse(JSON.stringify(original))
-  copy.id = newId
-  copy.name = original.name + t('editor.copySuffix')
-  endpoints.value.set(newId, copy)
-  selectEndpoint(newId)
-  ElMessage.success(t('editor.message.endpointCopied'))
-}
-
-function handleReorder(fromIndex: number, toIndex: number) {
-  const entries = Array.from(endpoints.value.entries())
-  const movedParent = entries[fromIndex]?.[1]._parentId
-  if (entries.slice(Math.min(fromIndex, toIndex), Math.max(fromIndex, toIndex) + 1).some(([, ep]) => ep._parentId !== movedParent)) {
-    ElMessage.warning('无法跨线程组或控制器移动接口；请使用右上角 JMX 编辑器调整结构。')
-    return
-  }
-  const [removed] = entries.splice(fromIndex, 1)
-  entries.splice(toIndex, 0, removed)
-  endpoints.value = new Map(entries)
-  const newIds = Array.from(endpoints.value.keys())
-  if (selectedEndpointId.value) {
-    const newIndex = newIds.indexOf(selectedEndpointId.value)
-    if (newIndex !== -1) {
-      selectEndpoint(selectedEndpointId.value)
-    }
-  }
-}
-
 // === Handlers ===
 function handleEnvChange(envId: string) {
   activeEnvId.value = envId
@@ -761,379 +673,4 @@ function goToProjectSettings() {
 }
 </script>
 
-<style scoped lang="scss">
-// Full-bleed under the 52px top bar: cancel the layout's content padding (20px 24px, 16px on phones).
-.test-case-editor {
-  display: flex;
-  flex-direction: column;
-  height: calc(100vh - 52px);
-  min-height: 480px;
-  margin: -20px -24px;
-
-  @media (max-width: 768px) {
-    margin: -16px;
-  }
-}
-
-.view-switch { margin-left: 8px; }
-.tree-mode { flex: 1; min-height: 0; }
-
-.editor-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--app-border);
-  background: var(--app-surface);
-  flex-shrink: 0;
-  flex-wrap: wrap;
-  gap: 12px;
-
-  // One row on desktop: the plan name gives way first.
-  @media (min-width: 1024px) {
-    flex-wrap: nowrap;
-  }
-
-  .toolbar-left {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-    flex: 1 1 auto;
-
-    .view-switch { flex-shrink: 0; }
-
-    .plan-name {
-      font-size: 15px;
-      font-weight: 500;
-      color: var(--app-text);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      min-width: 0;
-    }
-  }
-  .toolbar-center { display: flex; align-items: center; min-width: 0; flex-shrink: 0; }
-  .toolbar-right {
-    display: flex;
-    flex-shrink: 0;
-    gap: 8px;
-    flex-wrap: wrap;
-    min-width: 0;
-
-    .fx-label { font-family: monospace; font-weight: bold; }
-  }
-}
-
-.editor-body {
-  display: flex;
-  flex: 1;
-  overflow: hidden;
-
-  @media (max-width: 768px) {
-    flex-direction: column;
-    overflow: auto;
-  }
-}
-
-.left-panel {
-  width: 260px;
-  min-width: 220px;
-  max-width: 35%;
-  flex-shrink: 0;
-  border-right: 1px solid var(--app-border);
-  background: var(--app-surface);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-
-  @media (max-width: 768px) {
-    width: 100%;
-    max-width: none;
-    border-right: none;
-    border-bottom: 1px solid var(--app-border);
-  }
-}
-
-.center-panel {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  background: var(--app-bg);
-  min-width: 0;
-
-  .no-selection {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex: 1;
-  }
-
-  .main-view-bar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0 16px;
-    background: var(--app-surface);
-    border-bottom: 1px solid var(--app-border);
-    flex-shrink: 0;
-    min-height: 44px;
-    flex-wrap: wrap;
-    gap: 8px;
-
-    .main-view-tabs {
-      display: flex;
-      gap: 4px;
-      flex-wrap: wrap;
-      overflow-x: auto;
-      min-width: 0;
-
-      .main-view-tab {
-        padding: 12px 16px;
-        font-size: 14px;
-        color: var(--app-text-secondary);
-        cursor: pointer;
-        border-bottom: 2px solid transparent;
-        transition: all 0.15s;
-        user-select: none;
-        white-space: nowrap;
-
-        @media (max-width: 768px) {
-          padding: 10px 12px;
-          font-size: 13px;
-        }
-
-        &:hover { color: var(--app-primary); }
-
-        &.active {
-          color: var(--app-primary);
-          border-bottom-color: var(--app-primary);
-          font-weight: 500;
-        }
-      }
-    }
-
-    .main-view-actions {
-      display: flex;
-      gap: 8px;
-      min-width: 0;
-
-      .el-button { width: auto; }
-    }
-  }
-
-  .view-panel {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-    min-height: 0;
-  }
-
-  .edit-view {
-    overflow-y: auto;
-    padding: 20px 24px;
-
-    .edit-header {
-      margin-bottom: 16px;
-
-      .endpoint-title-input {
-        width: 100%;
-        min-width: 0;
-
-        :deep(.el-input__wrapper) {
-          box-shadow: none;
-          padding: 0;
-          font-size: 22px;
-          font-weight: 500;
-
-          @media (max-width: 768px) {
-            font-size: 18px;
-          }
-        }
-        :deep(.el-input__inner) {
-          font-size: 22px;
-          font-weight: 500;
-          height: 36px;
-
-          @media (max-width: 768px) {
-            font-size: 18px;
-            height: 32px;
-          }
-        }
-      }
-
-      .edit-meta {
-        display: flex;
-        gap: 8px;
-        margin-top: 10px;
-      }
-    }
-
-    .edit-description {
-      margin-bottom: 20px;
-    }
-
-    .edit-request-preview {
-      .section-label {
-        font-size: 13px;
-        font-weight: 500;
-        color: var(--app-text-secondary);
-        margin-bottom: 12px;
-      }
-    }
-
-    .preview-bar {
-      margin-bottom: 16px;
-    }
-  }
-
-  .debug-view {
-    .debug-split {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-      min-height: 0;
-
-      .debug-request {
-        flex: 1;
-        min-height: 0;
-        overflow: hidden;
-        display: flex;
-        flex-direction: column;
-      }
-
-      .debug-response {
-        height: 240px;
-        min-height: 180px;
-        max-height: 40vh;
-        flex-shrink: 0;
-      }
-    }
-  }
-
-  .testcase-view,
-  .settings-view {
-    overflow: hidden;
-  }
-
-  .request-url-bar {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 8px;
-    padding: 12px 16px;
-    background: var(--app-surface);
-    border-bottom: 1px solid var(--app-border);
-    flex-shrink: 0;
-
-    .method-select {
-      width: 100px;
-      min-width: 100px;
-      :deep(.el-input__wrapper) {
-        border-radius: var(--app-radius) 0 0 var(--app-radius);
-        border-right: none;
-      }
-    }
-
-    .url-input-group {
-      flex: 1;
-      display: flex;
-      align-items: center;
-      border: 1px solid var(--el-border-color);
-      border-radius: 0 var(--app-radius) var(--app-radius) 0;
-      overflow: hidden;
-      height: 32px;
-      min-width: 180px;
-
-      .url-prefix {
-        font-size: 12px;
-        color: var(--app-text-muted);
-        padding: 0 10px;
-        background: var(--app-surface);
-        border-right: 1px solid var(--app-border);
-        line-height: 32px;
-        white-space: nowrap;
-        max-width: 180px;
-        min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-
-      .url-input {
-        flex: 1;
-        min-width: 120px;
-        :deep(.el-input__wrapper) {
-          box-shadow: none;
-          border-radius: 0;
-        }
-      }
-    }
-
-    .el-button { margin-left: 0; width: auto; border-radius: var(--app-radius); }
-  }
-
-  .request-tabs {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-
-    :deep(.el-tabs__header) {
-      margin: 0;
-      padding: 0 16px;
-      background: var(--app-surface);
-      border-bottom: 1px solid var(--app-border);
-    }
-
-    :deep(.el-tabs__nav-wrap::after) { display: none; }
-
-    :deep(.el-tabs__content) {
-      flex: 1;
-      overflow-y: auto;
-      padding: 0;
-    }
-  }
-
-  .tab-content {
-    padding: 16px 20px;
-
-    @media (max-width: 768px) {
-      padding: 12px 14px;
-    }
-  }
-
-  .tab-badge {
-    display: inline-block;
-    margin-left: 4px;
-    padding: 0 6px;
-    font-size: 11px;
-    line-height: 18px;
-    border-radius: var(--app-radius);
-    background: var(--app-primary-soft);
-    color: var(--app-primary);
-    font-weight: 500;
-  }
-
-  .body-type-group {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 12px;
-
-    :deep(.el-radio) { margin-right: 0; }
-  }
-}
-
-.body-textarea {
-  :deep(.el-textarea__inner) {
-    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-    font-size: 13px;
-    background: var(--app-surface);
-    color: var(--app-text);
-  }
-}
-
-
-</style>
+<style scoped lang="scss" src="./TestCaseEditor.scss"></style>

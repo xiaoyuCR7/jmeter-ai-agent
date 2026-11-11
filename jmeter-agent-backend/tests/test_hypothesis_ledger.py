@@ -224,7 +224,6 @@ async def test_automatic_evaluation_skips_resolved_or_deprecated_hypotheses(temp
 async def test_automatic_evaluation_preserves_a_newer_decision(temp_hypothesis_ledger, monkeypatch, phase, new_status):
     import importlib
     from unittest.mock import AsyncMock
-    from app.models.schemas import FactSheet
     module = importlib.import_module('app.services.ai.memory.hypothesis_ledger')
     ledger = temp_hypothesis_ledger
     other = HypothesisLedger(ledger.db_path)
@@ -278,7 +277,6 @@ async def test_concurrent_evaluations_do_not_overwrite_the_first_decision(temp_h
     import asyncio
     import importlib
     from unittest.mock import AsyncMock
-    from app.models.schemas import FactSheet
     module = importlib.import_module('app.services.ai.memory.hypothesis_ledger')
     ledger = temp_hypothesis_ledger
     hid = await ledger.add(Hypothesis(hypothesis_id='', source_execution_id='old', module='api', version='v1',
@@ -370,7 +368,6 @@ async def test_failed_status_commit_is_not_committed_by_a_later_read(temp_hypoth
 async def test_evaluation_write_failure_is_not_silently_reported_as_processed(temp_hypothesis_ledger, monkeypatch, new_p99):
     import importlib
     from unittest.mock import AsyncMock
-    from app.models.schemas import FactSheet
     module = importlib.import_module('app.services.ai.memory.hypothesis_ledger')
     facts = {key: _fact(key, value)
              for key, value in [('old', 100), ('new', new_p99)]}
@@ -390,7 +387,6 @@ async def test_evaluation_write_failure_is_not_silently_reported_as_processed(te
 async def test_unusable_facts_do_not_confirm_or_refute_predictions(temp_hypothesis_ledger, monkeypatch, case):
     import importlib
     from unittest.mock import AsyncMock
-    from app.models.schemas import FactSheet
     module = importlib.import_module('app.services.ai.memory.hypothesis_ledger')
     facts = {key: _fact(key, 100 if key == 'old' else 50, error_rate=0) for key in ('old', 'new')}
     prediction = 'error_rate below 1%'
@@ -457,7 +453,6 @@ async def test_add_and_get_hypothesis(temp_hypothesis_ledger):
 
 @pytest.mark.asyncio
 async def test_hypothesis_cannot_verify_itself(temp_hypothesis_ledger, monkeypatch):
-    from app.services.ai.memory import hypothesis_ledger as singleton
     from unittest.mock import AsyncMock
     import importlib
     module = importlib.import_module('app.services.ai.memory.hypothesis_ledger')
@@ -601,7 +596,7 @@ async def test_a_structured_prediction_is_checked_on_the_run_it_names(temp_hypot
              'new': _fact('new', 100, per_label=row(p95), module='another-plan',
                           load={'threads': threads, 'think_time_ms': 1000})}
     monkeypatch.setattr(module.fact_ledger, 'load', AsyncMock(side_effect=lambda key: facts[key]))
-    hid = await temp_hypothesis_ledger.add(Hypothesis(
+    await temp_hypothesis_ledger.add(Hypothesis(
         hypothesis_id='', source_execution_id='old', module='api', project_id='p', statement='orders queue up',
         category=HypothesisCategory.BOTTLENECK,
         prediction={'metric': 'p95', 'label': 'GET /orders', 'change': 'increase', 'value': 30, 'threads': 12}))

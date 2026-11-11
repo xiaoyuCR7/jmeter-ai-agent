@@ -122,6 +122,7 @@
             </div>
           </div>
         </el-card>
+        <StoragePanel />
       </el-tab-pane>
       <el-tab-pane :label="t('accessLink.title')" name="access" lazy>
         <AccessLinkPanel />
@@ -247,6 +248,7 @@ import { useRoute, useRouter } from 'vue-router'
 import MCPConnectPanel from '@/components/MCPConnectPanel.vue'
 import AccessLinkPanel from '@/components/AccessLinkPanel.vue'
 import MemoryPanel from '@/components/MemoryPanel.vue'
+import StoragePanel from '@/components/StoragePanel.vue'
 
 const { t, setLang } = useI18n()
 

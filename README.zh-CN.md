@@ -159,12 +159,18 @@ python scripts/eval_reports.py --model <模型ID> [--lang en] [--repeat 3]
 |---|---|---|
 | `PORT` | 后端端口 | `8000` |
 | `JMETER_HOME` | JMeter 的 `bin` 目录或安装根目录 | `<项目>/bin` |
-| `JMETER_TIMEOUT` | 单次执行最长时间（秒） | `3600` |
+| `JMETER_TIMEOUT` | 防止运行永不结束的上限（秒）。计划写明了时长且更长时，按「时长 + 写报告的余量」放宽 | `3600` |
 | `AUTO_ANALYSIS_ENABLED` | 每次运行结束后写 AI 报告，不论运行由谁发起；关闭后实测历史仍会保留 | `true` |
-| `JMETER_HEAP_MIN` / `JMETER_HEAP_MAX` | JMeter JVM 堆内存 | `256m` / `2g` |
+| `JMETER_HEAP_MIN` / `JMETER_HEAP_MAX` | 本地模式下 JMeter 的 JVM 堆内存；后端环境里设了 `HEAP` 时以它为准 | `256m` / `2g` |
+| `JMETER_GC_OPTS` / `JMETER_EXTRA_OPTS` | JVM 的 GC 参数和其它参数（本地模式） | G1 / 空 |
 | `JMETER_EXECUTION_MODE` | `local` 或 `container`，见下方「执行隔离」 | `local` |
 | `JMETER_MAX_OUTPUT_MB` | 报告目录超过这个大小（MB）时停止执行，`0` 表示不限制 | `10240` |
-| `RESOURCE_CPU_THRESHOLD` / `RESOURCE_MEMORY_THRESHOLD` | 压测机占用超过该比例（%）时新执行排队 | `80` / `85` |
+| `RESOURCE_CPU_THRESHOLD` / `RESOURCE_MEMORY_THRESHOLD` | 压测机占用超过该比例（%）时，无人值守的运行（助手发起、验证运行、容量探索的每一步）先等待；手动发起的运行只记录不等待 | `80` / `85` |
+| `RESOURCE_COOLDOWN_SECONDS` | 无人值守的运行之间让压测机平复的秒数 | `10` |
+| `REPORTS_RETENTION_DAYS` / `REPORTS_RETENTION_INCLUDE_JTL` | 每天清理这么多天前的运行的 HTML 报告（每份约 3 MB），可选连原始结果一起清理；`0` 表示不清理。摘要、AI 报告和历史保留，当前基线的来源运行不清理。也可以在「设置 → 系统信息」里手动清理 | `0` / `false` |
+| `EXECUTION_CACHE_SIZE` | 内存里完整保留的运行数（摘要明细和 AI 报告）；其余运行只留概要，打开时再从数据库读 | `256` |
+| `LOG_LEVEL` / `LOG_FILE` | 后端日志级别和日志文件（默认 `logs/jmeter-agent.log`，5 MB × 3 轮转；`off` 只输出到控制台） | `INFO` / 空 |
+| `I18N_DEFAULT_LANG` | 没有请求指明语言时（如 MCP 客户端）后端消息用的语言 | `zh-CN` |
 | `DEFAULT_AI_MODEL` | 请求没有指定模型时使用的模型 ID | 第一个启用的模型 |
 | `AGENT_CONTEXT_TOKEN_BUDGET` | 上下文窗口未知的模型使用的 token 预算 | `16384` |
 | `AGENT_MAX_CONCURRENT` | 同时运行的 AI 任务数；运行后自动写报告最多占用其中 N-1 个，给追问留一个 | `3` |
@@ -172,8 +178,10 @@ python scripts/eval_reports.py --model <模型ID> [--lang en] [--repeat 3]
 | `RUN_GUARD_ENABLED` | 运行守护：最近的请求几乎全部失败时停止运行 | `true` |
 | `RUN_GUARD_ERROR_RATE` / `RUN_GUARD_WINDOW_SECONDS` | 触发停止的错误率（%）和统计窗口（秒）；连续两次检查超限才停止 | `90` / `30` |
 | `RUN_GUARD_MIN_SAMPLES` / `RUN_GUARD_GRACE_SECONDS` | 窗口内少于这么多请求不判断；运行开始后的这段时间不判断 | `50` / `30` |
+| `RUN_GUARD_MEMORY_PERCENT` | 压测机内存占用达到这个百分比时停止运行（`0` 关闭） | `97` |
+| `RUN_GUARD_LATENCY_FACTOR` | 平均响应时间达到运行开始时的这么多倍时停止运行（`0` 关闭；压力测试本来就会让系统变慢，所以默认关闭） | `0` |
 
-模型的 API Key 不从 `.env` 读取，请在界面里添加。它们保存在 `jmeter-agent-backend/ai_models_config.json`，这个文件已被 git 忽略。
+模型的 API Key 不从 `.env` 读取，请在界面里添加。它们保存在 `jmeter-agent-backend/ai_models_config.json`，这个文件已被 git 忽略。不想让 Key 落盘时，在 Key 一栏填 `env:变量名`（如 `env:OPENAI_API_KEY`），后端会从这个环境变量读取。
 
 因为没有登录，`HOST` 只能是本机回环地址，设成其它地址服务会拒绝启动，来自其它机器的连接也会被拒绝。
 

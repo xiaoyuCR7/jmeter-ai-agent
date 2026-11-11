@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import xml.etree.ElementTree as ET
 from typing import Optional
+from app.core.text import tr
 
 logger = logging.getLogger(__name__)
 
@@ -65,21 +66,28 @@ def _check_pairing(tree, issues: list):
     children = list(tree)
     for first, second in zip(children[::2], children[1::2]):
         if first.tag == 'hashTree' or second.tag != 'hashTree':
-            issues.append(_issue('error', 'broken_tree', f'{first.tag}「{first.get("testname", "")}」后面缺少 hashTree，'
-                                                         'JMeter 无法加载这个计划。'))
+            issues.append(_issue('error', 'broken_tree', tr(
+                f'{first.tag}「{first.get("testname", "")}」后面缺少 hashTree，JMeter 无法加载这个计划。',
+                f'{first.tag} "{first.get("testname", "")}" is not followed by a hashTree; JMeter cannot load this plan.')))
             return
         _check_pairing(second, issues)
     if len(children) % 2:
-        issues.append(_issue('error', 'broken_tree', f'{children[-1].tag} 后面缺少 hashTree，JMeter 无法加载这个计划。'))
+        issues.append(_issue('error', 'broken_tree', tr(
+            f'{children[-1].tag} 后面缺少 hashTree，JMeter 无法加载这个计划。',
+            f'{children[-1].tag} is not followed by a hashTree; JMeter cannot load this plan.')))
 
 
 def _check_assertion(element, issues: list):
     label = element.get('testname', '')
     if element.find("collectionProp[@name='Assertion.test_strings']") is not None:
-        issues.append(_issue('error', 'dead_assertion', f'响应断言「{label}」用了 Assertion.test_strings。JMeter 只认 '
-                                                        'Asserion.test_strings，这条断言不会检查任何内容。'))
+        issues.append(_issue('error', 'dead_assertion', tr(
+            f'响应断言「{label}」用了 Assertion.test_strings。JMeter 只认 Asserion.test_strings，这条断言不会检查任何内容。',
+            f'Response assertion "{label}" uses Assertion.test_strings. JMeter reads only Asserion.test_strings, '
+            'so this assertion checks nothing.')))
     elif element.find("collectionProp[@name='Asserion.test_strings']/stringProp") is None:
-        issues.append(_issue('error', 'dead_assertion', f'响应断言「{label}」没有期望值，不会检查任何内容。'))
+        issues.append(_issue('error', 'dead_assertion', tr(
+            f'响应断言「{label}」没有期望值，不会检查任何内容。',
+            f'Response assertion "{label}" has no expected value and checks nothing.')))
 
 
 def _walk(tree, known: set, state: dict, issues: list, once: bool = False):
@@ -96,14 +104,20 @@ def _walk(tree, known: set, state: dict, issues: list, once: bool = False):
             label = element.get('testname', '')
             path = _prop(element, 'HTTPSampler.path')
             if '$${' in path:
-                issues.append(_issue('error', 'stray_dollar', f'请求「{label}」的路径 {path} 多了一个 $，实际 URL 是错的。'))
+                issues.append(_issue('error', 'stray_dollar', tr(
+                    f'请求「{label}」的路径 {path} 多了一个 $，实际 URL 是错的。',
+                    f'The path {path} of request "{label}" has a stray $; the URL it sends is wrong.')))
             for placeholder in _PLACEHOLDER.findall(path):
-                issues.append(_issue('error', 'unresolved_path', f'请求「{label}」的路径 {path} 还有占位符 {placeholder}，'
-                                                                 '需要绑定变量或给出实际值。'))
+                issues.append(_issue('error', 'unresolved_path', tr(
+                    f'请求「{label}」的路径 {path} 还有占位符 {placeholder}，需要绑定变量或给出实际值。',
+                    f'The path {path} of request "{label}" still has the placeholder {placeholder}; '
+                    'bind it to a variable or give it a value.')))
             for item in element.iter('elementProp'):
                 if item.get('elementType') == 'Argument' and item.get('name') != 'HTTPsampler.Arguments':
-                    issues.append(_issue('error', 'wrong_argument', f'请求「{label}」的参数要用 HTTPArgument，'
-                                                                    '用 Argument 时每个请求都会失败。'))
+                    issues.append(_issue('error', 'wrong_argument', tr(
+                        f'请求「{label}」的参数要用 HTTPArgument，用 Argument 时每个请求都会失败。',
+                        f'The parameters of request "{label}" must be HTTPArgument elements; '
+                        'with Argument every request fails.')))
                     break
             subtree = list(children)
             if not any(child.tag in ('ResponseAssertion', 'JSONPathAssertion') for child in subtree):
@@ -116,8 +130,10 @@ def _walk(tree, known: set, state: dict, issues: list, once: bool = False):
         if tag == 'ConfigTestElement':
             for item in element.iter('elementProp'):
                 if item.get('elementType') == 'Argument' and element.get('guiclass') == 'HttpDefaultsGui':
-                    issues.append(_issue('error', 'wrong_argument', 'HTTP 默认值里的参数要用 HTTPArgument，'
-                                                                    '用 Argument 时每个请求都会失败。'))
+                    issues.append(_issue('error', 'wrong_argument', tr(
+                        'HTTP 默认值里的参数要用 HTTPArgument，用 Argument 时每个请求都会失败。',
+                        'The parameters in HTTP Request Defaults must be HTTPArgument elements; '
+                        'with Argument every request fails.')))
                     break
             if _prop(element, 'HTTPSampler.response_timeout'):
                 state['timeout'] = True
@@ -131,10 +147,10 @@ def lint(content) -> list[dict]:
     try:
         root = ET.fromstring(content)
     except ET.ParseError as error:
-        return [_issue('error', 'invalid_xml', f'计划不是有效的 XML：{error}')]
+        return [_issue('error', 'invalid_xml', tr(f'计划不是有效的 XML：{error}', f'The plan is not valid XML: {error}'))]
     outer = root.find('hashTree')
     if root.tag != 'jmeterTestPlan' or outer is None:
-        return [_issue('error', 'invalid_plan', '计划缺少 jmeterTestPlan 根结构。')]
+        return [_issue('error', 'invalid_plan', tr('计划缺少 jmeterTestPlan 根结构。', 'The plan has no jmeterTestPlan root.'))]
     issues: list[dict] = []
     _check_pairing(outer, issues)
     if issues:
@@ -158,24 +174,36 @@ def lint(content) -> list[dict]:
         _walk(config_only, set(shared), state, issues)
 
     if not groups:
-        issues.append(_issue('error', 'no_thread_group', '计划没有启用的线程组。'))
+        issues.append(_issue('error', 'no_thread_group', tr('计划没有启用的线程组。', 'The plan has no enabled thread group.')))
     if groups and not state['samplers'] and 'HTTPSamplerProxy' in str(content):
-        issues.append(_issue('error', 'no_sampler', '计划没有启用的请求。'))
+        issues.append(_issue('error', 'no_sampler', tr('计划没有启用的请求。', 'The plan has no enabled request.')))
     if not state['scripted']:
         for label, name in sorted({(label, name) for label, name, known in state['used'] if name not in known}):
-            issues.append(_issue('error', 'undefined_variable', f'请求「{label}」用到 ${{{name}}}，但在它之前没有地方定义这个变量。'))
+            issues.append(_issue('error', 'undefined_variable', tr(
+                f'请求「{label}」用到 ${{{name}}}，但在它之前没有地方定义这个变量。',
+                f'Request "{label}" uses ${{{name}}}, which nothing before it defines.')))
     for label in sorted(set(state['unasserted'])):
-        issues.append(_issue('warning', 'no_assertion', f'请求「{label}」没有断言，失败也不会被发现。'))
+        issues.append(_issue('warning', 'no_assertion', tr(
+            f'请求「{label}」没有断言，失败也不会被发现。',
+            f'Request "{label}" has no assertion, so a failure would go unnoticed.')))
     for label in sorted(set(state['repeated_login'])):
-        issues.append(_issue('warning', 'repeated_login', f'请求「{label}」像登录，却每轮都执行，会把登录压力混进结果。'
-                                                          '每个用户登录一次时用 phase=once_per_user。'))
+        issues.append(_issue('warning', 'repeated_login', tr(
+            f'请求「{label}」像登录，却每轮都执行，会把登录压力混进结果。每个用户登录一次时用 phase=once_per_user。',
+            f'Request "{label}" looks like a login but runs on every iteration, which mixes login load into the '
+            'results. Use phase=once_per_user for one login per user.')))
     if state['samplers'] and not state['timeout']:
-        issues.append(_issue('warning', 'no_timeout', '计划没有设置响应超时，服务挂住时线程会一直等待。'))
+        issues.append(_issue('warning', 'no_timeout', tr(
+            '计划没有设置响应超时，服务挂住时线程会一直等待。',
+            'The plan sets no response timeout; threads wait forever if the service hangs.')))
     # JMeter evaluates a sampler's name per request: one request then reports as many labels.
     for label in sorted({element.get('testname') or '' for element in root.iter('HTTPSamplerProxy')
                          if element.get('enabled') != 'false' and '${' in (element.get('testname') or '')}):
-        issues.append(_issue('warning', 'dynamic_label', f'请求名称「{label}」里有变量或函数，JMeter 每次请求都会重新求值，'
-                                                         '报告会把它拆成很多行，需求和历史对比也匹配不上；名称里不要写 ${…}。'))
+        issues.append(_issue('warning', 'dynamic_label', tr(
+            f'请求名称「{label}」里有变量或函数，JMeter 每次请求都会重新求值，'
+            '报告会把它拆成很多行，需求和历史对比也匹配不上；名称里不要写 ${…}。',
+            f'The request name "{label}" holds a variable or function. JMeter evaluates it for every request, so '
+            'the report splits it into many rows that match neither requirements nor earlier runs; keep ${…} '
+            'out of names.')))
     return issues
 
 
@@ -264,5 +292,6 @@ def check(content: str, expected: tuple[str, ...] = ()) -> tuple[list[dict], lis
     if not failures:
         loaded = load_check(content)
         if loaded['checked'] and not loaded['ok']:
-            failures = [_issue('error', 'jmeter_load', f"JMeter 无法加载：{loaded['error']}")]
+            failures = [_issue('error', 'jmeter_load', tr(f"JMeter 无法加载：{loaded['error']}",
+                                                               f"JMeter cannot load the plan: {loaded['error']}"))]
     return failures, issues

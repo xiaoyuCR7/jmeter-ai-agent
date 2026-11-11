@@ -6,10 +6,9 @@ import os
 import uuid
 import shutil
 import tempfile
-from typing import Optional, List
+from typing import Optional
 from app.core.errors import ServiceError
-from fastapi import APIRouter, HTTPException, UploadFile, File, Query, Depends
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, HTTPException, UploadFile, File, Query
 
 from app.core.config import settings
 

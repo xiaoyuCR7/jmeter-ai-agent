@@ -21,7 +21,7 @@ from app.core.errors import ServiceError
 
 from app.services.ai.memory.storage import MemoryDatabase
 from app.models.schemas import (
-    Hypothesis, HypothesisStatus, HypothesisCategory, FactSheet,
+    Hypothesis, HypothesisStatus, HypothesisCategory,
 )
 from app.services.ai.memory import prediction as predictions
 from app.services.ai.memory.fact_ledger import fact_ledger

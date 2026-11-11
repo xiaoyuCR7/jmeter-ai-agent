@@ -72,7 +72,7 @@ export interface EndpointItem {
   path: string
 }
 
-const props = defineProps<{
+defineProps<{
   endpoints: EndpointItem[]
   selectedId: string | null
 }>()

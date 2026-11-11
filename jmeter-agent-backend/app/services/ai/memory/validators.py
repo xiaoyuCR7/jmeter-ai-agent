@@ -7,7 +7,7 @@ must be re-derivable from the FactSheet. If it cannot be re-derived, it is rejec
 import re
 import logging
 from typing import Iterable, Optional
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from app.models.schemas import FactSheet, MetricClaim, ValidationResult
 

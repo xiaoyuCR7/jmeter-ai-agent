@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from app.models.schemas import HypothesisStatus
 from app.services.ai.memory import experience, fact_ledger, hypothesis_ledger, prediction
 from app.services.storage import store
+from app.core.text import tr
 
 router = APIRouter(tags=["memory"])
 
@@ -103,7 +104,7 @@ async def decide_hypothesis(hypothesis_id: str, request: HypothesisDecision):
     if hyp is None:
         raise HTTPException(status_code=404, detail="Hypothesis not found")
     status = HypothesisStatus(request.status)
-    note = '人工判定' + (f'：{request.note.strip()}' if request.note.strip() else '')
+    note = tr('人工判定', 'Decided by a person') + (f'：{request.note.strip()}' if request.note.strip() else '')
     if not await hypothesis_ledger.update_status(hypothesis_id, status, notes=note):
         raise HTTPException(status_code=500, detail="The decision was not saved")
     return hypothesis_view(await hypothesis_ledger.get(hypothesis_id))

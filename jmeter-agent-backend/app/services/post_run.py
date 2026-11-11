@@ -11,6 +11,7 @@ import os
 from datetime import datetime
 
 from app.core.config import settings
+from app.core.text import tr
 from app.models.schemas import ReportAnalysis, TestExecutionInfo, TestExecutionStatus
 from app.services.ai import usage
 from app.services.ai.analyzer import TestAnalyzer, check_numbers
@@ -198,11 +199,13 @@ async def record_hypotheses(execution: TestExecutionInfo, fact):
             if old.hypothesis_id in replaced:
                 continue
             replaced.add(old.hypothesis_id)
-            why = '更新了这条假设' if old is quoted else '提出了同样的预测'
+            why = (tr('更新了这条假设', 'updates this hypothesis') if old is quoted
+                   else tr('提出了同样的预测', 'makes the same prediction'))
             try:
                 await hypothesis_ledger.update_status(
                     old.hypothesis_id, HypothesisStatus.DEPRECATED,
-                    notes=f'运行 {execution.id[:8]} 的报告{why}，以新的为准',
+                    notes=tr(f'运行 {execution.id[:8]} 的报告{why}，以新的为准',
+                             f'The report of run {execution.id[:8]} {why}; the newer one stands'),
                     expected_status=HypothesisStatus.UNTESTED)
             except HypothesisUpdateConflict:
                 pass  # A run or a person settled it meanwhile; that answer stands.
@@ -210,7 +213,9 @@ async def record_hypotheses(execution: TestExecutionInfo, fact):
         try:
             await hypothesis_ledger.update_status(
                 old.hypothesis_id, HypothesisStatus.DEPRECATED,
-                notes='这次运行的报告重新生成了，以新报告为准', expected_status=HypothesisStatus.UNTESTED)
+                notes=tr('这次运行的报告重新生成了，以新报告为准',
+                         "This run's report was written again; the new report stands"),
+                expected_status=HypothesisStatus.UNTESTED)
         except HypothesisUpdateConflict:
             pass
 
@@ -269,7 +274,12 @@ async def _analyse_now(execution: TestExecutionInfo, ai_model, lang: str) -> Rep
 
 
 _reanalyses: dict[str, asyncio.Task] = {}
-INTERRUPTED = '后端重启时分析被中断'
+
+
+def interrupted() -> str:
+    return tr('后端重启时分析被中断', 'The analysis was interrupted when the backend restarted')
+
+
 
 
 async def _reanalyze(execution: TestExecutionInfo, ai_model, lang=None):
@@ -281,7 +291,7 @@ async def _reanalyze(execution: TestExecutionInfo, ai_model, lang=None):
         if fact:
             await record_hypotheses(execution, fact)
     except asyncio.CancelledError:
-        execution.report_status, execution.report_error = 'failed', INTERRUPTED
+        execution.report_status, execution.report_error = 'failed', interrupted()
         raise
     except Exception as error:
         logger.warning("Re-analysis failed for %s: %s", execution.id, error)
@@ -306,9 +316,10 @@ async def start_reanalysis(execution_id: str, ai_model=None, lang=None) -> TestE
     if current is None:
         raise LookupError(execution_id)
     if current.status != TestExecutionStatus.COMPLETED or not current.summary:
-        raise ValueError('只有成功完成并有结果的运行才能分析')
+        raise ValueError(tr('只有成功完成并有结果的运行才能分析',
+                            'Only a run that completed and has results can be analysed'))
     if current.report_status == 'running' or execution_id in _reanalyses:
-        raise RuntimeError('这次运行的分析还在进行')
+        raise RuntimeError(tr('这次运行的分析还在进行', 'This run is still being analysed'))
     execution = current.model_copy(deep=True)
     execution.report_status, execution.report_error = 'running', None
     await persist_execution(execution)
@@ -328,8 +339,8 @@ async def recover_interrupted():
     from app.services.execution_lifecycle import TERMINAL, persist_execution
     for execution in list(store.executions.values()):
         if execution.report_status == 'running' and execution.status in TERMINAL:
-            execution = execution.model_copy(deep=True)
-            execution.report_status, execution.report_error = 'failed', INTERRUPTED
+            execution = (store.get_execution(execution.id) or execution).model_copy(deep=True)  # Whole, to be saved.
+            execution.report_status, execution.report_error = 'failed', interrupted()
             try:
                 await persist_execution(execution)
             except Exception as error:

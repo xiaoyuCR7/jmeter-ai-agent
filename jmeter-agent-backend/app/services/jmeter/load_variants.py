@@ -5,6 +5,7 @@ file itself is never edited; the scaled copy is what the run snapshots and JMete
 Groups keep their shares, so a stepped or spike profile keeps its shape.
 """
 import xml.etree.ElementTree as ET
+from app.core.text import tr
 
 MAX_THREADS = 100_000
 
@@ -57,24 +58,31 @@ def scale_threads(content: bytes, total: int) -> bytes:
     Refuses plans whose thread counts are variables or functions: there is no number to scale.
     """
     if not isinstance(total, int) or not 1 <= total <= MAX_THREADS:
-        raise ValueError(f'线程数必须是 1 到 {MAX_THREADS} 之间的整数')
+        raise ValueError(tr(f'线程数必须是 1 到 {MAX_THREADS} 之间的整数',
+                            f'The thread count must be a whole number from 1 to {MAX_THREADS}'))
     root = ET.fromstring(content)
     groups = load_groups(root)
     if not groups:
-        raise ValueError('计划里没有启用的标准线程组（ThreadGroup），无法改变负载')
+        raise ValueError(tr('计划里没有启用的标准线程组（ThreadGroup），无法改变负载',
+                            'The plan has no enabled standard Thread Group, so its load cannot be changed'))
     counts = []
     for group in groups:
         prop = _threads_prop(group)
         text = (prop.text or '').strip() if prop is not None else ''
         if not text.isdigit():
-            raise ValueError(f'线程组「{group.get("testname", "")}」的线程数不是固定数字（{text or "空"}），无法按比例调整')
+            raise ValueError(tr(
+                f'线程组「{group.get("testname", "")}」的线程数不是固定数字（{text or "空"}），无法按比例调整',
+                f'Thread group "{group.get("testname", "")}" has no fixed thread count ({text or "empty"}), '
+                'so it cannot be scaled'))
         counts.append(int(text))
     current = sum(counts)
     if current <= 0:
-        raise ValueError('计划的线程数合计为 0，无法按比例调整')
+        raise ValueError(tr('计划的线程数合计为 0，无法按比例调整',
+                            "The plan's thread counts add up to 0, so there is nothing to scale"))
     active = [i for i, count in enumerate(counts) if count > 0]
     if total < len(active):
-        raise ValueError(f'计划有 {len(active)} 个线程组，线程数至少要 {len(active)}')
+        raise ValueError(tr(f'计划有 {len(active)} 个线程组，线程数至少要 {len(active)}',
+                            f'The plan has {len(active)} thread groups, so it needs at least {len(active)} threads'))
     # Largest remainder, with every group that had users keeping at least one.
     exact = {i: counts[i] * total / current for i in active}
     scaled = {i: max(1, int(exact[i])) for i in active}

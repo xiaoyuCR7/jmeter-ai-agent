@@ -1,5 +1,4 @@
 """OpenAPI import contracts using only temporary SQLite/files and fake execution."""
-from copy import deepcopy
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock

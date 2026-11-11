@@ -1,0 +1,81 @@
+name: Model evaluation
+
+# Scores a model's reports on the hand-labelled runs in tests/golden: how many numbers it gets wrong
+# before and after the one rewrite, empty sections, and the language. Run it by hand after changing a
+# prompt or before switching models; it calls the model, so it costs tokens and is never run on a push.
+#
+# The number checker itself is scored without a model on every push, as part of the test suite
+# (tests/test_golden_claims.py).
+#
+# Repository secrets: EVAL_API_KEY, and EVAL_API_BASE for anything but the provider's default address.
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: Adapter (openai_compatible for any OpenAI-compatible API, or anthropic)
+        type: choice
+        options: [openai_compatible, anthropic]
+        default: openai_compatible
+      model:
+        description: Model name, as the provider spells it
+        required: true
+      lang:
+        description: Report language
+        type: choice
+        options: [zh-CN, en]
+        default: zh-CN
+      repeat:
+        description: Reports per golden run
+        default: '1'
+
+permissions:
+  contents: read
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: jmeter-agent-backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: jmeter-agent-backend/requirements-dev.txt
+      - name: Install exact dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Describe the model to the app
+        env:
+          PROVIDER: ${{ inputs.provider }}
+          MODEL: ${{ inputs.model }}
+          API_BASE: ${{ secrets.EVAL_API_BASE }}
+        # The key stays in the environment (env:EVAL_API_KEY); it is never written to the file.
+        run: |
+          python - <<'PY'
+          import json, os
+          config = {"id": "eval", "name": "Evaluated model", "model": os.environ["MODEL"],
+                    "adapter_type": os.environ["PROVIDER"], "api_key": "env:EVAL_API_KEY", "enabled": True}
+          if os.environ.get("API_BASE"):
+              config["api_base"] = os.environ["API_BASE"]
+          json.dump([config], open("ai_models_config.json", "w"))
+          PY
+      - name: Show how the app sees it
+        run: python scripts/eval_reports.py --list-models
+      - name: Score the number checker
+        run: python scripts/eval_reports.py
+      - name: Score the model's reports
+        env:
+          EVAL_API_KEY: ${{ secrets.EVAL_API_KEY }}
+          EVAL_LANG: ${{ inputs.lang }}
+          EVAL_REPEAT: ${{ inputs.repeat }}
+        run: python scripts/eval_reports.py --model eval --lang "$EVAL_LANG" --repeat "$EVAL_REPEAT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-results
+          path: jmeter-agent-backend/eval_results/
+          retention-days: 30

@@ -150,7 +150,6 @@ def test_truncation_does_not_leave_orphan_tool_results():
 
 
 def test_truncation_preserves_pinned_task_or_fails_explicitly():
-    from app.services.ai.adapters.base import BaseAIAdapter
     from app.services.ai.adapters.openai_adapter import OpenAIAdapter
     adapter = object.__new__(OpenAIAdapter)
     adapter.max_tokens = 8000

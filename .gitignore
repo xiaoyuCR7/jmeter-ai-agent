@@ -103,3 +103,8 @@ Thumbs.db
 # 本地 Claude Code 配置（各人自己的预览/权限设置）
 # ============================================================
 /.claude/
+
+# 后端日志
+/jmeter-agent-backend/logs/
+# 覆盖率数据
+.coverage

@@ -1,6 +1,4 @@
 """HTTP contracts; ASGI transport never opens a network connection."""
-from datetime import datetime
-from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import httpx
 import pytest

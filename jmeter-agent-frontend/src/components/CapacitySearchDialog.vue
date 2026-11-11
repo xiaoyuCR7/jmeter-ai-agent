@@ -3,7 +3,7 @@
     @update:model-value="emit('update:modelValue', $event)">
     <p class="hint">
       {{ L('从起始线程数开始逐级加压，每一级是一次完整运行。遇到性能需求不达标、错误率超限或吞吐量不再随负载增长时停下，上一级就是这个计划能承受的负载。计划文件本身不会被修改。为节省模型调用，只在探索结束时为停下的那一级写一份 AI 报告。',
-           'Raises the load step by step, each step a full run. It stops at the first step that fails a requirement, errors too much or stops gaining throughput; the step before is the load the plan takes. The plan file is not changed. To save model calls, one AI report is written when the search ends, on the step that stopped it.') }}
+           'Raises the load step by step, each step a full run. It stops at the first step that fails a requirement, errors too much or stops gaining throughput. That step is run once more to rule out noise, then two loads in between are tried, so the answer is narrower than one step; a step during which this machine itself was saturated ends the search. The plan file is not changed. To save model calls, one AI report is written when the search ends, on the step that stopped it.') }}
     </p>
     <el-form :inline="true" :model="form" size="default" class="form" :disabled="running">
       <el-form-item :label="L('起始线程', 'Start threads')">
@@ -38,7 +38,12 @@
         <el-button v-if="current.status === 'running'" size="small" :loading="cancelling" @click="cancel">{{ L('取消', 'Cancel') }}</el-button>
       </div>
       <el-table :data="current.steps" size="small">
-        <el-table-column :label="L('线程', 'Threads')" prop="threads" width="80" align="right" />
+        <el-table-column :label="L('线程', 'Threads')" width="120" align="right">
+          <template #default="{ row }">
+            <el-tag v-if="phaseText(row.phase)" size="small" type="info" effect="plain" class="phase">{{ phaseText(row.phase) }}</el-tag>
+            <span class="num">{{ row.threads }}</span>
+          </template>
+        </el-table-column>
         <el-table-column :label="L('状态', 'Status')" width="100">
           <template #default="{ row }"><el-tag size="small" :type="stepType(row.status)">{{ stepText(row.status) }}</el-tag></template>
         </el-table-column>
@@ -102,7 +107,11 @@ const STATUS: Record<string, [string, string, any]> = {
 const STEP: Record<string, [string, string, any]> = {
   pending: ['等待', 'Waiting', 'info'], running: ['运行中', 'Running', 'warning'], passed: ['通过', 'Passed', 'success'],
   stopped: ['停止点', 'Stop', 'danger'], failed: ['失败', 'Failed', 'danger'], skipped: ['未运行', 'Not run', 'info'],
+  retried: ['波动', 'Noise', 'warning'],
 }
+// Why a step ran: the planned ramp, the stopping load run once more, or a load between pass and stop.
+const PHASE: Record<string, [string, string]> = { confirm: ['复测', 'Repeat'], refine: ['细化', 'Refine'] }
+const phaseText = (phase?: string) => phase && PHASE[phase] ? L(PHASE[phase][0], PHASE[phase][1]) : ''
 const statusText = (status: string) => STATUS[status] ? L(STATUS[status][0], STATUS[status][1]) : status
 const statusType = (status: string) => STATUS[status]?.[2] ?? 'info'
 const stepText = (status: string) => STEP[status] ? L(STEP[status][0], STEP[status][1]) : status

@@ -7,7 +7,7 @@ import time
 import json
 from jsonschema import Draft202012Validator
 from typing import Any, Literal, Optional, Callable, Awaitable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from app.core.config import settings
 

@@ -122,7 +122,8 @@ async def test_snapshot_registered_before_launch_and_round_trips(env, monkeypatc
     result = await lifecycle.execute(str(env.path), 'run-one')
     row = await env.db.get_execution('run-one')
     assert row['status'] == 'failed' and row['error_message'] == 'process failed'
-    assert row['end_time'] and row['resource_snapshot_post'] == {'cpu': 4}
+    # The lifecycle samples the machine itself; what an executor claims is not used.
+    assert row['end_time'] and row['resource_snapshot_post']['cpu_percent'] == 5.0
     assert Path(calls[0]).read_bytes() == original
     assert result.test_plan_id
 
@@ -146,9 +147,10 @@ async def test_execution_context_is_captured_once_and_persisted(env):
 @pytest.mark.asyncio
 async def test_failed_termination_is_not_persisted_as_terminal(env, monkeypatch):
     lifecycle, module = service()
-    fake = SimpleNamespace(_running_processes={})
+    stuck = set()
+    fake = SimpleNamespace(owns=stuck.__contains__, cleanup_failed=stuck.__contains__)
     async def execute(path, execution_id, **kwargs):
-        fake._running_processes[execution_id] = {'cleanup_failed': True}
+        stuck.add(execution_id)
         return Execution(id=execution_id, test_plan_id='', jmx_path=path, status=Status.FAILED,
                          error_message='termination failed')
     fake.execute = execute
@@ -282,7 +284,8 @@ async def test_cancel_does_not_claim_success_when_process_termination_fails(env,
     from app.services.execution_lifecycle import persist_execution
     execution.status = Status.RUNNING
     await persist_execution(execution)
-    fake = SimpleNamespace(_running_processes={execution.id: {}}, cancel=AsyncMock(return_value=False))
+    fake = SimpleNamespace(owns=lambda execution_id: execution_id == execution.id,
+                           cancel=AsyncMock(return_value=False))
     monkeypatch.setattr(module, 'get_executor', lambda: fake)
     assert await lifecycle.cancel(execution.id) is False
     assert (await env.db.get_execution(execution.id))['status'] == 'running'
@@ -300,7 +303,7 @@ async def test_agent_created_plan_is_immediately_registered(env):
 
 @pytest.mark.asyncio
 async def test_http_and_agent_use_same_lifecycle(env, monkeypatch):
-    from app.api import execution_routes, shared
+    from app.api import execution_routes
     from app.services.ai.agent.tools import jmeter
     from fastapi import BackgroundTasks
     lifecycle, module = service()
@@ -347,27 +350,68 @@ async def test_imported_plans_register_without_overwriting(env):
 
 
 @pytest.mark.asyncio
-async def test_scheduler_wait_is_registered_and_cancellable(env, monkeypatch):
-    from app.services.jmeter.test_scheduler import TestScheduler, ReadinessCheck, SchedulerDecision
-    from app.services.jmeter.resource_monitor import ResourceSnapshot
+async def test_resource_wait_is_registered_and_cancellable(env, monkeypatch):
     lifecycle, module = service()
-    monkeypatch.setattr(module, 'execution_lifecycle', lifecycle)
     waiting = asyncio.Event()
-    snap = ResourceSnapshot(cpu_percent=80, memory_percent=20, memory_used_gb=1, memory_total_gb=8, disk_percent=10)
-    async def wait(**kwargs):
+    async def hold():
         waiting.set()
         await asyncio.Event().wait()
-    scheduler = TestScheduler(monitor=SimpleNamespace(wait_until_safe=wait, snapshot=lambda: snap))
-    monkeypatch.setattr(scheduler, 'check_readiness', lambda: ReadinessCheck(SchedulerDecision.WAIT, snap, 'busy'))
-    task = asyncio.create_task(scheduler.run_one(str(env.path), 'resource-wait'))
-    try:
-        await waiting.wait()
-        assert await env.db.get_execution('resource-wait')
-        assert await lifecycle.cancel('resource-wait')
-        assert (await env.db.get_execution('resource-wait'))['status'] == 'cancelled'
-    finally:
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+    monkeypatch.setattr(module, 'get_scheduler', lambda: SimpleNamespace(hold_until_ready=hold,
+                                                                         note_run_finished=lambda: None))
+    fake = SimpleNamespace(execute=AsyncMock())
+    execution = await lifecycle.submit(str(env.path), 'resource-wait', executor=fake, wait_for_resources=True)
+    await waiting.wait()
+    assert await env.db.get_execution(execution.id)
+    assert await lifecycle.cancel('resource-wait')
+    assert (await env.db.get_execution('resource-wait'))['status'] == 'cancelled'
+    fake.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_machine_too_busy_cancels_an_unattended_run_and_says_why(env, monkeypatch):
+    lifecycle, module = service()
+    async def hold():
+        return 'System overloaded: CPU critically high: 99.0%'
+    monkeypatch.setattr(module, 'get_scheduler', lambda: SimpleNamespace(hold_until_ready=hold,
+                                                                         note_run_finished=lambda: None))
+    fake = SimpleNamespace(execute=AsyncMock())
+    result = await lifecycle.execute(str(env.path), 'too-busy', executor=fake, wait_for_resources=True)
+    assert result.status == Status.CANCELLED and 'overloaded' in result.error_message
+    fake.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_run_the_user_started_is_never_held(env, monkeypatch):
+    lifecycle, module = service()
+    monkeypatch.setattr(module, 'get_scheduler', lambda: SimpleNamespace(
+        hold_until_ready=lambda: pytest.fail('must not wait'), note_run_finished=lambda: None))
+    async def execute(path, execution_id, **kwargs):
+        return Execution(id=execution_id, test_plan_id='', status=Status.FAILED, jmx_path=path)
+    result = await lifecycle.execute(str(env.path), 'by-hand', executor=SimpleNamespace(execute=execute))
+    assert result.status == Status.FAILED
+    # Recorded for the report all the same.
+    assert result.resource_snapshot_pre['cpu_percent'] == 5.0
+
+
+@pytest.mark.asyncio
+async def test_every_run_records_the_load_generator_during_the_run(env, monkeypatch):
+    from app.services.jmeter import load_generator
+    lifecycle, module = service()
+    readings = iter([10.0, 95.0, 96.0, 97.0])
+    monkeypatch.setattr(load_generator, 'read', lambda: {
+        'cpu_percent': next(readings, 97.0), 'memory_percent': 40.0, 'memory_used_gb': 1, 'memory_total_gb': 8,
+        'timestamp': 0.0})
+    real = load_generator.Sampler
+    monkeypatch.setattr(module.load_generator, 'Sampler', lambda: real(interval=0.01))
+    async def execute(path, execution_id, **kwargs):
+        await asyncio.sleep(0.3)
+        return Execution(id=execution_id, test_plan_id='', status=Status.FAILED, jmx_path=path)
+    result = await lifecycle.execute(str(env.path), 'sampled', executor=SimpleNamespace(execute=execute))
+    assert result.resource_snapshot_pre['cpu_percent'] == 10.0
+    during = result.resource_snapshot_post['during']
+    assert during['cpu_peak'] == 97.0 and during['samples'] >= 3 and during['saturated'] is True
+    stored = await env.db.get_execution('sampled')
+    assert stored['resource_snapshot_post']['during']['saturated'] is True
 
 
 @pytest.mark.asyncio
@@ -387,7 +431,7 @@ async def test_legacy_database_migration_is_idempotent_and_preserves_rows(env):
 
 @pytest.mark.asyncio
 async def test_cancelled_before_start_report_is_readable(env):
-    from app.api import execution_routes, shared
+    from app.api import execution_routes
     lifecycle, _ = service()
     execution = await lifecycle.prepare(str(env.path), 'early-cancel')
     await lifecycle.cancel(execution.id)
@@ -397,7 +441,7 @@ async def test_cancelled_before_start_report_is_readable(env):
 
 @pytest.mark.asyncio
 async def test_recovery_never_infers_success_from_jtl_presence(env):
-    from app.api import execution_routes, shared
+    from app.api import shared
     for name, flag in [('legacy-unknown', None), ('legacy-failed', 'FAILED')]:
         directory = env.root / 'reports' / name
         directory.mkdir(parents=True)
@@ -415,21 +459,6 @@ async def test_shutdown_marks_prepared_unstarted_execution_cancelled(env):
     execution = await lifecycle.prepare(str(env.path), 'prepared-stop')
     await lifecycle.shutdown()
     assert (await env.db.get_execution(execution.id))['status'] == 'cancelled'
-
-
-@pytest.mark.asyncio
-async def test_scheduler_preserves_injected_executor(env, monkeypatch):
-    from app.services.jmeter.test_scheduler import TestScheduler, ReadinessCheck, SchedulerDecision
-    from app.services.jmeter.resource_monitor import ResourceSnapshot
-    lifecycle, module = service()
-    monkeypatch.setattr(module, 'execution_lifecycle', lifecycle)
-    snap = ResourceSnapshot(cpu_percent=10, memory_percent=20, memory_used_gb=1, memory_total_gb=8, disk_percent=10)
-    fake = SimpleNamespace(execute=AsyncMock(return_value=Execution(
-        id='injected', test_plan_id='', status=Status.FAILED, jmx_path=str(env.path))))
-    scheduler = TestScheduler(executor=fake, monitor=SimpleNamespace(snapshot=lambda: snap))
-    monkeypatch.setattr(scheduler, 'check_readiness', lambda: ReadinessCheck(SchedulerDecision.PROCEED, snap, 'ready'))
-    await scheduler.run_one(str(env.path), 'injected')
-    fake.execute.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -603,6 +632,9 @@ class BlockingExecutor:
             await asyncio.Event().wait()
         finally:
             self._running_processes.pop(execution_id, None)
+
+    def owns(self, execution_id):
+        return execution_id in self._running_processes
 
     async def cancel(self, execution_id):
         task = self._running_processes[execution_id]['task']

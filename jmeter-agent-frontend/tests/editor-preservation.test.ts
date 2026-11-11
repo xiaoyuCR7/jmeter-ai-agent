@@ -12,6 +12,7 @@ import ThreadGroupForm from '../src/components/editor/ThreadGroupForm.vue'
 import EndpointSettingsForm from '../src/components/editor/EndpointSettingsForm.vue'
 import ParamsEditor from '../src/components/editor/ParamsEditor.vue'
 import { usePlanTree } from '../src/composables/usePlanTree'
+import { useEndpointList } from '../src/composables/useEndpointList'
 
 vi.mock('@/composables/useI18n', () => ({ useI18n: () => ({ t: (key: string) => key, L: (zh: string) => zh }) }))
 
@@ -39,6 +40,13 @@ function editor(path = 'src/views/TestCaseEditor.vue') {
   }
   // The tree conversion lives in a composable; the view's own functions call it by these names.
   Object.assign(context, usePlanTree(context as any))
+  // So does the request list (selection, add, copy, remove, reorder), under the names the view gives it.
+  const list = useEndpointList({
+    endpoints: context.endpoints, selectedId: context.selectedEndpointId, t: context.t, L: (zh: string) => zh,
+    notify: context.ElMessage,
+    onSelect: () => { context.mainView.value = 'edit'; context.debugTab.value = 'params' },
+  })
+  Object.assign(context, { ...list, handleReorder: list.reorderEndpoint })
   const names = declarations.flatMap(node => ts.isFunctionDeclaration(node) ? [node.name!.text] :
     (node as ts.VariableStatement).declarationList.declarations.map(d => (d.name as ts.Identifier).text))
   const functions = runInNewContext(`${js}\n({${names.join(',')}})`, context)

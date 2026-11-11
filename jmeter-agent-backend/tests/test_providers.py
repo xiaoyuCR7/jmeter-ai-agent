@@ -9,7 +9,7 @@ import pytest
 from app.models.schemas import AIChatMessage, AIModelConfig
 from app.services.ai.adapters.factory import AIAdapterFactory
 from app.services.ai.adapters.openai_adapter import AzureOpenAIAdapter, OpenAIAdapter
-from app.services.ai.providers import BY_KEY, PROVIDERS, catalog, needs_key
+from app.services.ai.providers import PROVIDERS, catalog, needs_key
 
 
 def test_every_preset_is_complete():

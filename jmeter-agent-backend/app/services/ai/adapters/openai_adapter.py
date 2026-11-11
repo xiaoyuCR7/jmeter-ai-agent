@@ -1,5 +1,5 @@
 import json
-from typing import AsyncIterator, List, Optional
+from typing import List, Optional
 
 from openai import AsyncAzureOpenAI, AsyncOpenAI, BadRequestError
 

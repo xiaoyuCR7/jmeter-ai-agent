@@ -291,7 +291,7 @@ class OpenAPIImporter:
             store.set_project(project_id, project)
             jmx_path = generator.save_jmx(jmx, name=f"{parsed.title} Baseline", project_id=project_id,
                                           plan_id=plan_id)
-            plan = await execution_lifecycle.register_path(jmx_path, project_id=project_id,
+            await execution_lifecycle.register_path(jmx_path, project_id=project_id,
                 name=f"{parsed.title} Baseline", test_config=config, endpoints_count=len(eps))
             jmx_paths.append(jmx_path)
         except Exception as e:
@@ -338,7 +338,6 @@ class OpenAPIImporter:
         if not isinstance(spec, dict) or not (str(spec.get("openapi", "")).startswith("3.") or spec.get("swagger") == "2.0"):
             raise ValueError("Expected an OpenAPI 3.x or Swagger 2.0 object")
         # OpenAPI 3.x
-        openapi = spec.get("openapi", "")
         info = self._object(spec.get("info", {}), 'info')
         title = info.get("title", "Imported API")
         version = info.get("version", "")
@@ -515,7 +514,7 @@ class OpenAPIImporter:
                     warnings.append(f"{ep.path}: path parameter {name} has no example; bind it to a value the flow extracts")
                     continue
                 if parameter.get("required") or location == "path":
-                    raise ValueError(f"{ep.path}: required parameter {name} needs an example/default")
+                    raise ValueError(f"{ep.path}: required parameter {name} needs an example/default") from None
                 warnings.append(f"{ep.path}: optional parameter {name} omitted; no example/default")
                 continue
             if isinstance(value, (dict, list)):

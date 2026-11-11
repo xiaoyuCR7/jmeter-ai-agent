@@ -1,7 +1,6 @@
 """Agent tools for JMeter test execution and report analysis."""
 
 import os
-import json
 import asyncio
 import logging
 from typing import Optional
@@ -11,8 +10,6 @@ from app.services.execution_lifecycle import execution_lifecycle
 from app.services.jmeter.environment import ProductionRunNeedsConfirmation
 from app.services.jmeter.script_risk import ScriptApprovalRequired
 from app.services.jmeter.report_parser import ReportParser
-from app.services.jmeter.test_scheduler import TestScheduler, SchedulerDecision
-from app.services.jmeter.resource_monitor import get_resource_monitor
 from app.services.ai.agent.tool_registry import Tool
 
 logger = logging.getLogger(__name__)
@@ -20,7 +17,6 @@ logger = logging.getLogger(__name__)
 # Executor is obtained lazily via get_executor() at call sites so importing
 # this module never probes the filesystem for the JMeter binary.
 _report_parser = ReportParser()
-_scheduler = TestScheduler()
 
 
 async def _with_script_approval(run, tool_name: str, jmx_path: str, *args, **kwargs):
@@ -77,44 +73,6 @@ async def run_preview(args: dict) -> Optional[dict]:
     return {'runs_scripts_on_this_machine': findings, 'plan_sha256': content_hash(content)} if findings else None
 
 
-def resource_hooks(skip_resource_check: bool, resource_info: dict, *, wait: bool = True):
-    """before_execute and postprocess callbacks: record the machine's load and, with ``wait``,
-    hold or stop the run until it is quiet."""
-    from app.models.schemas import TestExecutionStatus
-
-    async def before_execute(execution):
-        if skip_resource_check:
-            return
-        readiness = _scheduler.check_readiness()
-        from dataclasses import asdict
-        execution.resource_snapshot_pre = asdict(readiness.snapshot)
-        resource_info.update(pre_test_cpu=readiness.snapshot.cpu_percent,
-                             pre_test_memory=readiness.snapshot.memory_percent,
-                             readiness_decision=readiness.decision.value,
-                             readiness_message=readiness.message)
-        if not wait:
-            return
-        if readiness.decision == SchedulerDecision.OVERLOADED:
-            execution.status = TestExecutionStatus.CANCELLED
-            execution.error_message = f"System overloaded: {readiness.message}"
-            return
-        if readiness.decision in (SchedulerDecision.WAIT, SchedulerDecision.WARNING):
-            safe = await get_resource_monitor().wait_until_safe(
-                timeout=settings.RESOURCE_MAX_WAIT_SECONDS, check_interval=5.0)
-            resource_info['waited_for_resources'] = True
-            if not safe and readiness.decision == SchedulerDecision.WAIT:
-                execution.status = TestExecutionStatus.CANCELLED
-                execution.error_message = 'Timed out waiting for resources to free up'
-
-    async def postprocess(execution):
-        from dataclasses import asdict
-        snapshot = get_resource_monitor().snapshot()
-        execution.resource_snapshot_post = asdict(snapshot)
-        resource_info.update(post_test_cpu=snapshot.cpu_percent, post_test_memory=snapshot.memory_percent)
-
-    return before_execute, postprocess
-
-
 async def _start(tool_name: str, jmx_path: str, execution_id: str, **kwargs) -> dict:
     """Hand a run to the lifecycle and return; it outlives the request that started it."""
     try:
@@ -127,8 +85,7 @@ async def _start(tool_name: str, jmx_path: str, execution_id: str, **kwargs) -> 
 
 async def start_test(jmx_path: str, execution_id: str = "", skip_resource_check: bool = False) -> dict:
     """Start a JMeter test plan in the background, after a check of the machine's load."""
-    before_execute, postprocess = resource_hooks(skip_resource_check, {})
-    return await _start('execute_test', jmx_path, execution_id, before_execute=before_execute, postprocess=postprocess)
+    return await _start('execute_test', jmx_path, execution_id, wait_for_resources=not skip_resource_check)
 
 
 async def get_execution_status(execution_id: str) -> dict:
@@ -137,6 +94,7 @@ async def get_execution_status(execution_id: str) -> dict:
     Args:
         execution_id: The execution ID returned when the run started.
     """
+    from app.services.evidence import _load_generator
     from app.services.storage import store
     execution = store.get_execution(execution_id)
     if execution is None:
@@ -148,6 +106,8 @@ async def get_execution_status(execution_id: str) -> dict:
         "report_dir": execution.report_dir, "log_path": execution.log_path,
         "error_message": execution.error_message, "report_status": execution.report_status,
         "report_error": execution.report_error,
+        # saturated: the machine running JMeter was at its limit, so the numbers below are not the target's.
+        "load_generator": _load_generator(execution.resource_snapshot_pre, execution.resource_snapshot_post),
         "summary": execution.summary.model_dump() if execution.summary else None,
     }
 
@@ -241,7 +201,8 @@ def _distributed_engines(remote_engines: str):
 async def start_distributed(jmx_path: str, execution_id: str = "", remote_engines: str = "") -> dict:
     """Start a run across the remote engines in the background."""
     engines, error = _distributed_engines(remote_engines)
-    return error or await _start('execute_distributed', jmx_path, execution_id, remote_engines=engines)
+    return error or await _start('execute_distributed', jmx_path, execution_id, remote_engines=engines,
+                                 wait_for_resources=True)
 
 
 async def get_remote_engines() -> dict:

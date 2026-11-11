@@ -18,6 +18,7 @@ os.environ.update({
     'TEST_PLANS_DIR_DEFAULT': str(_DATA / 'test_plans'),
     'REPORTS_DIR_DEFAULT': str(_DATA / 'reports'),
     'AI_MODELS_CONFIG_FILE': str(_DATA / 'ai_models_config.json'),
+    'LOG_FILE': 'off',  # An open log file would keep the folder above from being removed on Windows.
 })
 
 import pytest  # noqa: E402
@@ -31,6 +32,14 @@ from app.services.jmeter import jmx_lint  # noqa: E402
 def _no_jmeter_start(monkeypatch):
     """A load check starts JMeter; test_generated_plans_jmeter.py is where that happens on purpose."""
     monkeypatch.setattr(jmx_lint, 'load_check', lambda content: {'checked': False, 'ok': None, 'error': None})
+
+@pytest.fixture(autouse=True)
+def _instant_machine_reading(monkeypatch):
+    """Every run reads the load generator's CPU, which takes a moment; tests get a fixed quiet reading."""
+    from app.services.jmeter import load_generator
+    monkeypatch.setattr(load_generator, 'read', lambda: {
+        'cpu_percent': 5.0, 'memory_percent': 40.0, 'memory_used_gb': 3.2, 'memory_total_gb': 8.0, 'timestamp': 0.0})
+
 
 # A user's paths_config.json would otherwise override the plan and report folders.
 config.PATHS_CONFIG_FILE = str(_DATA / 'paths_config.json')

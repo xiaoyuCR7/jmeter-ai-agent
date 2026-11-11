@@ -7,7 +7,6 @@ import os
 import re
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
 from typing import List, Optional
 from urllib.parse import urlsplit, urlunsplit, urlencode
 
@@ -181,7 +180,7 @@ class JMXGenerator:
         root.set("jmeter", "5.6.3")
 
         hash_tree = ET.SubElement(root, "hashTree")
-        test_plan = self._create_test_plan(hash_tree, test_name)
+        self._create_test_plan(hash_tree, test_name)
         test_plan_hash = ET.SubElement(hash_tree, "hashTree")
 
         ordered_endpoints = self._topological_sort(endpoints)
