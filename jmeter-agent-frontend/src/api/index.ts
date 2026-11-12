@@ -439,7 +439,9 @@ export const api = {
   getCapacitySearch: (searchId: string) => instance.get<CapacitySearch>(`/capacity-searches/${encodeURIComponent(searchId)}`),
   cancelCapacitySearch: (searchId: string) => instance.post(`/capacity-searches/${encodeURIComponent(searchId)}/cancel`),
   getExecutionGate: (executionId: string) => instance.get(`/executions/${encodeURIComponent(executionId)}/gate`),
-  getExecutions: (projectId?: string) => instance.get('/executions', { params: projectId ? { project_id: projectId } : {} }),
+  // Newest first, a page at a time; `total` in the answer counts every run that matches.
+  getExecutions: (projectId?: string, page: { status?: string; offset?: number; limit?: number } = {}) =>
+    instance.get('/executions', { params: { ...(projectId ? { project_id: projectId } : {}), ...page } }),
   cancelExecution: (id: string) => instance.post(`/executions/${id}/cancel`),
   getExecution: (id: string) => instance.get(`/executions/${encodeURIComponent(id)}`),
   getExecutionLive: (id: string) => instance.get<LiveRun>(`/executions/${encodeURIComponent(id)}/live`),

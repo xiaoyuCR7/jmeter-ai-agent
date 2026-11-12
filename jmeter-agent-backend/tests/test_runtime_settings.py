@@ -125,3 +125,40 @@ def test_a_key_can_live_in_the_environment_instead_of_the_file(tmp_path, monkeyp
     assert config.sanitize_model_config(saved[0])['api_key'] == 'env:MY_MODEL_KEY'
     assert config.sanitize_model_config(saved[1])['api_key'] == '***'
     assert [name for name in os.listdir(tmp_path)] == ['ai_models_config.json']  # No temporary file left behind.
+
+
+def test_a_relative_database_path_is_taken_from_the_backend_folder(tmp_path, monkeypatch):
+    import os
+    from app.core.config import Settings
+    monkeypatch.chdir(tmp_path)  # Started from somewhere else: the database must not follow.
+    backend = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    url = Settings(DATABASE_URL='sqlite+aiosqlite:///./jmeter_agent.db').DATABASE_URL
+    assert url == 'sqlite+aiosqlite:///' + os.path.join(backend, 'jmeter_agent.db').replace(os.sep, '/')
+    absolute = 'sqlite+aiosqlite:///' + str(tmp_path / 'x.db').replace(os.sep, '/')
+    assert Settings(DATABASE_URL=absolute).DATABASE_URL == absolute
+    assert Settings(DATABASE_URL='sqlite+aiosqlite:///:memory:').DATABASE_URL == 'sqlite+aiosqlite:///:memory:'
+    assert Settings(DATABASE_URL='postgresql+asyncpg://h/db').DATABASE_URL == 'postgresql+asyncpg://h/db'
+
+
+def test_a_jmeter_left_running_is_stopped_only_if_it_is_the_recorded_process(tmp_path):
+    import subprocess
+    import sys
+    import psutil
+    from app.services.jmeter import executor
+    child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])
+    try:
+        executor._record_process(str(tmp_path), child.pid)
+        recorded = (tmp_path / executor.PID_FILE).read_text()
+        # The same process ID, started at another time: some unrelated program, which must be left alone.
+        (tmp_path / executor.PID_FILE).write_text(recorded.replace('"started": ', '"started": 1'))
+        assert executor.stop_recorded_process(str(tmp_path)) is False
+        assert psutil.pid_exists(child.pid) and child.poll() is None
+        assert not (tmp_path / executor.PID_FILE).exists()
+
+        executor._record_process(str(tmp_path), child.pid)
+        assert executor.stop_recorded_process(str(tmp_path)) is True
+        assert child.wait(timeout=10) is not None
+        assert executor.stop_recorded_process(str(tmp_path)) is False  # Nothing recorded any more.
+    finally:
+        if child.poll() is None:
+            child.kill()

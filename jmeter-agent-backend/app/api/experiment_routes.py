@@ -82,10 +82,11 @@ async def cancel_capacity_search(search_id: str):
 
 
 @router.get('/executions/{execution_id}/gate')
-async def execution_gate(execution_id: str):
-    """CI 门禁：pass / fail / error；运行或报告还没结束时是 pending，轮询到它变化为止"""
+async def execution_gate(execution_id: str, strict: bool = Query(
+        True, description='什么都没检查（没有需求也没有基线）算 error，有需求无法判定算 fail；false 时只给警告')):
+    """CI 门禁：pass / fail / error；运行或报告还没结束时是 pending，轮询到它变化为止。压力机饱和的运行一律是 error"""
     try:
-        return await experiments.gate(execution_id)
+        return await experiments.gate(execution_id, strict=strict)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     except LookupError as error:

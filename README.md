@@ -148,7 +148,10 @@ python jmeter-agent-backend/scripts/ci_gate.py --plan <test-plan-id>
 ```
 
 It starts the plan, polls `GET /api/v1/executions/{id}/gate` and exits `0` when requirements and the baseline pass,
-`1` when a requirement fails or the run regressed against the baseline, and `2` when the run did not complete or timed out.
+`1` when a requirement fails or cannot be evaluated, or the run regressed against the baseline, and `2` when the run did
+not complete or timed out. It is also `2` when the machine running JMeter was saturated (the numbers are then its own),
+and when the project has neither requirements nor a baseline, because nothing was checked; `--lenient` accepts that last
+case, and a requirement that could not be evaluated, with a warning.
 The token comes from `--token`, `JMETER_AGENT_TOKEN` or `.local_access_token`. A plan with scripts is refused once with the
 `sha256` to approve; pass it with `--approved-sha256` once you trust the plan.
 

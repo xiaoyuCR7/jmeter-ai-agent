@@ -56,19 +56,38 @@ class MemoryDatabase:
             self._db_lock = asyncio.Lock()
         return self._db_lock
 
-    async def _get_db(self):
-        if self._db_conn is not None:
-            return self._db_conn
+    async def _open(self):
         import aiosqlite
         db = await aiosqlite.connect(self.db_path, timeout=30)
         try:
             await db.execute("PRAGMA journal_mode=WAL")
             await db.execute("PRAGMA foreign_keys=ON")
         except (Exception, asyncio.CancelledError):
+            await self._close_quietly(db)
+            raise
+        return db
+
+    async def _close_quietly(self, db):
+        try:
+            await db.close()
+        except Exception:
+            logger.warning('Failed to close an uninitialized %s connection', self.TABLE)
+
+    async def _get_db(self):
+        if self._db_conn is not None:
+            return self._db_conn
+        # Each connection runs on its own (non-daemon) thread. aiosqlite stops that thread when opening
+        # fails, but not when the caller is cancelled while it opens: the thread then outlived its
+        # connection and kept the process from exiting. So opening always finishes, and a caller that
+        # was cancelled meanwhile closes what was opened.
+        opening = asyncio.ensure_future(self._open())
+        try:
+            db = await asyncio.shield(opening)
+        except asyncio.CancelledError:
             try:
-                await db.close()
-            except Exception:
-                logger.warning('Failed to close an uninitialized %s connection', self.TABLE)
+                await self._close_quietly(await opening)
+            except (Exception, asyncio.CancelledError):
+                pass  # Opening failed or was cancelled itself, and closed what it had opened.
             raise
         self._db_conn = db
         return db

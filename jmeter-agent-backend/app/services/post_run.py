@@ -371,9 +371,14 @@ async def backfill_memory():
     """Runs recorded before facts carried a project and load get them, so they join project history."""
     from app.services.ai.analysis_context import run_context
     from app.services.ai.memory import fact_ledger, hypothesis_ledger
+    if not store.executions:
+        return
+    # Only the runs still waiting for it: every run's plan used to be read again at every start.
+    waiting = await fact_ledger.without_project() | await hypothesis_ledger.without_project()
     updated = 0
-    for execution in list(store.executions.values()):
-        if execution.status != TestExecutionStatus.COMPLETED or not execution.context_snapshot:
+    for execution in list(store.executions.values()) if waiting else []:
+        if (execution.id not in waiting or execution.status != TestExecutionStatus.COMPLETED
+                or not execution.context_snapshot):
             continue
         try:
             context = await asyncio.to_thread(run_context, execution)

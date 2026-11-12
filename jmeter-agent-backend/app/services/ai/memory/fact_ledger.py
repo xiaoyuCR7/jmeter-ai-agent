@@ -327,6 +327,15 @@ class FactLedger(MemoryDatabase):
             await db.commit()
             return True
 
+    async def without_project(self) -> set:
+        """Runs whose fact was recorded before facts carried a project."""
+        await self._ensure_table()
+        async with self._get_lock():
+            db = await self._get_db()
+            cursor = await db.execute(
+                "SELECT execution_id FROM fact_sheets WHERE COALESCE(json_extract(facts_json, '$.project_id'), '') = ''")
+            return {row[0] for row in await cursor.fetchall()}
+
     async def get_latest_fact(self, module: str, version: Optional[str] = None) -> Optional[FactSheet]:
         """Get the most recent fact for a module/version."""
         facts = await self.get_facts_for_module_version(module, version, limit=1)

@@ -263,10 +263,13 @@ def run(status=Status.COMPLETED, error_rate=0.0):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('requirements,baseline,expected', [
-    ('pass', 'stable', 'pass'), ('fail', 'stable', 'fail'), ('pass', 'regression', 'fail'),
-    ('incomplete', None, 'pass'), ('none', None, 'pass')])
-async def test_the_gate(monkeypatch, requirements, baseline, expected):
+@pytest.mark.parametrize('requirements,baseline,strict,expected', [
+    ('pass', 'stable', True, 'pass'), ('fail', 'stable', True, 'fail'), ('pass', 'regression', True, 'fail'),
+    ('pass', None, True, 'pass'), ('none', 'stable', True, 'pass'),
+    # A pass must mean something was checked: these two used to pass with a warning nobody read.
+    ('incomplete', None, True, 'fail'), ('none', None, True, 'error'),
+    ('incomplete', None, False, 'pass'), ('none', None, False, 'pass')])
+async def test_the_gate(monkeypatch, requirements, baseline, strict, expected):
     from app.services import baseline_compare
     monkeypatch.setattr(experiments.store, 'get_execution', lambda execution_id: run())
 
@@ -277,8 +280,24 @@ async def test_the_gate(monkeypatch, requirements, baseline, expected):
         return {'baseline': {'verdict': baseline, 'name': 'b', 'summary': 's'} if baseline else None}
     monkeypatch.setattr(experiments, 'requirement_verdict', verdict)
     monkeypatch.setattr(baseline_compare, 'evidence_for', history)
-    result = await experiments.gate('run-1')
+    result = await experiments.gate('run-1', strict=strict)
     assert result['gate'] == expected and result['requirements'] == requirements
+    if expected == 'pass' and (requirements != 'pass' or not baseline) and requirements != 'pass':
+        assert result['warnings']
+
+
+@pytest.mark.asyncio
+async def test_the_gate_refuses_numbers_from_a_saturated_load_generator(monkeypatch):
+    execution = run()
+    execution.resource_snapshot_post = {'during': {'saturated': True}}
+    monkeypatch.setattr(experiments.store, 'get_execution', lambda execution_id: execution)
+
+    async def verdict(execution):
+        raise AssertionError('Requirements must not be judged on numbers that are not the target\'s')
+    monkeypatch.setattr(experiments, 'requirement_verdict', verdict)
+    for strict in (True, False):
+        result = await experiments.gate('run-1', strict=strict)
+        assert result['gate'] == 'error' and 'saturated' in result['reasons'][0]
 
 
 @pytest.mark.asyncio

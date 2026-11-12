@@ -440,20 +440,6 @@ async def test_cancelled_before_start_report_is_readable(env):
 
 
 @pytest.mark.asyncio
-async def test_recovery_never_infers_success_from_jtl_presence(env):
-    from app.api import shared
-    for name, flag in [('legacy-unknown', None), ('legacy-failed', 'FAILED')]:
-        directory = env.root / 'reports' / name
-        directory.mkdir(parents=True)
-        (directory / 'result.jtl').write_text('partial')
-        if flag:
-            (directory / '_done.flag').write_text(flag)
-    shared.scan_reports()
-    assert store.get_execution('legacy-unknown').status == Status.FAILED
-    assert store.get_execution('legacy-failed').status == Status.FAILED
-
-
-@pytest.mark.asyncio
 async def test_shutdown_marks_prepared_unstarted_execution_cancelled(env):
     lifecycle, _ = service()
     execution = await lifecycle.prepare(str(env.path), 'prepared-stop')
@@ -666,4 +652,88 @@ async def test_a_run_can_use_another_thread_count_without_changing_the_plan(env)
     assert b'>40<' in Path(prepared.jmx_path).read_bytes() and env.path.read_bytes() == original
     assert prepared.context_snapshot['test_config']['concurrent_users'] == 40
     assert prepared.context_snapshot['purpose'] == {'kind': 'verification'}
+    await lifecycle.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_run_left_running_by_a_killed_backend_is_closed_at_startup(env, monkeypatch):
+    lifecycle, module = service()
+    left = await lifecycle.prepare(str(env.path), 'left-running')
+    left.status, left.start_time = Status.RUNNING, datetime.now()
+    await module.persist_execution(left)
+    done = await lifecycle.prepare(str(env.path), 'already-done')
+    done.status = Status.COMPLETED
+    await module.persist_execution(done)
+    stopped = []
+    monkeypatch.setattr(module, 'stop_recorded_process', lambda report_dir: stopped.append(report_dir) or True)
+
+    restarted, _ = service()  # A new backend owns none of these runs.
+    assert await restarted.recover_abandoned() == 1
+
+    row = await env.db.get_execution('left-running')
+    assert (row['status'], row['report_status']) == ('failed', 'skipped')
+    assert row['end_time'] and 'cut off' in row['error_message'] or '中断' in row['error_message']
+    assert stopped == [left.report_dir]
+    assert (await env.db.get_execution('already-done'))['status'] == 'completed'
+    assert await restarted.recover_abandoned() == 0
+
+
+@pytest.mark.asyncio
+async def test_a_second_run_waits_its_turn_as_pending(env, monkeypatch):
+    from app.core.config import settings
+    from app.services.jmeter import executor as executor_module
+    monkeypatch.setattr(settings, 'RESOURCE_MAX_CONCURRENT_TESTS', 1)
+    monkeypatch.setattr(executor_module, '_jmeter_slots', None)
+    lifecycle, _ = service()
+    release, launched = asyncio.Event(), []
+
+    async def execute(jmx_path, execution_id, **kwargs):
+        launched.append(execution_id)
+        await release.wait()
+        return Execution(id=execution_id, test_plan_id='', status=Status.FAILED, jmx_path=jmx_path,
+                         error_message='stub', end_time=datetime.now())
+    executor = SimpleNamespace(execute=execute)
+    first = await lifecycle.submit(str(env.path), 'first', executor=executor)
+    second = await lifecycle.submit(str(env.path), 'second', executor=executor)
+    for _ in range(200):
+        if launched:
+            break
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.05)
+
+    assert launched == ['first']
+    waiting = store.get_execution('second')
+    assert waiting.status == Status.PENDING and waiting.start_time is None  # In line: its clock has not started.
+    release.set()
+    await lifecycle.wait(first.id)
+    await lifecycle.wait(second.id)
+    assert launched == ['first', 'second']
+    await lifecycle.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_queued_run_can_be_cancelled_and_frees_nothing_it_never_held(env, monkeypatch):
+    from app.core.config import settings
+    from app.services.jmeter import executor as executor_module
+    monkeypatch.setattr(settings, 'RESOURCE_MAX_CONCURRENT_TESTS', 1)
+    monkeypatch.setattr(executor_module, '_jmeter_slots', None)
+    lifecycle, _ = service()
+    release, launched = asyncio.Event(), []
+
+    async def execute(jmx_path, execution_id, **kwargs):
+        launched.append(execution_id)
+        await release.wait()
+        return Execution(id=execution_id, test_plan_id='', status=Status.FAILED, jmx_path=jmx_path,
+                         error_message='stub', end_time=datetime.now())
+    executor = SimpleNamespace(execute=execute)
+    await lifecycle.submit(str(env.path), 'holder', executor=executor)
+    await lifecycle.submit(str(env.path), 'queued', executor=executor)
+    await asyncio.sleep(0.1)
+    assert await lifecycle.cancel('queued')
+    assert store.get_execution('queued').status == Status.CANCELLED
+    third = await lifecycle.submit(str(env.path), 'third', executor=executor)
+    release.set()
+    await lifecycle.wait('holder')
+    await lifecycle.wait(third.id)
+    assert launched == ['holder', 'third']
     await lifecycle.shutdown()

@@ -1,12 +1,11 @@
-"""Helpers the API modules share: persistence, startup recovery and the answer to a run that needs approval."""
-import os
+"""Helpers the API modules share: persistence, the default project and the answer to a run that needs approval."""
 from datetime import datetime
 
 from fastapi import HTTPException
-from app.core.config import settings
+from app.core.config import settings  # noqa: F401  (tests reach the settings through this module)
 from app.services.db_store import db_store
 from app.models.schemas import (
-    TestPlanInfo, TestExecutionInfo, TestExecutionStatus, ProjectInfo, ProjectEnvironment,
+    TestPlanInfo, TestExecutionInfo, ProjectInfo, ProjectEnvironment,
 )
 from app.services.jmeter.report_parser import ReportParser
 from app.services.jmeter.environment import ProductionRunNeedsConfirmation
@@ -65,62 +64,6 @@ async def ensure_default_project():
             created_at=datetime.now()
         )
         await persist_project(default_project, create=True)
-
-
-def scan_reports():
-    """启动时扫描 reports 目录，恢复未在 store 中的执行记录。
-
-    每个执行目录中应有:
-    - _done.flag 或 result.jtl 表示测试已完成
-    - run_*.bat 记录执行命令
-    - jmeter.log 执行日志
-    """
-    if not os.path.exists(settings.REPORTS_DIR):
-        return
-
-    recovered = 0
-    for exec_id in os.listdir(settings.REPORTS_DIR):
-        exec_dir = os.path.join(settings.REPORTS_DIR, exec_id)
-        if not os.path.isdir(exec_dir):
-            continue
-        if exec_id in store.executions or exec_id.startswith('trial-'):
-            continue  # Already tracked, or a trial run's leftovers, which are never history.
-
-        jtl_path = os.path.join(exec_dir, "result.jtl")
-        log_path = os.path.join(exec_dir, "jmeter.log")
-        done_flag = os.path.join(exec_dir, "_done.flag")
-
-        if not os.path.exists(jtl_path):
-            continue  # no results, skip
-
-        # A partial JTL is not evidence that the process exited successfully.
-        marker = ""
-        if os.path.exists(done_flag):
-            with open(done_flag, encoding="utf-8") as stream:
-                marker = stream.read().strip()
-        status = (TestExecutionStatus.COMPLETED if marker == "COMPLETED"
-                  else TestExecutionStatus.FAILED)
-
-        execution = TestExecutionInfo(
-            id=exec_id,
-            project_id=DEFAULT_PROJECT_ID,
-            test_plan_id="",
-            status=status,
-            jmx_path="",
-            error_message=None if status == TestExecutionStatus.COMPLETED else "Recovered run has no successful completion marker",
-            start_time=datetime.fromtimestamp(os.path.getctime(exec_dir)),
-            end_time=datetime.fromtimestamp(os.path.getmtime(exec_dir)),
-            report_dir=exec_dir,
-            log_path=log_path if os.path.exists(log_path) else "",
-        )
-        store.executions[exec_id] = execution
-        recovered += 1
-
-    if recovered > 0:
-        import logging
-        logging.getLogger(__name__).info(
-            f"Recovered {recovered} orphan execution(s) from reports directory"
-        )
 
 
 def _approval_needed(error) -> HTTPException:

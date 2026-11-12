@@ -412,10 +412,14 @@ def recover_searches() -> None:
 
 # ── CI gate ───────────────────────────────────────────────
 
-async def gate(execution_id: str) -> dict:
+async def gate(execution_id: str, strict: bool = True) -> dict:
     """pass, fail or error for one run: requirements first, then regressions against the baseline.
 
     ``pending`` while the run or its report is still being written, so a CI job polls until it changes.
+    A pass has to mean something was checked on numbers that can be trusted, so by default:
+    a run whose load generator was saturated is an error (its numbers are that machine's, not the
+    target's), a run with neither requirements nor a baseline is an error (nothing was checked), and
+    a requirement that could not be evaluated fails. ``strict=False`` turns the last two into warnings.
     """
     from app.services import baseline_compare
     execution = store.get_execution(validate_id(execution_id))
@@ -427,6 +431,11 @@ async def gate(execution_id: str) -> dict:
     if execution.status.value != 'completed' or not execution.summary:
         return {**result, 'gate': 'error',
                 'reasons': [execution.error_message or f'Run {execution.status.value}']}
+    from app.services.evidence import load_generator_saturated
+    if load_generator_saturated(execution):
+        return {**result, 'gate': 'error', 'reasons': [
+            'The load generator was saturated (CPU or memory at its limit for much of the run), so the numbers '
+            'measure that machine, not the target. Run with less load per generator, or on a larger one.']}
     verdict = await requirement_verdict(execution)
     result['requirements'] = verdict
     history = None
@@ -443,9 +452,18 @@ async def gate(execution_id: str) -> dict:
     if verdict == 'fail':
         result['reasons'].append('Performance requirements failed')
     elif verdict == 'incomplete':
-        result['warnings'].append('Some requirements could not be evaluated')
+        unknown = ('Some requirements could not be evaluated (for example, one names a request this run '
+                   'did not send)')
+        result['reasons' if strict else 'warnings'].append(unknown)
     elif verdict in (None, 'none'):
-        result['warnings'].append('No performance requirements are set; only the baseline was checked')
+        if not baseline.get('verdict'):
+            nothing = ('Nothing was checked: the project has no performance requirements and no baseline to '
+                       'compare with. Set either one, or pass strict=false to accept this run unchecked.')
+            if strict:
+                return {**result, 'gate': 'error', 'reasons': [nothing]}
+            result['warnings'].append(nothing)
+        else:
+            result['warnings'].append('No performance requirements are set; only the baseline was checked')
     if baseline.get('verdict') == 'regression':
         result['reasons'].append(f"Regression against baseline {baseline.get('name')}: {baseline.get('summary')}")
     result['gate'] = 'fail' if result['reasons'] else 'pass'

@@ -1,3 +1,5 @@
+import contextvars
+import json
 import os
 import subprocess
 import shutil
@@ -8,6 +10,7 @@ import signal
 import logging
 import psutil
 from datetime import datetime
+from contextlib import asynccontextmanager
 from typing import Optional, Callable
 
 from app.core.config import settings
@@ -15,18 +18,96 @@ from app.core.ids import validate_id
 from app.models.schemas import TestExecutionInfo, TestExecutionStatus
 
 _jmeter_slots: Optional[asyncio.Semaphore] = None
+_slot_held = contextvars.ContextVar('jmeter_slot_held', default=False)
+PID_FILE = 'jmeter.pid'  # Next to a local run's results while its JMeter is alive.
 
 
-async def _acquire_jmeter_slot() -> asyncio.Semaphore:
-    """Concurrent JMeter runs skew each other's numbers; wait for a free slot."""
+class _NoSlot:
+    """Nothing to give back: the caller's own queue already holds the slot, or the run needs none."""
+    @staticmethod
+    def release():
+        pass
+
+
+def _slots() -> asyncio.Semaphore:
     global _jmeter_slots
     if _jmeter_slots is None:
-        _jmeter_slots = asyncio.Semaphore(settings.RESOURCE_MAX_CONCURRENT_TESTS)
+        _jmeter_slots = asyncio.Semaphore(max(1, settings.RESOURCE_MAX_CONCURRENT_TESTS))
+    return _jmeter_slots
+
+
+async def _acquire_jmeter_slot():
+    """Concurrent JMeter runs skew each other's numbers; wait for a free slot."""
+    if _slot_held.get():
+        return _NoSlot
+    slots = _slots()
     try:
-        await asyncio.wait_for(_jmeter_slots.acquire(), timeout=settings.RESOURCE_MAX_WAIT_SECONDS)
+        await asyncio.wait_for(slots.acquire(), timeout=settings.RESOURCE_MAX_WAIT_SECONDS)
     except asyncio.TimeoutError:
         raise RuntimeError(f'JMeter concurrency limit ({settings.RESOURCE_MAX_CONCURRENT_TESTS}) reached') from None
-    return _jmeter_slots
+    return slots
+
+
+@asynccontextmanager
+async def queued_slot():
+    """Wait in line for a JMeter slot, however long, and hold it for the executor to use.
+
+    The lifecycle queues here before it marks a run as running, so a run waiting for another one
+    shows as waiting, with no clock started, instead of failing after RESOURCE_MAX_WAIT_SECONDS.
+    """
+    slots = _slots()
+    await slots.acquire()
+    token = _slot_held.set(True)
+    try:
+        yield
+    finally:
+        _slot_held.reset(token)
+        slots.release()
+
+
+def _record_process(report_dir: str, pid: int):
+    """Which process is this run's JMeter, so a backend that restarts can still stop it."""
+    try:
+        started = psutil.Process(pid).create_time()
+        with open(os.path.join(report_dir, PID_FILE), 'w', encoding='ascii') as stream:
+            json.dump({'pid': pid, 'started': started}, stream)
+    except (OSError, psutil.Error) as error:
+        logger.warning('Could not record the JMeter process of %s: %s', report_dir, error)
+
+
+def _forget_process(report_dir: str):
+    try:
+        os.remove(os.path.join(report_dir, PID_FILE))
+    except OSError:
+        pass
+
+
+def stop_recorded_process(report_dir: str) -> bool:
+    """Stop the JMeter a previous backend left running for this run. True when one was stopped.
+
+    A backend that is killed (not shut down) cannot stop its runs, and a local JMeter then keeps
+    sending load with nothing able to cancel it. The start time recorded with the process ID tells
+    this JMeter from an unrelated process that was later given the same ID.
+    """
+    path = os.path.join(report_dir or '', PID_FILE)
+    try:
+        with open(path, encoding='ascii') as stream:
+            recorded = json.load(stream)
+        process = psutil.Process(int(recorded['pid']))
+        if abs(process.create_time() - float(recorded['started'])) > 1:
+            return False
+        for child in process.children(recursive=True):
+            child.kill()
+        process.kill()
+        process.wait(timeout=10)
+        return True
+    except (OSError, ValueError, KeyError, TypeError, psutil.NoSuchProcess):
+        return False
+    except psutil.Error as error:
+        logger.warning('Could not stop the JMeter left running in %s: %s', report_dir, error)
+        return False
+    finally:
+        _forget_process(report_dir or '')
 
 def jvm_environment() -> dict:
     """HEAP, GC_ALGO and JVM_ARGS for JMeter's JVM in local mode.
@@ -229,7 +310,9 @@ class JMeterExecutor:
         self._running_processes[execution_id] = entry
         monitor = None
         try:
-            slots = await _acquire_jmeter_slot()
+            # A trial run sends each request once: it skews nothing, and waiting behind a long run
+            # would make the editor's "try it" useless while that run lasts.
+            slots = _NoSlot if trial else await _acquire_jmeter_slot()
             try:
                 if any(item.get('cleanup_failed') for item in self._running_processes.values()):
                     raise RuntimeError('Previous execution cleanup is incomplete')
@@ -292,6 +375,7 @@ class JMeterExecutor:
                 self._running_processes.pop(execution_id, None)
                 if entry.get('console'):
                     entry['console'].close()
+                _forget_process(report_dir)
         return info
 
     def _start_process(self, cmd: list, execution_id: str, flag_file: str) -> int:
@@ -340,6 +424,8 @@ class JMeterExecutor:
             raise
         entry.update(process=process, pid=process.pid, flag_file=flag_file, console=console,
                      owned_process_group=self.system != 'Windows')
+        if not entry.get('container_name'):  # Containers left behind are found by their label instead.
+            _record_process(os.path.dirname(flag_file), process.pid)
         return process.pid
 
     @staticmethod

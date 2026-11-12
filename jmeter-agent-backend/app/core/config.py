@@ -61,7 +61,21 @@ class Settings(BaseSettings):
     ALLOWED_HOSTS: List[str] = ["localhost", "127.0.0.1", "::1"]
 
     # Database
+    # A relative SQLite path is taken from the backend folder, wherever the backend was started from.
     DATABASE_URL: str = "sqlite+aiosqlite:///./jmeter_agent.db"
+
+    @field_validator('DATABASE_URL')
+    @classmethod
+    def _database_in_backend_folder(cls, url: str) -> str:
+        # Taken from the working directory, a start from another folder silently opened a new, empty database.
+        for prefix in ('sqlite+aiosqlite:///', 'sqlite:///'):
+            if url.startswith(prefix):
+                path, mark, query = url[len(prefix):].partition('?')
+                if path and not path.startswith(':') and not os.path.isabs(path) and not path.startswith('/'):
+                    backend = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                    path = os.path.normpath(os.path.join(backend, path)).replace(os.sep, '/')
+                    return prefix + path + mark + query
+        return url
 
     # Browser origins allowed to call the local API
     CORS_ORIGINS: List[str] = ["http://localhost:5173", "http://127.0.0.1:5173",
@@ -127,7 +141,9 @@ class Settings(BaseSettings):
     RESOURCE_MEMORY_THRESHOLD: float = 85.0    # Memory usage % — above this, tests wait
     RESOURCE_COOLDOWN_SECONDS: float = 10.0    # Minimum gap between consecutive tests
     RESOURCE_MAX_WAIT_SECONDS: float = 300.0   # Max time to wait for resources to free up
-    RESOURCE_MAX_CONCURRENT_TESTS: int = 2     # Max number of JMeter tests running simultaneously
+    # JMeter runs at the same time. One: runs on the same machine skew each other's numbers, so a
+    # second run waits its turn. Raise it only when the runs must overlap and the machine has room.
+    RESOURCE_MAX_CONCURRENT_TESTS: int = Field(default=1, ge=1)
 
     # Runs kept whole in memory (summary, AI report); the rest are read back from the database when opened.
     EXECUTION_CACHE_SIZE: int = Field(default=256, ge=1)

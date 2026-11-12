@@ -4,7 +4,6 @@ import heapq
 import time
 import logging
 from typing import Any, Optional
-from array import array
 from collections import Counter, defaultdict
 
 from app.models.schemas import DetailedTestSummary, ErrorDetail, TimelineSegment, PerformanceTrend
@@ -79,11 +78,30 @@ class ReportParser:
 
     def _parse_csv_jtl(self, file) -> DetailedTestSummary:
         """解析CSV格式的JTL，生成详细的分析报告数据"""
+        return self._summarize(file, self._csv_rows)
+
+    def _parse_xml_jtl(self, file) -> DetailedTestSummary:
+        """解析XML格式的JTL；流式读取，处理完的元素立即释放。"""
+        return self._summarize(file, self._xml_rows)
+
+    def _summarize(self, file, rows) -> DetailedTestSummary:
+        acc = _Accumulator()
+        for row in rows(file):
+            acc.add(**row)
+        if not acc.has_samples:
+            return self._empty_summary()
+        if acc.wants_second_pass():
+            # The timeline and the steady window need the run's start, length and peak: known only now.
+            file.seek(0)
+            for row in rows(file):
+                acc.add_again(**row)
+        return acc.summary(self)
+
+    def _csv_rows(self, file):
         # restval="" prevents None values in DictReader when rows are incomplete
         # (JMeter may still be flushing the CSV buffer when we start reading)
-        acc = _Accumulator()
         for row in csv.DictReader(file, restval=""):
-            acc.add(
+            yield dict(
                 elapsed=self._safe_int(row.get("elapsed")),
                 label=self._safe_str(row.get("label"), "Unnamed") or "Unnamed",
                 success=self._safe_str(row.get("success"), "true").lower() == "true",
@@ -97,13 +115,10 @@ class ReportParser:
                 latency=self._safe_int(row.get("Latency")),
                 threads=self._safe_int(row.get("allThreads")),
             )
-        return acc.summary(self) if acc.has_samples else self._empty_summary()
 
-    def _parse_xml_jtl(self, file) -> DetailedTestSummary:
-        """解析XML格式的JTL；流式读取，处理完的元素立即释放。"""
+    def _xml_rows(self, file):
         import xml.etree.ElementTree as ET
 
-        acc = _Accumulator()
         depth = 0
         for event, sample in ET.iterparse(file, events=("start", "end")):
             if sample.tag not in {"sample", "httpSample", "sampleResult"}:
@@ -116,7 +131,7 @@ class ReportParser:
                 continue  # A nested sub-result is part of its parent's elapsed time.
             failure = next(filter(None, (item.findtext("failureMessage")
                                          for item in sample.iter("assertionResult"))), "")
-            acc.add(
+            yield dict(
                 elapsed=self._safe_int(sample.get("t")),
                 label=sample.get("lb", "") or "Unnamed",
                 success=sample.get("s", "true") == "true",
@@ -131,7 +146,6 @@ class ReportParser:
                 threads=self._safe_int(sample.get("na")),
             )
             sample.clear()
-        return acc.summary(self) if acc.has_samples else self._empty_summary()
 
     def _analyze_trend(self, segments: list) -> Optional[PerformanceTrend]:
         """分析性能趋势"""
@@ -352,9 +366,14 @@ def _latency_stats(parser, histogram: Counter, total: int, seconds: float) -> di
 class _Accumulator:
     """Streaming JTL aggregation shared by the CSV and XML readers.
 
-    Response times are integer milliseconds, so percentiles come exactly from
-    histograms whose size is the number of distinct values, not samples. Only
-    timeline inputs are kept per sample, in compact typed arrays.
+    Nothing is kept per sample, so memory follows the run's length in seconds and its distinct
+    response times, not its number of requests (per-sample arrays used to cost 29 bytes a request:
+    gigabytes for a long soak test). Response times are integer milliseconds, so percentiles come
+    exactly from histograms.
+
+    When the run started, how long it lasted and when it was at peak concurrency are only known once
+    the whole file has been read, so the timeline and the steady window are built by a second read:
+    ``wants_second_pass``, then ``add_again`` for every row.
     """
 
     def __init__(self):
@@ -366,9 +385,17 @@ class _Accumulator:
         self.bands = dict.fromkeys((name for name, _ in _RT_BANDS), 0)
         self.labels = {}
         self.error_details = defaultdict(lambda: {"count": 0, "messages": [], "labels": Counter()})
-        self.ts, self.elapsed, self.ok = array("q"), array("i"), array("b")
-        self.connect, self.latency, self.threads = array("i"), array("i"), array("i")
-        self.label_index, self.label_names = array("i"), []
+        # Samples with a timestamp: what the timeline and the diagnostics are built from.
+        self.timed = 0
+        self.first = self.last_end = None
+        self.width = 0  # Seconds per timeline segment, chosen from the run's duration.
+        self.buckets = {}  # segment -> count, sum, max, errors, connect, latency, threads, wait
+        self.timed_elapsed = self.connect_sum = self.latency_sum = self.wait_sum = self.new_connections = 0
+        self.peak = 0
+        self.peak_start = self.peak_end = None  # First and last request sent at peak concurrency.
+        self.slowest = []  # Min-heap of the _SLOWEST_SAMPLES slowest requests.
+        self.steady_window = None
+        self.steady_groups = None
 
     @property
     def has_samples(self) -> bool:
@@ -394,9 +421,7 @@ class _Accumulator:
         stats = self.labels.get(label)
         if stats is None:
             stats = self.labels[label] = {"count": 0, "errors": 0, "sum": 0, "received": 0, "histogram": Counter(),
-                                          "failed_sum": 0, "failed_histogram": Counter(),
-                                          "index": len(self.label_names)}
-            self.label_names.append(label)
+                                          "failed_sum": 0, "failed_histogram": Counter()}
         stats["count"] += 1
         stats["sum"] += elapsed
         stats["received"] += received
@@ -421,41 +446,44 @@ class _Accumulator:
         self.received += received
         self.sent += sent
         if ts > 0:
-            self.ts.append(ts)
-            self.elapsed.append(elapsed)
-            self.ok.append(1 if success else 0)
-            self.connect.append(connect)
-            self.latency.append(latency)
-            self.threads.append(threads)
-            self.label_index.append(stats["index"])
+            self._add_timed(ts, elapsed, success, connect, latency, threads, label)
+
+    def _add_timed(self, ts, elapsed, success, connect, latency, threads, label):
+        if self.first is None:
+            self.first, self.last_end = ts, ts + max(elapsed, 0)
+        else:
+            self.first = min(self.first, ts)
+            self.last_end = max(self.last_end, ts + max(elapsed, 0))
+        wait = max(latency - connect, 0)
+        self.timed_elapsed += elapsed
+        self.connect_sum += connect
+        self.latency_sum += latency
+        self.wait_sum += wait
+        if connect > 0:
+            self.new_connections += 1
+        if threads > self.peak:
+            self.peak, self.peak_start, self.peak_end = threads, ts, ts
+        elif threads == self.peak and threads:
+            self.peak_start, self.peak_end = min(self.peak_start, ts), max(self.peak_end, ts)
+        # Slowest first; of equally slow requests the earliest, then the one read first.
+        entry = (elapsed, -ts, -self.timed, connect, wait, label, threads, success)
+        self.timed += 1
+        if len(self.slowest) < _SLOWEST_SAMPLES:
+            heapq.heappush(self.slowest, entry)
+        elif entry > self.slowest[0]:
+            heapq.heapreplace(self.slowest, entry)
+
+    def _duration(self) -> float:
+        return max((self.last_end - self.first) / 1000.0, 0.001) if self.timed else 1.0
 
     def _timeline(self):
         """Use the earliest start and latest end, independent of row order."""
-        if not self.ts:
+        if not self.timed:
             return 1.0, []
-        first = min(self.ts)
-        last_end = max(t + max(e, 0) for t, e in zip(self.ts, self.elapsed))
-        duration = max((last_end - first) / 1000.0, 0.001)
-        # Short runs need short segments: a 60 s test in 30 s buckets hides every event in it.
-        width = next((w for w in _BUCKET_SECONDS if duration / w <= _MAX_SEGMENTS), _BUCKET_SECONDS[-1])
-        buckets = {}
-        for t, e, ok, connect, latency, threads in zip(self.ts, self.elapsed, self.ok, self.connect,
-                                                       self.latency, self.threads):
-            index = (t - first) // (width * 1000)
-            bucket = buckets.get(index)
-            if bucket is None:
-                bucket = buckets[index] = [0, 0, 0, 0, 0, 0, 0, 0]  # count, sum, max, errors, connect, latency, threads, wait
-            bucket[0] += 1
-            bucket[1] += e
-            bucket[2] = max(bucket[2], e)
-            bucket[3] += 0 if ok else 1
-            bucket[4] += connect
-            bucket[5] += latency
-            bucket[6] = max(bucket[6], threads)
-            bucket[7] += max(latency - connect, 0)
+        duration, width = self._duration(), self.width
         segments = []
-        for index in sorted(buckets):
-            count, total, peak, errors, connect, latency, threads, wait = buckets[index]
+        for index in sorted(self.buckets):
+            count, total, peak, errors, connect, latency, threads, wait = self.buckets[index]
             start = index * width
             window = max(min(float(width), duration - start), 0.001)  # Tail buckets use their observed duration
             segments.append(TimelineSegment(
@@ -466,68 +494,97 @@ class _Accumulator:
                 avg_latency=round(latency / count, 2), avg_wait_time=round(wait / count, 2)))
         return duration, segments
 
-    def _steady(self, parser, peak: int, duration: float) -> tuple[Optional[dict], Optional[dict]]:
-        """The window at peak concurrency, and what the run measured inside it."""
-        if not peak:
-            return None, None
-        start = min(t for t, threads in zip(self.ts, self.threads) if threads == peak)
-        end = max(t for t, threads in zip(self.ts, self.threads) if threads == peak)
-        seconds = max((end - start) / 1000.0, 0.001)
-        if seconds < duration * _MIN_STEADY_SHARE:
-            return None, None
-        def collect(reused_only: bool):
-            overall, labels = [Counter(), 0], {}
-            samples = failures = 0
-            for t, elapsed, ok, index, connect in zip(self.ts, self.elapsed, self.ok, self.label_index, self.connect):
-                if not start <= t <= end or (reused_only and connect):
-                    continue
-                samples += 1
-                if not ok:
-                    failures += 1
-                    continue
-                for group in (overall, labels.setdefault(self.label_names[index], [Counter(), 0])):
-                    group[0][elapsed] += 1
-                    group[1] += elapsed
-            return overall, labels, samples, failures
+    def wants_second_pass(self) -> bool:
+        """Whether the file must be read again; call once every row has been added."""
+        wanted = self.transactions is not None and self.transactions.wants_second_pass()
+        if not self.timed:
+            return wanted
+        duration = self._duration()
+        # Short runs need short segments: a 60 s test in 30 s buckets hides every event in it.
+        self.width = next((w for w in _BUCKET_SECONDS if duration / w <= _MAX_SEGMENTS), _BUCKET_SECONDS[-1])
+        if self.peak:
+            seconds = max((self.peak_end - self.peak_start) / 1000.0, 0.001)
+            if seconds >= duration * _MIN_STEADY_SHARE:
+                self.steady_window = (self.peak_start, self.peak_end, seconds)
+                # Every request in the window, and only those on a connection already open.
+                self.steady_groups = {reused: {"overall": [Counter(), 0], "labels": {}, "samples": 0, "failures": 0}
+                                      for reused in (True, False)}
+        return True
 
+    def add_again(self, *, elapsed, label, success, message, ts, connect=0, latency=0, threads=0, **_):
+        if message.startswith(_TRANSACTION_MESSAGE):
+            if self.transactions is not None:
+                self.transactions.add_again(elapsed=elapsed, label=label, success=success, message="",
+                                            ts=ts, connect=connect, latency=latency, threads=threads)
+            return
+        if ts <= 0 or not self.width:
+            return
+        index = (ts - self.first) // (self.width * 1000)
+        bucket = self.buckets.get(index)
+        if bucket is None:
+            bucket = self.buckets[index] = [0, 0, 0, 0, 0, 0, 0, 0]
+        bucket[0] += 1
+        bucket[1] += elapsed
+        bucket[2] = max(bucket[2], elapsed)
+        bucket[3] += 0 if success else 1
+        bucket[4] += connect
+        bucket[5] += latency
+        bucket[6] = max(bucket[6], threads)
+        bucket[7] += max(latency - connect, 0)
+        if self.steady_window is None or not self.steady_window[0] <= ts <= self.steady_window[1]:
+            return
+        for reused_only, group in self.steady_groups.items():
+            if reused_only and connect:
+                continue
+            group["samples"] += 1
+            if not success:
+                group["failures"] += 1
+                continue
+            for target in (group["overall"], group["labels"].setdefault(label, [Counter(), 0])):
+                target[0][elapsed] += 1
+                target[1] += elapsed
+
+    def _steady(self, parser) -> tuple[Optional[dict], Optional[dict]]:
+        """The window at peak concurrency, and what the run measured inside it."""
+        if self.steady_window is None:
+            return None, None
+        start, end, seconds = self.steady_window
         # A new connection costs far more than the request it carries; the first request of a
         # late-starting user would otherwise set the steady P99. Without keep-alive none are reused.
-        overall, labels, samples, failures = collect(reused_only=True)
-        if samples < _MIN_STEADY_SAMPLES:
-            overall, labels, samples, failures = collect(reused_only=False)
-        if samples < _MIN_STEADY_SAMPLES:
+        group = self.steady_groups[True]
+        if group["samples"] < _MIN_STEADY_SAMPLES:
+            group = self.steady_groups[False]
+        if group["samples"] < _MIN_STEADY_SAMPLES:
             return None, None
-        first = min(self.ts)
-        window = {"start_s": round((start - first) / 1000.0, 1), "end_s": round((end - first) / 1000.0, 1),
+        window = {"start_s": round((start - self.first) / 1000.0, 1), "end_s": round((end - self.first) / 1000.0, 1),
                   "seconds": round(seconds, 1)}
-        stats = _latency_stats(parser, overall[0], overall[1], seconds)
-        stats["error_rate"] = round(failures / samples * 100, 2)
-        stats["labels"] = {name: _latency_stats(parser, group[0], group[1], seconds)
-                           for name, group in labels.items()}
+        stats = _latency_stats(parser, group["overall"][0], group["overall"][1], seconds)
+        stats["error_rate"] = round(group["failures"] / group["samples"] * 100, 2)
+        stats["labels"] = {name: _latency_stats(parser, values[0], values[1], seconds)
+                           for name, values in group["labels"].items()}
         return window, stats
 
     def _diagnostics(self, parser, duration: float) -> Optional[dict]:
-        if not self.ts:
+        if not self.timed:
             return None
-        count = len(self.ts)
-        peak = max(self.threads)
-        window, steady = self._steady(parser, peak, duration)
-        first = min(self.ts)
-        new_connections = sum(1 for c in self.connect if c > 0)
-        slowest = heapq.nlargest(_SLOWEST_SAMPLES, range(count), key=lambda i: (self.elapsed[i], -self.ts[i]))
+        count = self.timed
+        window, steady = self._steady(parser)
         return {
-            "load": {"peak_threads": peak or None, "duration_seconds": round(duration, 1), "steady_window": window},
+            "load": {"peak_threads": self.peak or None, "duration_seconds": round(duration, 1),
+                     "steady_window": window},
             "steady": steady,
-            "timing": {"avg_connect_time": round(sum(self.connect) / count, 2),
-                       "avg_latency": round(sum(self.latency) / count, 2),
-                       "avg_wait_time": round(sum(max(l - c, 0) for l, c in zip(self.latency, self.connect)) / count, 2),
-                       "avg_download_time": round((sum(self.elapsed) - sum(self.latency)) / count, 2),
-                       "new_connections": new_connections,
-                       "avg_connect_when_new": round(sum(self.connect) / new_connections, 2) if new_connections else None},
-            "slowest": [{"offset_s": round((self.ts[i] - first) / 1000.0, 1), "elapsed": self.elapsed[i],
-                         "connect": self.connect[i], "wait": max(self.latency[i] - self.connect[i], 0),
-                         "label": self.label_names[self.label_index[i]], "threads": self.threads[i],
-                         "success": bool(self.ok[i])} for i in slowest],
+            "timing": {"avg_connect_time": round(self.connect_sum / count, 2),
+                       "avg_latency": round(self.latency_sum / count, 2),
+                       "avg_wait_time": round(self.wait_sum / count, 2),
+                       "avg_download_time": round((self.timed_elapsed - self.latency_sum) / count, 2),
+                       "new_connections": self.new_connections,
+                       "avg_connect_when_new": (round(self.connect_sum / self.new_connections, 2)
+                                                if self.new_connections else None)},
+            "slowest": [{"offset_s": round((-negative_ts - self.first) / 1000.0, 1), "elapsed": elapsed,
+                         "connect": connect, "wait": wait, "label": label, "threads": threads,
+                         "success": bool(success)}
+                        for elapsed, negative_ts, _, connect, wait, label, threads, success
+                        in sorted(self.slowest, reverse=True)],
         }
 
     def summary(self, parser) -> DetailedTestSummary:

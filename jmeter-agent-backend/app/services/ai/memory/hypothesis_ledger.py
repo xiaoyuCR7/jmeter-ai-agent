@@ -352,6 +352,14 @@ class HypothesisLedger(MemoryDatabase):
                         logger.warning('Skipping malformed hypothesis row: %s', type(error).__name__)
             return found
 
+    async def without_project(self) -> set:
+        """Runs with hypotheses recorded before projects were tracked."""
+        await self._ensure_table()
+        async with self._get_lock():
+            db = await self._get_db()
+            cursor = await db.execute("SELECT DISTINCT source_execution_id FROM hypotheses WHERE project_id = ''")
+            return {row[0] for row in await cursor.fetchall()}
+
     async def assign_project(self, source_execution_id: str, project_id: str) -> int:
         """Give hypotheses recorded before projects were tracked the project of the run they came from."""
         await self._ensure_table()

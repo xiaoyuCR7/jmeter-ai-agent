@@ -32,7 +32,7 @@ from app.services import experiments, notifications, post_run, report_retention
 from app.services.ai.adapters.factory import AIAdapterFactory
 from app.services.ai.memory import fact_ledger, hypothesis_ledger
 from app.services.execution_lifecycle import execution_lifecycle
-from app.services.jmeter import environment as run_environment, resource_monitor
+from app.services.jmeter import resource_monitor
 from app.services.storage import store
 
 logger = logging.getLogger(__name__)
@@ -74,11 +74,9 @@ async def lifespan(app: FastAPI):
         cleanup.push_async_callback(execution_lifecycle.shutdown)
         cleanup.push_async_callback(post_run.stop_reanalyses)
         cleanup.push_async_callback(experiments.stop_searches)
+        await execution_lifecycle.recover_abandoned()
         await post_run.recover_interrupted()
         await asyncio.to_thread(experiments.recover_searches)
-        # A run cut off by a restart never masked the secrets its copy of the plan carried.
-        for execution in list(store.executions.values()):
-            await asyncio.to_thread(run_environment.scrub, execution.jmx_path)
         # Older runs join project history in the background; reading their plans can take a while.
         backfill = asyncio.create_task(post_run.backfill_memory())
 

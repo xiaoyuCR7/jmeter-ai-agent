@@ -2,8 +2,11 @@
 
     python scripts/ci_gate.py --plan <test_plan_id> [--url http://127.0.0.1:8000] [--timeout 7200]
 
-The gate fails when a performance requirement fails or the run regressed against the active
-baseline; a run that did not complete is an error. Exit codes: 0 pass, 1 fail, 2 error or timeout.
+The gate fails when a performance requirement fails or cannot be evaluated, or the run regressed
+against the active baseline. It is an error when the run did not complete, when the machine running
+JMeter was saturated (the numbers are then its own), or when the project has neither requirements
+nor a baseline, so nothing was checked; --lenient accepts the last case, and a requirement that
+could not be evaluated, with a warning. Exit codes: 0 pass, 1 fail, 2 error or timeout.
 The access token comes from --token, the JMETER_AGENT_TOKEN variable, or the backend's
 .local_access_token file. The backend only listens on this machine, so run this on the machine
 that runs JMeter Agent (a self-hosted CI runner). Only the standard library is used.
@@ -50,6 +53,8 @@ def main(argv=None) -> int:
     parser.add_argument('--token', default='')
     parser.add_argument('--timeout', type=float, default=7200, help='Seconds to wait for the run and its report')
     parser.add_argument('--poll', type=float, default=10)
+    parser.add_argument('--lenient', action='store_true',
+                        help='Pass a run nothing was checked on, or with requirements that could not be evaluated')
     parser.add_argument('--approved-sha256', default='',
                         help='Approve a plan with scripts: the sha256 the first refusal printed')
     args = parser.parse_args(argv)
@@ -60,7 +65,8 @@ def main(argv=None) -> int:
         print(f"Started run {execution['id']}", flush=True)
         deadline = time.monotonic() + args.timeout
         while True:
-            result = call(args.url, key, 'GET', f"/executions/{execution['id']}/gate")
+            result = call(args.url, key, 'GET',
+                          f"/executions/{execution['id']}/gate" + ('?strict=false' if args.lenient else ''))
             if result.get('gate') != 'pending':
                 break
             if time.monotonic() > deadline:

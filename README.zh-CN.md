@@ -137,7 +137,7 @@ claude mcp add --transport http jmeter-agent http://127.0.0.1:8000/api/v1/mcp --
 python jmeter-agent-backend/scripts/ci_gate.py --plan <测试计划ID>
 ```
 
-脚本会启动这个计划，轮询 `GET /api/v1/executions/{id}/gate`，然后按结果退出：需求和基线都通过时退出码为 `0`；需求不达标或相对基线退化时为 `1`；运行没有完成或等待超时为 `2`。令牌按 `--token`、环境变量 `JMETER_AGENT_TOKEN`、`.local_access_token` 文件的顺序读取。如果计划里含脚本，第一次会被拒绝，并打印出需要批准的 `sha256`，确认可信后用 `--approved-sha256` 传入。
+脚本会启动这个计划，轮询 `GET /api/v1/executions/{id}/gate`，然后按结果退出：需求和基线都通过时退出码为 `0`；需求不达标、需求无法判定或相对基线退化时为 `1`；运行没有完成或等待超时为 `2`。压力机在运行期间饱和（数字反映的是压力机而不是被测系统）也是 `2`；项目既没有性能需求也没有基线时同样是 `2`，因为什么都没检查。加 `--lenient` 可以把后一种情况和“需求无法判定”降为警告。令牌按 `--token`、环境变量 `JMETER_AGENT_TOKEN`、`.local_access_token` 文件的顺序读取。如果计划里含脚本，第一次会被拒绝，并打印出需要批准的 `sha256`，确认可信后用 `--approved-sha256` 传入。
 
 ## 评估 AI 报告
 

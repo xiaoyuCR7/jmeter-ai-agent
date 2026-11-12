@@ -383,3 +383,25 @@ def test_memory_shares_the_app_database_file(monkeypatch):
     assert memory_db_path() == os.path.abspath('./data/app.db')
     monkeypatch.setattr(settings, 'DATABASE_URL', 'postgresql+asyncpg://db/app')
     assert memory_db_path() == os.path.join(settings.BASE_DIR, 'memory.db')
+
+
+@pytest.mark.asyncio
+async def test_a_ledger_cancelled_while_opening_leaves_no_thread_behind(tmp_path):
+    """Each connection has a non-daemon thread; one left running kept the backend from exiting."""
+    import asyncio
+    import threading
+    from app.services.ai.memory.fact_ledger import FactLedger
+    before = set(threading.enumerate())
+    for delay in (0, 0.001, 0.005, 0.02):
+        ledger = FactLedger(str(tmp_path / f'facts-{delay}.db'))
+        task = asyncio.create_task(ledger.without_project())
+        await asyncio.sleep(delay)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await ledger.close()
+    for _ in range(100):
+        left = [t for t in set(threading.enumerate()) - before if t.is_alive() and not t.daemon]
+        if not left:
+            break
+        await asyncio.sleep(0.02)
+    assert not left

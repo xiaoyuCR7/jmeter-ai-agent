@@ -4,7 +4,7 @@
       <el-select v-model="projectId" :placeholder="L('全部项目', 'All projects')" clearable class="filter" @change="syncQuery">
         <el-option v-for="p in projects" :key="p.id" :label="p.name" :value="p.id" />
       </el-select>
-      <el-select v-model="status" :placeholder="L('全部状态', 'All statuses')" clearable class="filter">
+      <el-select v-model="status" :placeholder="L('全部状态', 'All statuses')" clearable class="filter" @change="firstPage">
         <el-option v-for="s in STATUSES" :key="s" :label="t(`executions.status.${s}`)" :value="s" />
       </el-select>
       <span class="count num">{{ L(`共 ${total} 次执行`, `${total} runs`) }}</span>
@@ -14,7 +14,7 @@
     <RunningRuns :executions="executions" />
 
     <section class="panel table-panel">
-      <el-table :data="rows" v-loading="loading && !executions.length" class="clickable"
+      <el-table :data="executions" v-loading="loading && !executions.length" class="clickable"
         :empty-text="L('还没有执行记录，在项目的测试计划里点「运行」', 'No runs yet. Use Run on a test plan.')"
         @row-click="(row: any) => OPENABLE.includes(row.status) && openReport(row.id)">
         <el-table-column :label="L('开始时间', 'Started')" width="172">
@@ -83,6 +83,8 @@
           </template>
         </el-table-column>
       </el-table>
+      <el-pagination v-if="total > PAGE_SIZE" v-model:current-page="page" class="pager" layout="prev, pager, next"
+        :page-size="PAGE_SIZE" :total="total" @current-change="load" />
     </section>
 
     <el-dialog v-model="logVisible" :title="L('执行日志', 'Run log')" width="800px" style="max-width: calc(100vw - 32px)">
@@ -92,7 +94,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { MoreFilled, Refresh } from '@element-plus/icons-vue'
@@ -107,6 +109,7 @@ const STATUSES = ['running', 'pending', 'completed', 'failed', 'cancelled']
 // A running run opens its live view; a finished one its report.
 const OPENABLE = ['running', 'pending', 'completed']
 const POLL_MS = 5000
+const PAGE_SIZE = 50
 
 const route = useRoute()
 const router = useRouter()
@@ -118,26 +121,37 @@ const total = ref(0)
 const loading = ref(false)
 const projectId = ref<string>((route.query.projectId as string) || '')
 const status = ref('')
+const page = ref(1)
 const logVisible = ref(false)
 const logContent = ref('')
 let pollTimer: ReturnType<typeof setTimeout> | undefined
 let disposed = false
 
-const rows = computed(() => (status.value ? executions.value.filter(e => e.status === status.value) : executions.value))
-
+// The server filters and pages: the list used to hold only the newest 50 runs, with no way to the rest.
 async function load() {
-  const requested = projectId.value
+  const requested = `${projectId.value}|${status.value}|${page.value}`
+  const current = () => requested === `${projectId.value}|${status.value}|${page.value}`
   loading.value = true
   try {
-    const res = await api.getExecutions(requested || undefined)
-    if (requested !== projectId.value) return
+    const res = await api.getExecutions(projectId.value || undefined, {
+      ...(status.value ? { status: status.value } : {}), offset: (page.value - 1) * PAGE_SIZE, limit: PAGE_SIZE,
+    })
+    if (!current()) return
     executions.value = res.data?.executions || []
     total.value = res.data?.total ?? executions.value.length
+    // The last page emptied (runs deleted, or the filter narrowed): show the page that is now last.
+    const lastPage = Math.max(1, Math.ceil(total.value / PAGE_SIZE))
+    if (page.value > lastPage) { page.value = lastPage; await load() }
   } catch {
-    if (requested === projectId.value) executions.value = []
+    if (current()) executions.value = []
   } finally {
     loading.value = false
   }
+}
+
+function firstPage() {
+  page.value = 1
+  load()
 }
 
 // Poll only while something is still running, so an idle page stays quiet.
@@ -151,7 +165,7 @@ function schedulePoll() {
 
 function syncQuery() {
   router.replace({ query: projectId.value ? { projectId: projectId.value } : {} })
-  load()
+  firstPage()
 }
 
 const openReport = (id: string) => router.push(`/executions/${id}`)
@@ -214,6 +228,7 @@ onUnmounted(() => {
 }
 
 .table-panel { padding: 0; overflow: hidden; }
+.pager { justify-content: flex-end; padding: 10px 12px; border-top: 1px solid var(--app-border); }
 .table-panel :deep(th.el-table__cell) { border-radius: 0; } // Flush with the panel, whose own corners clip it.
 .plan { font-weight: 500; color: var(--app-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sub { font-size: 12px; color: var(--app-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

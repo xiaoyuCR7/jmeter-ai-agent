@@ -209,7 +209,7 @@ async def test_execution_list_rows_carry_plan_name_and_requirement_verdict(api, 
         'pending': run('pending', None, None),
     })
 
-    rows = (await list_executions(project_id='shop', offset=0, limit=50))['executions']
+    rows = (await list_executions(project_id='shop', status=None, offset=0, limit=50))['executions']
     assert [r['id'] for r in rows] == ['new', 'old', 'pending']
     assert rows[0]['test_plan_name'] == 'Checkout load' and rows[0]['project_name'] == 'Shop'
     assert rows[0]['requirements']['verdict'] == 'fail' and rows[1]['requirements']['verdict'] == 'pass'

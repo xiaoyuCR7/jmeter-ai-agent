@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import uuid
+from contextlib import AsyncExitStack
 from datetime import datetime
 from pathlib import Path
 from app.core.errors import ServiceError
@@ -24,7 +25,7 @@ from app.models.schemas import (
 )
 from app.services.db_store import db_store
 from app.services.storage import store
-from app.services.jmeter.executor import get_executor
+from app.services.jmeter.executor import get_executor, queued_slot, stop_recorded_process
 from app.services.jmeter import environment as environment_for_run, jmx_lint
 from app.services.jmeter.environment import ProductionRunNeedsConfirmation
 from app.services.jmeter.script_risk import ScriptApprovalRequired, content_hash, scan as scan_scripts
@@ -86,6 +87,7 @@ TERMINAL = {TestExecutionStatus.COMPLETED, TestExecutionStatus.FAILED, TestExecu
 # failed or cancelled), with its summary when the report parsed; sent once per run.
 # analysis_completed: emitted by whoever ran the post-run AI analysis.
 EVENTS = ('started', 'finished', 'analysis_completed')
+FINISHED_REMEMBERED = 2000  # Far more runs than can be ending at once.
 
 
 def _planned_load(jmx_path: str) -> tuple:
@@ -159,7 +161,7 @@ class ExecutionLifecycle:
         self._executors = {}
         self._prepared = set()
         self._listeners = {event: [] for event in EVENTS}
-        self._finished = set()
+        self._finished = {}  # Runs whose end was announced, newest last; only the recent ones are kept.
         self._post_run = None
         self._guard_reasons = {}  # execution_id -> why the run guard stopped it
 
@@ -188,7 +190,9 @@ class ExecutionLifecycle:
         if event == 'finished':
             if execution.status not in TERMINAL or execution.id in self._finished:
                 return
-            self._finished.add(execution.id)
+            self._finished[execution.id] = True
+            while len(self._finished) > FINISHED_REMEMBERED:
+                del self._finished[next(iter(self._finished))]
         for handler in list(self._listeners[event]):
             try:
                 await handler(execution.model_copy(deep=True))
@@ -200,6 +204,37 @@ class ExecutionLifecycle:
         if self._tasks or self._executors or self._prepared:
             raise RuntimeError('Cannot restart execution lifecycle while work remains')
         self._closed = False
+
+    async def recover_abandoned(self) -> int:
+        """End the runs a previous backend left unfinished; call at startup, before any run is admitted.
+
+        A backend that was killed (stop.bat, a crash, a closed window) never recorded how its runs
+        ended: they stayed "running" for ever, their project could not be deleted, and in local mode
+        their JMeter could go on sending load. This stops that JMeter and records the run as failed.
+        """
+        recovered = 0
+        for light in list(store.executions.values()):
+            if light.status in TERMINAL or light.id in self._tasks:
+                continue
+            execution = (store.get_execution(light.id) or light).model_copy(deep=True)
+            stopped = await asyncio.to_thread(stop_recorded_process, execution.report_dir)
+            # The run never masked the secrets its copy of the plan carried.
+            await asyncio.to_thread(environment_for_run.scrub, execution.jmx_path)
+            execution.status = TestExecutionStatus.FAILED
+            execution.end_time = datetime.now()
+            execution.error_message = tr('后端在这次运行结束前停止了，运行被中断',
+                                         'The backend stopped before this run ended; the run was cut off')
+            if execution.report_status in ('pending', 'running'):
+                execution.report_status = 'skipped'
+            try:
+                await persist_execution(execution)
+                recovered += 1
+            except Exception as error:
+                logger.warning('Could not close abandoned run %s: %s', execution.id, error)
+                continue
+            logger.warning('Run %s was left unfinished by a previous backend; recorded as failed%s',
+                           execution.id, ' and its JMeter stopped' if stopped else '')
+        return recovered
 
     async def _persist_owned_state(self, execution):
         """An already owned process must record cleanup even after user revocation.
@@ -412,9 +447,14 @@ class ExecutionLifecycle:
             raise ValueError(f'Execution already running: {execution_id}')
         self._tasks[execution_id] = current
         execution = execution.model_copy(deep=True)
+        slot = AsyncExitStack()
         try:
             if before_execute:
                 await before_execute(execution)
+            if execution.status != TestExecutionStatus.CANCELLED:
+                # In line behind the runs already going, still "pending": the clock starts with JMeter.
+                # Before the machine check below, which the run ahead would otherwise fail.
+                await slot.enter_async_context(queued_slot())
             if wait_for_resources and execution.status != TestExecutionStatus.CANCELLED:
                 refused = await get_scheduler().hold_until_ready()
                 if refused:
@@ -462,6 +502,7 @@ class ExecutionLifecycle:
                 live_stats.finish(execution_id)
                 machine = await sampler.stop()
                 get_scheduler().note_run_finished()
+                await slot.aclose()  # The next run may start; reading this one's results does not need the slot.
             # JMeter has read the plan; its copy need not hold the environment's secrets any longer.
             await asyncio.to_thread(environment_for_run.scrub, execution.jmx_path)
             for field in ('status', 'end_time', 'error_message'):
@@ -552,6 +593,7 @@ class ExecutionLifecycle:
             await self.emit('finished', execution)
             raise
         finally:
+            await slot.aclose()
             # Also when the run failed before or while JMeter ran.
             await asyncio.to_thread(environment_for_run.scrub, execution.jmx_path)
             self._prepared.discard(execution_id)

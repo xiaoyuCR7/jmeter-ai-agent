@@ -35,7 +35,7 @@ router = APIRouter()
 
 
 MAX_FOLLOW_UP_CONTEXT = 3  # Earlier answers a follow-up question can build on.
-_question_locks: dict[str, asyncio.Lock] = {}  # One answer saved at a time per run.
+_question_lock = asyncio.Lock()  # One answer saved at a time; saving is a quick write.
 
 
 # ===== Test Execution =====
@@ -68,12 +68,14 @@ async def execute_test_plan(
 @router.get("/executions", response_model=dict)
 async def list_executions(
     project_id: Optional[str] = Query(None, description="按项目过滤"),
+    status: Optional[TestExecutionStatus] = Query(None, description="按状态过滤"),
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
 ):
     """列出执行记录（新的在前），每行附带计划名、需求判定与 AI 分析状态，供执行列表直接展示。"""
     from app.services import requirements as requirements_service
-    execs = [e for e in store.executions.values() if not project_id or e.project_id == project_id]
+    execs = [e for e in store.executions.values()
+             if (not project_id or e.project_id == project_id) and (status is None or e.status == status)]
     execs.sort(key=lambda e: e.start_time or datetime.min, reverse=True)
     # The scan gives headline copies; the rows shown need the whole run (per-request numbers for the verdict).
     page = [store.get_execution(e.id) or e for e in execs[offset:offset + limit]]
@@ -120,10 +122,14 @@ async def list_executions(
 
 
 @router.get("/projects/{project_id}/executions", response_model=list)
-async def list_project_executions(project_id: str):
-    """列出指定项目下的执行记录"""
+async def list_project_executions(project_id: str, offset: int = Query(0, ge=0),
+                                  limit: int = Query(50, ge=1, le=200)):
+    """列出指定项目下的执行记录（新的在前，分页）"""
     await ensure_default_project()
-    return [store.get_execution(e.id) or e for e in store.executions.values() if e.project_id == project_id]
+    # A page at a time: every run of a project, whole, used to be read from the database and returned at once.
+    execs = sorted((e for e in store.executions.values() if e.project_id == project_id),
+                   key=lambda e: e.start_time or datetime.min, reverse=True)
+    return [store.get_execution(e.id) or e for e in execs[offset:offset + limit]]
 
 
 @router.get("/executions/{execution_id}", response_model=TestExecutionInfo)
@@ -347,7 +353,7 @@ async def _save_answer(execution_id: str, question: str, result, used: dict) -> 
     answer = {'question': question, 'answer': result.output, 'asked_at': datetime.now().isoformat(),
               'mismatches': validation.get('mismatches') or [],
               'corrected_from': (result.analysis or {}).get('corrected_from') or 0, 'usage': used}
-    async with _question_locks.setdefault(execution_id, asyncio.Lock()):
+    async with _question_lock:
         # Read again: the run may have been deleted or re-analysed while the model was answering.
         current = store.get_execution(execution_id)
         if current is None or current.ai_analysis is None or current.report_status == 'running':
